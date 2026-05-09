@@ -103,7 +103,7 @@ def generate_crw(
         n_individuals: int = 100, 
         n_steps: int = 100, 
         step_shape: float = 2.0, 
-        step_scale: float = 0.0005, 
+        step_scale: float = 0.005, 
         turning_kappa: float = 4.0, 
         start_lon: float = 0.0, 
         start_lat: float = 0.0, 
