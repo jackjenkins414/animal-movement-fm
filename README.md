@@ -1,7 +1,7 @@
 # animal-movement-fm
 Benchmarking deep learning architectures for animal movement prediction across species and ecological domains.
 
-ANU honours thesis (2026), Jack Jenkins.
+ANU honours thesis in machine learning (2026), Jack Jenkins.
 
 ## What this is
 
