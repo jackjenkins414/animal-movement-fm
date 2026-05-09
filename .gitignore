@@ -102,10 +102,10 @@ logs/
 *.log
 
 # --- Local data directory (if you keep one) ---
-data/
-!data/.gitkeep
-raw_data/
-processed_data/
+/data/
+!/data/.gitkeep
+/raw_data/
+/processed_data/
 
 # --- NCI / HPC outputs ---
 *.o[0-9]*
