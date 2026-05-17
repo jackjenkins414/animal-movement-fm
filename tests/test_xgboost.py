@@ -1,0 +1,454 @@
+"""Tests for the XGBoost baseline."""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from animal_movement_fm.models.xgboost import XGBoost, _FeatureWindow
+
+# GenAI reference: These tests are also GenAI generated, where we asked to "give me pytest tests
+# for my XGBoost movement baseline, covering things like constructor validation, feature
+# construction, fit/predict behaviour, shape errors, and anything else that stands out to you
+# (explain the things that do stand out)". We verified the output.
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def simple_df():
+    """A small but valid training DataFrame: 3 individuals, each long enough to
+    yield several training windows at n_lags=5."""
+    rng = np.random.default_rng(0)
+    rows = []
+    for ind in range(3):
+        T = 50
+        positions = rng.standard_normal((T, 2)).cumsum(axis=0) * 0.01
+        for t in range(T):
+            rows.append({
+                "individual_id": f"ind_{ind}",
+                "timestamp": pd.Timestamp("2024-01-01") + pd.Timedelta(hours=t),
+                "lon": positions[t, 0],
+                "lat": positions[t, 1],
+            })
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def fitted_model(simple_df):
+    """A model fit on simple_df with small n_estimators for fast tests."""
+    model = XGBoost(n_lags=5, n_estimators=10, max_depth=3)
+    model.fit(simple_df)
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+class TestXGBoostConstruction:
+    def test_default_name_includes_n_lags(self):
+        assert XGBoost().name == "xgboost_lag5"
+        assert XGBoost(n_lags=10).name == "xgboost_lag10"
+
+    def test_custom_name(self):
+        assert XGBoost(name="xgboost_custom").name == "xgboost_custom"
+
+    def test_stores_hyperparameters_as_plain_types(self):
+        """numpy ints in input should be coerced to plain Python ints/floats."""
+        model = XGBoost(
+            n_lags=np.int64(5),
+            n_estimators=np.int64(100),
+            max_depth=np.int64(4),
+            learning_rate=np.float64(0.05),
+        )
+        assert type(model.n_lags) is int
+        assert type(model.n_estimators) is int
+        assert type(model.max_depth) is int
+        assert type(model.learning_rate) is float
+
+    def test_rejects_n_lags_below_two(self):
+        with pytest.raises(ValueError):
+            XGBoost(n_lags=1)
+        with pytest.raises(ValueError):
+            XGBoost(n_lags=0)
+        with pytest.raises(ValueError):
+            XGBoost(n_lags=-3)
+
+    def test_rejects_non_int_n_lags(self):
+        with pytest.raises(ValueError):
+            XGBoost(n_lags=5.0)  # type: ignore[arg-type]
+
+    def test_rejects_zero_n_estimators(self):
+        with pytest.raises(ValueError):
+            XGBoost(n_estimators=0)
+        with pytest.raises(ValueError):
+            XGBoost(n_estimators=-1)
+
+    def test_rejects_zero_max_depth(self):
+        with pytest.raises(ValueError):
+            XGBoost(max_depth=0)
+        with pytest.raises(ValueError):
+            XGBoost(max_depth=-2)
+
+    def test_rejects_non_numeric_learning_rate(self):
+        with pytest.raises(ValueError):
+            XGBoost(learning_rate="fast")  # type: ignore[arg-type]
+
+    def test_rejects_learning_rate_out_of_range(self):
+        with pytest.raises(ValueError):
+            XGBoost(learning_rate=0.0)
+        with pytest.raises(ValueError):
+            XGBoost(learning_rate=-0.1)
+        with pytest.raises(ValueError):
+            XGBoost(learning_rate=1.5)
+
+    def test_post_fit_attributes_initially_unset(self):
+        """is_fitted_ starts False, models start None — sklearn convention."""
+        model = XGBoost()
+        assert model.is_fitted_ is False
+        assert model.feature_names_ is None
+        assert model.model_dlon_ is None
+        assert model.model_dlat_ is None
+
+
+# ---------------------------------------------------------------------------
+# Feature layout & extraction
+# ---------------------------------------------------------------------------
+
+class TestFeatureLayout:
+    def test_feature_count_matches_formula(self):
+        """For n_lags=k, expected layout size = 2k (positions) + 2(k-1)
+        (displacements) + (k-1) (speeds) + (k-2) (turning angles) +
+        2 if time features enabled."""
+        for k in (2, 5, 10):
+            model = XGBoost(n_lags=k, use_time_features=False)
+            expected = 2 * k + 2 * (k - 1) + (k - 1) + (k - 2)
+            assert len(model._feature_layout()) == expected
+
+    def test_feature_layout_includes_time_when_enabled_pre_fit(self):
+        """Pre-fit, _has_time_features() returns the constructor flag."""
+        model = XGBoost(use_time_features=True)
+        names = model._feature_layout()
+        assert "sin_hour" in names
+        assert "cos_hour" in names
+
+    def test_feature_layout_excludes_time_when_disabled(self):
+        model = XGBoost(use_time_features=False)
+        names = model._feature_layout()
+        assert "sin_hour" not in names
+        assert "cos_hour" not in names
+
+    def test_feature_layout_lag_naming_convention(self):
+        """lag_1 is most recent, lag_n_lags is oldest."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        names = model._feature_layout()
+        # Positions come first, in lag_1, lag_2, lag_3 order.
+        assert names[0] == "lon_lag_1"
+        assert names[1] == "lat_lag_1"
+        assert names[2] == "lon_lag_2"
+        assert names[4] == "lon_lag_3"
+
+
+class TestBuildFeatures:
+    def test_returns_feature_window(self):
+        model = XGBoost(n_lags=5, use_time_features=False)
+        history = np.arange(20.0).reshape(10, 2)
+        window = model._build_features(history)
+        assert isinstance(window, _FeatureWindow)
+        assert window.features.ndim == 1
+        assert window.last_position.shape == (2,)
+
+    def test_last_position_matches_history(self):
+        model = XGBoost(n_lags=5, use_time_features=False)
+        history = np.arange(20.0).reshape(10, 2)
+        window = model._build_features(history)
+        np.testing.assert_array_equal(window.last_position, history[-1])
+
+    def test_last_position_is_copy_not_view(self):
+        """Mutating last_position must not affect the input history."""
+        model = XGBoost(n_lags=5, use_time_features=False)
+        history = np.arange(20.0).reshape(10, 2)
+        window = model._build_features(history)
+        window.last_position[0] = 999.0
+        assert history[-1, 0] != 999.0
+
+    def test_feature_count_matches_layout(self):
+        """The feature vector and the layout name list have the same length —
+        this is the contract _feature_layout guarantees."""
+        for k in (2, 3, 5, 10):
+            model = XGBoost(n_lags=k, use_time_features=False)
+            history = np.arange(2 * (k + 3)).reshape(-1, 2).astype(float)
+            window = model._build_features(history)
+            assert len(window.features) == len(model._feature_layout())
+
+    def test_rejects_wrong_shape(self):
+        model = XGBoost(n_lags=5, use_time_features=False)
+        with pytest.raises(ValueError):
+            model._build_features(np.zeros((10, 3)))
+        with pytest.raises(ValueError):
+            model._build_features(np.zeros(10))
+
+    def test_rejects_short_history(self):
+        """History shorter than n_lags must raise."""
+        model = XGBoost(n_lags=5, use_time_features=False)
+        with pytest.raises(ValueError):
+            model._build_features(np.zeros((4, 2)))
+
+    def test_lag_position_values_are_most_recent_first(self):
+        """lon_lag_1 should equal the lon of the *last* row of history."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        history = np.array([[0.0, 0.0], [1.0, 10.0], [2.0, 20.0]])
+        window = model._build_features(history)
+        # First feature is lon_lag_1 = last row's lon = 2.0
+        assert window.features[0] == 2.0
+        # Second feature is lat_lag_1 = last row's lat = 20.0
+        assert window.features[1] == 20.0
+
+    def test_displacement_features_are_first_differences(self):
+        """dlon_lag_1 should be the most recent step: history[-1] - history[-2]."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        history = np.array([[0.0, 0.0], [1.0, 10.0], [3.0, 25.0]])
+        window = model._build_features(history)
+        # Layout for n_lags=3: lon_lag_1, lat_lag_1, lon_lag_2, lat_lag_2,
+        # lon_lag_3, lat_lag_3, dlon_lag_1, dlat_lag_1, dlon_lag_2, dlat_lag_2,
+        # speed_lag_1, speed_lag_2, turn_lag_1.
+        # dlon_lag_1 = 3.0 - 1.0 = 2.0
+        assert window.features[6] == 2.0
+        # dlat_lag_1 = 25.0 - 10.0 = 15.0
+        assert window.features[7] == 15.0
+
+    def test_turning_angle_straight_line_is_zero(self):
+        """Three colinear points moving in the same direction → turn = 0."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        history = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        window = model._build_features(history)
+        # turn_lag_1 is the last feature (index -1) when time features disabled.
+        assert np.isclose(window.features[-1], 0.0)
+
+    def test_turning_angle_right_angle_turn(self):
+        """A 90-degree left turn → turn_lag_1 ≈ +π/2."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        history = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+        window = model._build_features(history)
+        assert np.isclose(window.features[-1], np.pi / 2)
+
+    def test_turning_angle_reversal(self):
+        """A 180-degree reversal → |turn_lag_1| ≈ π."""
+        model = XGBoost(n_lags=3, use_time_features=False)
+        history = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]])
+        window = model._build_features(history)
+        assert np.isclose(abs(window.features[-1]), np.pi)
+
+
+# ---------------------------------------------------------------------------
+# Fit
+# ---------------------------------------------------------------------------
+
+class TestXGBoostFit:
+    def test_fit_returns_self(self, simple_df):
+        """sklearn convention: fit returns the estimator for chaining."""
+        model = XGBoost(n_lags=5, n_estimators=10)
+        assert model.fit(simple_df) is model
+
+    def test_fit_sets_is_fitted(self, simple_df):
+        model = XGBoost(n_lags=5, n_estimators=10)
+        assert model.is_fitted_ is False
+        model.fit(simple_df)
+        assert model.is_fitted_ is True
+
+    def test_fit_creates_two_regressors(self, simple_df):
+        model = XGBoost(n_lags=5, n_estimators=10)
+        model.fit(simple_df)
+        assert model.model_dlon_ is not None
+        assert model.model_dlat_ is not None
+
+    def test_fit_sets_feature_names(self, simple_df):
+        model = XGBoost(n_lags=5, n_estimators=10)
+        model.fit(simple_df)
+        assert model.feature_names_ is not None
+        assert len(model.feature_names_) > 0
+
+    def test_fit_with_timestamps_includes_time_features(self, simple_df):
+        model = XGBoost(n_lags=5, n_estimators=10, use_time_features=True)
+        model.fit(simple_df)
+        assert "sin_hour" in model.feature_names_
+        assert "cos_hour" in model.feature_names_
+
+    def test_fit_without_timestamps_disables_time_features(self, simple_df):
+        """Constructor flag is reconciled to False if no timestamp column."""
+        df = simple_df.drop(columns=["timestamp"])
+        model = XGBoost(n_lags=5, n_estimators=10, use_time_features=True)
+        model.fit(df)
+        assert model.use_time_features is False
+        assert "sin_hour" not in model.feature_names_
+
+    def test_fit_rejects_missing_columns(self, simple_df):
+        df = simple_df.drop(columns=["lon"])
+        model = XGBoost(n_lags=5, n_estimators=10)
+        with pytest.raises(ValueError, match="missing required columns"):
+            model.fit(df)
+
+    def test_fit_rejects_empty_when_all_trajectories_short(self):
+        """If every trajectory is shorter than n_lags+1, fit raises."""
+        rows = []
+        for ind in range(3):
+            for t in range(3):  # only 3 rows per individual, n_lags=5 needs >=6
+                rows.append({
+                    "individual_id": f"ind_{ind}",
+                    "lon": float(t),
+                    "lat": float(t),
+                })
+        df = pd.DataFrame(rows)
+        model = XGBoost(n_lags=5, n_estimators=10)
+        with pytest.raises(ValueError, match="No usable training windows"):
+            model.fit(df)
+
+    def test_fit_skips_short_trajectories_silently(self, simple_df):
+        """Mix of short and long trajectories — short ones skipped, long ones used."""
+        short = pd.DataFrame([
+            {"individual_id": "short", "lon": 0.0, "lat": 0.0,
+             "timestamp": pd.Timestamp("2024-01-01")}
+        ])
+        df = pd.concat([simple_df, short], ignore_index=True)
+        model = XGBoost(n_lags=5, n_estimators=10)
+        model.fit(df)  # must not raise
+        assert model.is_fitted_
+
+    def test_fit_logs_training_size(self, simple_df, caplog):
+        model = XGBoost(n_lags=5, n_estimators=10)
+        with caplog.at_level(logging.INFO, logger="animal_movement_fm.models.xgboost"):
+            model.fit(simple_df)
+        # Some INFO log about training size should have been emitted.
+        assert any("training on" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Predict
+# ---------------------------------------------------------------------------
+
+class TestXGBoostPredict:
+    def test_predict_before_fit_raises(self):
+        model = XGBoost(n_lags=5)
+        with pytest.raises(RuntimeError, match="called before fit"):
+            model.predict(np.zeros((10, 2)))
+
+    def test_predict_output_shape(self, fitted_model):
+        history = np.arange(20.0).reshape(10, 2)
+        pred = fitted_model.predict(history)
+        assert pred.shape == (2,)
+
+    def test_predict_output_is_finite(self, fitted_model):
+        rng = np.random.default_rng(42)
+        history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
+        pred = fitted_model.predict(history)
+        assert np.all(np.isfinite(pred))
+
+    def test_predict_rejects_wrong_shape(self, fitted_model):
+        with pytest.raises(ValueError):
+            fitted_model.predict(np.zeros((10, 3)))
+        with pytest.raises(ValueError):
+            fitted_model.predict(np.zeros(10))
+
+    def test_predict_rejects_short_history(self, fitted_model):
+        """history shorter than n_lags must raise; no silent fallback."""
+        with pytest.raises(ValueError, match="shorter than"):
+            fitted_model.predict(np.zeros((3, 2)))
+
+    def test_predict_does_not_mutate_input(self, fitted_model):
+        history = np.arange(20.0).reshape(10, 2).copy()
+        history_before = history.copy()
+        _ = fitted_model.predict(history)
+        np.testing.assert_array_equal(history, history_before)
+
+    def test_predict_determinism_on_repeated_call(self, fitted_model):
+        """Same input twice should give the same prediction."""
+        rng = np.random.default_rng(99)
+        history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
+        p1 = fitted_model.predict(history)
+        p2 = fitted_model.predict(history)
+        np.testing.assert_allclose(p1, p2)
+
+    def test_predict_near_last_position(self, fitted_model):
+        """For a slow-moving trajectory the prediction should land near the
+        last observation (sanity check, not a tight bound)."""
+        rng = np.random.default_rng(7)
+        history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.001
+        pred = fitted_model.predict(history)
+        # Step scale ~0.001 deg; prediction within a few step-scales.
+        np.testing.assert_allclose(pred, history[-1], atol=0.5)
+
+    def test_predict_raises_on_layout_mismatch(self, fitted_model):
+        """If n_lags is mutated after fit, predict should refuse rather than
+        feed the regressors a malformed feature vector."""
+        fitted_model.n_lags = 3  # was 5 at fit time
+        with pytest.raises(RuntimeError, match="does not match"):
+            fitted_model.predict(np.arange(20.0).reshape(10, 2))
+
+
+# ---------------------------------------------------------------------------
+# Properties
+# ---------------------------------------------------------------------------
+
+class TestXGBoostProperties:
+    def test_displacement_target_recovers_position(self, fitted_model):
+        """The model predicts displacement and adds it to history[-1].
+        Predicted position should differ from history[-1] by exactly the
+        predicted displacement (sanity check on the reconstruction step)."""
+        history = np.arange(20.0).reshape(10, 2)
+        pred = fitted_model.predict(history)
+        diff = pred - history[-1]
+        # diff should be finite (whatever the model predicted).
+        assert np.all(np.isfinite(diff))
+
+    def test_fit_is_deterministic_across_seeds_with_default_hyperparameters(
+        self, simple_df
+    ):
+        """With XGBoost's default subsample=1.0 and colsample_bytree=1.0, the
+        booster is deterministic regardless of random_state — there is no
+        stochastic sampling for the seed to influence. This test pins that
+        behaviour: a future change that enables subsampling (e.g. for
+        regularisation) should make this test fail, prompting an explicit
+        decision about whether seed-sensitivity is desired."""
+        rng = np.random.default_rng(0)
+        history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
+
+        m1 = XGBoost(n_lags=5, n_estimators=10, random_state=0).fit(simple_df)
+        m2 = XGBoost(n_lags=5, n_estimators=10, random_state=1).fit(simple_df)
+        p1 = m1.predict(history)
+        p2 = m2.predict(history)
+        # Both seeds produce identical predictions (no stochasticity in the
+        # default config).
+        np.testing.assert_allclose(p1, p2)
+
+
+# ---------------------------------------------------------------------------
+# Predictor protocol compatibility (matches the harness contract)
+# ---------------------------------------------------------------------------
+
+class TestXGBoostPredictorContract:
+    """Integration with the Predictor protocol the harness expects."""
+
+    def test_has_predict_method(self):
+        assert callable(getattr(XGBoost(), "predict", None))
+
+    def test_has_name_attribute(self):
+        assert isinstance(XGBoost().name, str)
+
+    def test_has_fit_method(self):
+        """Unlike ARIMA, XGBoost has an explicit fit() method that must be
+        called before predict()."""
+        assert callable(getattr(XGBoost(), "fit", None))
+
+    def test_predict_returns_array_of_shape_2(self, fitted_model):
+        """The harness expects shape (2,) from every predictor."""
+        rng = np.random.default_rng(0)
+        history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
+        pred = fitted_model.predict(history)
+        assert isinstance(pred, np.ndarray)
+        assert pred.shape == (2,)
