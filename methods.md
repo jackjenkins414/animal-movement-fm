@@ -42,3 +42,59 @@ Two zero-parameter baselines committed under `src/animal_movement_fm/models/`. P
 ## 2026-05-15: ARIMA baseline implemented
 
 ARIMA(p, d, q) baseline committed under `src/animal_movement_fm/models/arima.py` as the last classical step in the baseline ladder (persistence -> averaging -> ARIMA -> XGBoost -> LSTM -> transformer). The default order is (2, 0, 2) on the displacement series equivalent to ARIMA(2, 1, 2) on raw positions; the displacements are computed explicitly via `np.diff` rather than via the `d` parameter so the stationarity assumption is visible in the code. The two coordinate channels (delt lon, delt lat) are fit as independent univariate ARIMA models, which loses cross-coupling between axes (left it for now); this matches the simplicity of a reference baseline rather than aiming for the best classical model. The model fits at predict time on each sliding window rather than fit-then-store, so it sees exactly the same context length the deep learning baselines will see. Obviously this is rather wasteful but keeps the comparison honest. Fitting uses `statsmodels.tsa.arima.model.ARIMA` (state-space representation + Kalman-filter likelihood + numerical MLE); convergence failures, singular Hessians, and near-constant series fall back to persistence per channel with a logged warning. We also made 24 new tests (GenAI generated, referenced in the test file) covering construction, prediction, fallback behaviour, properties (translation invariance, determinism), and Predictor-protocol contract; full suite now at 82/82.
+
+## 2026-05-17: XGBoost baseline complete; full ladder benchmarked on synthetic data
+
+Implemented `src/animal_movement_fm/models/xgboost.py`. Approach follows Wijeyakulasuriya et al. (2020), "Machine learning for modeling animal movement", and used GenAI to assist in building some features of this mode. Following the paper, we used per-axis regressors (one XGBRegressor for Δlon, one for Δlat), hand-engineered tabular features (lag positions, lag displacements, speeds, turning angles), and global training across all trajectories in the train split. Differences from the reference are that we omit their behavioural-state-classification stage (would give XGBoost an information advantage relative to the LSTM rung), add explicit speed and turning-angle features, and a time-of-day sin/cos encoding, disabled in synthetic runs.
+
+### Configuration
+
+- `n_lags=5`, `n_estimators=200`, `max_depth=6`, `learning_rate=0.1`
+- `objective="reg:squarederror"`, `random_state=0`
+- Trained on per-individual 80/20 split; 16 individuals × 500 steps = 8000 rows for training, 4 individuals × 500 steps = 2000 rows for eval
+- Hyperparameters are reference-baseline defaults, not tuned. 
+
+### Results: full baseline ladder on synthetic data
+
+20 individuals × 500 steps per dataset, 80/20 per-individual split, context_length=24 (~1 day of hourly data), n_test_windows=1904 per model.
+
+**Brownian motion (sanity check,l persistence is Bayes-optimal):**
+
+| Model | Median (m) | Mean (m) | p99 (m) |
+|---|---:|---:|---:|
+| persistence    | **1316.3** | **1390.8** | **3221.8** |
+| averaging_k10  | 1370.1 | 1450.5 | 3303.7 |
+| xgboost_lag5   | 1350.5 | 1435.0 | 3478.0 |
+| arima_202      | 1503.3 | 1581.8 | 3683.8 |
+| averaging_k1   | 1820.8 | 1947.0 | 4527.2 |
+
+Persistence wins as theory requires. XGBoost feature importances on BM are near-uniform across all features (max 0.046, min 0.042 in top 10),  the correct footprint of a model failing to find structure that isn't there. Sanity check passes; the harness and predictors are behaving correctly.
+
+**Correlated random walk (linear-with-autoregression test):**
+
+| Model | Median (m) | Mean (m) | p99 (m) |
+|---|---:|---:|---:|
+| xgboost_lag5   | **707.3** | **837.6** | **3071.9** |
+| arima_202      | 846.0 | 1005.7 | 3266.0 |
+| averaging_k1   | 838.8 | 1008.7 | 3414.8 |
+| averaging_k10  | 872.9 | 1027.9 | 3299.5 |
+| persistence    | 941.2 | 1122.1 | 3781.0 |
+
+XGBoost wins uniformly across all percentiles (25% improvement on median, 19% on p99 vs persistence). Feature importances are dominated by`dlon_lag_1` and `dlat_lag_1` (~0.40 each, ~10× higher than other features), confirming the model has correctly identified the autoregressive structure that defines CRW. Error CDFs (see `results/plots/cdf_crw.png`) show XGBoost dominating uniformly, not just on average.
+
+**Switching CRW (regime-detection test):**
+
+| Model | Median (m) | Mean (m) | p99 (m) |
+|---|---:|---:|---:|
+| persistence    | **457.1** | 1232.8 | 6448.1 |
+| averaging_k1   | 551.5 | 1129.2 | 5634.1 |
+| xgboost_lag5   | 595.5 | **976.5** | **5031.8** |
+| arima_202      | 809.4 | 1233.8 | 5719.9 |
+| averaging_k10  | 908.7 | 1194.9 | 5627.1 |
+
+The bimodal-error signature (mean/median ≈ 2.7 for persistence, p99/median ≈ 14) shows up as predicted: foraging steps dominate the typical step (persistence wins median), but transit steps blow up the tail (persistence loses mean and p99 badly).
+
+XGBoost trims the long tail by 22% (p99: 5032 vs 6448) and improves mean by 21%. Feature importances on switching-CRW show the displacement
+features still dominant but with notable mass on `speed_lag_*`, `turn_lag_*`, and higher-order `dlat_lag_*`,  the *correct* footprint of a model trying to detect regime through indirect signals. The CDF (`results/plots/cdf_switching_crw.png`) shows the crossover explicitly: persistence wins below ~600m error (foraging regime), XGBoost wins above (transit regime). This is exactly the headroom the LSTM rung is expected to close: explicit state representation should compress the long tail substantially below 5032m.
+
+
