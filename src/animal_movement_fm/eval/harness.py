@@ -68,7 +68,7 @@ class Predictor(Protocol):
 # Sliding window iteration 
 # ------------------------------
 
-def _iter_windows(
+def iter_windows(
         trajectory: pd.DataFrame, 
         context_length: int, 
 ) -> "list[tuple[np.ndarray, pd.Timestamp, int]]":
@@ -170,7 +170,7 @@ def evaluate(
     iterator = tqdm(individuals, disable=not show_progress, desc="Evaluating") if show_progress else individuals
 
     for individual_id, traj in iterator: 
-        windows = _iter_windows(traj, context_length=context_length)
+        windows = iter_windows(traj, context_length=context_length)
 
         # Trajectory shorter than context length 
         if not windows: 
