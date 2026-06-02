@@ -97,4 +97,31 @@ The bimodal-error signature (mean/median ≈ 2.7 for persistence, p99/median ≈
 XGBoost trims the long tail by 22% (p99: 5032 vs 6448) and improves mean by 21%. Feature importances on switching-CRW show the displacement
 features still dominant but with notable mass on `speed_lag_*`, `turn_lag_*`, and higher-order `dlat_lag_*`,  the *correct* footprint of a model trying to detect regime through indirect signals. The CDF (`results/plots/cdf_switching_crw.png`) shows the crossover explicitly: persistence wins below ~600m error (foraging regime), XGBoost wins above (transit regime). This is exactly the headroom the LSTM rung is expected to close: explicit state representation should compress the long tail substantially below 5032m.
 
+## 2026-06-02: LSTM baseline complete; fifth rung benchmarked on synthetic data
 
+Implemented `src/animal_movement_fm/models/lstm.py`, the first model in the ladder that learns its own representation rather than reading off hand-engineered features, and the first trained-once-then-reloaded rather than fit inline. Architecture is a standard gated LSTM (`torch.nn.LSTM`) feeding a linear head that emits a 2 element displacement (Delta lon, Delta lat) added to the last position; predicting displacements keeps the target stationary, matching ARIMA and XGBoost. Window definition is delegated to the harness's `iter_windows` so the net trains on exactly the windows it is evaluated on, and inputs are standardised using train-split statistics stored on the model and reapplied identically at predict time. Like XGBoost it trains globally across all train trajectories; unlike XGBoost it is fit-then-store *with checkpoint persistence* (`save`/`from_checkpoint` round-trip weights + scaler stats + architecture), which is where the train on NCI / evaluate elsewhere separation the foundation model relies on first enters the ladder. 18 new tests (used GenAI to generate them, (referenced)). 
+
+### Configuration
+
+- `hidden_dim=64`, `num_layers=1`, `context_length=24` (matched to harness), `epochs=30`, `batch_size=64`, `lr=1e-3`, Adam, MSE loss
+- CPU, `torch.manual_seed(0)`; same 80/20 per-individual split as the rest of the ladder (n_test_windows=1904)
+- Reference-baseline defaults, not tuned
+
+### Results: LSTM vs the ladder
+
+| Dataset | Model | Median (m) | Mean (m) | p99 (m) |
+|---|---|---:|---:|---:|
+| brownian_motion | persistence | **1316.3** | **1390.8** | 3221.8 |
+| brownian_motion | lstm_h64_l1 | 1333.4 | 1421.8 | 3311.3 |
+| crw | lstm_h64_l1 | **642.5** | **820.2** | 3179.0 |
+| crw | xgboost_lag5 | 707.3 | 837.6 | **3071.9** |
+| switching_crw | persistence | **457.1** | 1232.8 | 6448.1 |
+| switching_crw | lstm_h64_l1 | 543.0 | **960.1** | 5061.2 |
+
+- **Brownian:** tied with persistence — correct, since independent increments leave nothing to learn; training loss bottomed out by epoch 2 and flatlined.
+- **CRW:** best of all six models, beating XGBoost and well clear of persistence; the learned representation extracts more than hand-engineered features on genuinely autoregressive data.
+- **Switching CRW:** best median and mean overall. Caveat: raw persistence keeps the lowest *median* (457 m), being near-unbeatable on slow foraging steps, but pays with the worst mean and p99; the LSTM trades a little median to compress the tail (p99 5061 vs 6448). Whether the transformer's attention closes the tail further is the next rung's test.
+
+### Note: OpenMP runtime conflict (macOS)
+
+torch + XGBoost in one process segfaults on Apple Silicon (`xgboost/data.py::_meta_from_numpy`); separate OpenMP runtimes. `KMP_DUPLICATE_LIB_OK=TRUE` does not help (governs Intel `libiomp`, not the `libomp` here); `OMP_NUM_THREADS=1` does, set at the top of the experiment script. Cleaner fix (shared OpenMP, or separate processes) deferred.
