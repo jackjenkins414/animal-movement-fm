@@ -27,7 +27,6 @@ MANIFEST
 venv/
 env/
 ENV/
-.python-version
 
 # --- Editors / IDE ---
 .vscode/
