@@ -14,6 +14,7 @@ Will add the DETAILS later (full in depth prompt/verification of correctness) bu
 for now I have this. 
 """
 
+import torch
 import logging
 import sys
 from pathlib import Path
@@ -57,6 +58,7 @@ MODEL_COLOURS = {
     "averaging_k10": "#31a354",
     "arima_202":     "#fdae6b",
     "xgboost_lag5":  "#3182bd",
+    "lstm_h64_l1":   "#756bb1",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -126,6 +128,7 @@ def make_models() -> list[tuple[str, object, bool]]:
 
     Fresh instances are needed per dataset because XGBoost retains state.
     """
+    from animal_movement_fm.models.lstm import LSTM  # local import: defer torch load
     return [
         ("persistence", Persistence(), False),
         ("averaging_k1", DisplacementAveraging(k=1), False),
@@ -139,6 +142,10 @@ def make_models() -> list[tuple[str, object, bool]]:
         ("xgboost_lag5", XGBoost(
             n_lags=5, n_estimators=200, max_depth=6,
             use_time_features=False,
+        ), True),
+        ("lstm_h64_l1", LSTM(
+            hidden_dim=64, num_layers=1, context_length=CONTEXT_LENGTH,
+            epochs=30, batch_size=64, lr=1e-3, device="cpu",
         ), True),
     ]
 
@@ -339,6 +346,7 @@ def plot_summary(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    torch.manual_seed(SEED)
     log.info(
         "Generating synthetic datasets (n_individuals=%d, n_steps=%d)...",
         N_INDIVIDUALS, N_STEPS,
