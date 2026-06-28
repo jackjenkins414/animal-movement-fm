@@ -125,3 +125,59 @@ Implemented `src/animal_movement_fm/models/lstm.py`, the first model in the ladd
 ### Note: OpenMP runtime conflict (macOS)
 
 torch + XGBoost in one process segfaults on Apple Silicon (`xgboost/data.py::_meta_from_numpy`); separate OpenMP runtimes. `KMP_DUPLICATE_LIB_OK=TRUE` does not help (governs Intel `libiomp`, not the `libomp` here); `OMP_NUM_THREADS=1` does, set at the top of the experiment script. Cleaner fix (shared OpenMP, or separate processes) deferred.
+
+## 2026-06-28: Transformer baseline complete; sixth rung benchmarked on synthetic data
+
+Implemented `src/animal_movement_fm/models/transformer.py`, the final rung before the foundation model and structurally the same architecture the FM will be built from. Where the LSTM compresses history into a single hidden state passed step to step, the transformer reads the whole window at once via bidirectional self-attention (`nn.TransformerEncoder`, no causal mask), so every position attends directly to every other; a regime switch early in the window reaches the prediction without being squeezed through a recurrent bottleneck. Input displacements are projected from 2D to the model width via a linear layer, then stamped with fixed sinusoidal positional encoding (Vaswani et al., 2017) before the encoder stack. The readout mirrors the LSTM exactly: `out[:, -1, :]` feeds a linear head emitting a 2-element displacement. Everything except the inner network is held identical to the LSTM rung (same differenced-displacement inputs, same train-statistic standardisation, same single-displacement target, same checkpoint persistence), so any difference in results is attributable to attention vs recurrence and nothing else. 17 new tests (GenAI generated and referenced/validated).
+
+### Training recipe
+
+Initial runs (30 epochs, no warmup, lr=1e-3 Adam) showed the transformer ~20% worse than the LSTM on plain CRW median; suspicious, since CRW is trivially autoregressive. A convergence check confirmed train_mse had flatlined by epoch 20, ruling out undertraining; the gap was an optimisation artefact from withholding warmup, the standard transformer recipe. Locked recipe: 60 epochs for both neural rungs; linear warmup + cosine decay (`warmup_frac=0.1`, lr is the peak) on the transformer only, constant lr on the LSTM. Each architecture gets its conventional setup. With warmup the CRW gap closed (transformer 657 vs LSTM 709 median across 10 seeds), confirming the earlier underperformance was recipe, not architecture.
+
+### Configuration
+
+- `d_model=64`, `nhead=4`, `num_layers=2`, `dim_feedforward=128`, `dropout=0.1`
+- `context_length=24`, `epochs=60`, `batch_size=64`, `lr=1e-3`, `warmup_frac=0.1`, Adam, MSE loss
+- LSTM comparison run at `epochs=60` (all else unchanged from LSTM entry) so neither rung is undertrained
+- Reference-baseline defaults, not tuned
+
+### Results: 10-rep multi-seed benchmark (total variance)
+
+Each of 10 master seeds (0–9) drives both data generation and torch init, so reported variance includes data sampling + training stochasticity. 20 individuals x 500 steps, 80/20 per individual split, context_length=24, n_test_windows=1904 per model per seed.
+
+**Brownian motion (sanity check):**
+
+| Model | Median (m) | Median range | p99 (m) | p99 range |
+|---|---:|---|---:|---|
+| persistence | 1,299 | [1,277 – 1,331] | 3,350 | [3,221 – 3,569] |
+| transformer_d64_l2 | 1,301 | [1,282 – 1,348] | 3,341 | [3,248 – 3,517] |
+| lstm_h64_l1 | 1,314 | [1,285 – 1,353] | 3,368 | [3,312 – 3,582] |
+| xgboost_lag5 | 1,357 | [1,327 – 1,418] | 3,516 | [3,346 – 3,796] |
+
+All models collapse to persistence; ranges fully overlap. Sanity check passes.
+
+**CRW:**
+
+| Model | Median (m) | Median range | p99 (m) | p99 range |
+|---|---:|---|---:|---|
+| transformer_d64_l2 | 657 | [613 – 728] | 3,106 | [2,940 – 3,520] |
+| xgboost_lag5 | 705 | [679 – 725] | 3,137 | [2,754 – 3,366] |
+| lstm_h64_l1 | 709 | [664 – 759] | 3,123 | [2,879 – 3,398] |
+| persistence | 936 | [882 – 960] | 3,750 | [3,387 – 4,087] |
+
+Transformer leads on CRW median (657 vs LSTM 709, XGBoost 705), though all three learner ranges overlap. All well clear of persistence.
+
+**Switching-CRW:**
+
+| Model | Median (m) | Median range | p99 (m) | p99 range |
+|---|---:|---|---:|---|
+| lstm_h64_l1 | 598 | [511 – 783] | 4,948 | [4,421 – 5,476] |
+| transformer_d64_l2 | 600 | [531 – 732] | 5,114 | [4,693 – 5,389] |
+| xgboost_lag5 | 611 | [536 – 792] | 4,844 | [4,537 – 5,199] |
+| persistence | 482 | [387 – 805] | 6,360 | [5,972 – 6,775] |
+
+LSTM and transformer p99 ranges fully overlap (LSTM [4,421 – 5,476], transformer [4,693 – 5,389]) -> statistically indistinguishable. All three learners overlap on every metric. Persistence retains the best median (foraging body) but pays with the worst tail.
+
+### Interpretation
+
+Attention matches but does not beat recurrence on small single-distribution synthetic data, consistent with the known data-hunger of transformers: high capacity with low inductive bias needs large, diverse data to pay off. On ~7,600 training windows of one distribution, the LSTM's stronger sequence bias is equally effective. This result is itself the motivation for pretrain-then-finetune; the foundation model is where the transformer's capacity meets the data scale to exploit it.
