@@ -117,3 +117,7 @@ slurm-*.out
 *.pem
 *.key
 credentials.json
+
+# ---cant forget this -- 
+experiments/results/
+*.ipynb
