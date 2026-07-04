@@ -106,7 +106,7 @@ class LSTM:
         # auto label in results table 
         self.name = name or f"lstm_h{self.hidden_dim}_l{self.num_layers}"
 
-    def _make_windows(self, df: pd.DataFrame) -> tuple[torch.Tensor, torch.Tensor]:
+    def _make_windows(self, df: pd.DataFrame, group_col: str = "individual_id") -> tuple[torch.Tensor, torch.Tensor]:
         """Turn a trajectory DataFrame into (inputs, targets) displacement tensors.
         
         Window definition is delegated to the harness's `iter_windows`, so the net trains on exactly 
@@ -120,7 +120,7 @@ class LSTM:
         Y : torch.Tensor, shape (n_windows, 2)
         """
         xs, ys = [], []
-        for _, traj in df.groupby("individual_id", sort=False):
+        for _, traj in df.groupby(group_col, sort=False):
             for history, target, _ts, _t in iter_windows(traj, self.context_length):
                 xs.append(np.diff(history, axis=0))   # (W-1, 2) input displacements
                 ys.append(target - history[-1])       # (2,) target displacement
@@ -135,7 +135,7 @@ class LSTM:
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
         return X, Y
     
-    def fit(self, train_df: pd.DataFrame) -> "LSTM": 
+    def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "LSTM":
         """
         Train the network once on all trajectories in `train_df`.
 
@@ -145,7 +145,7 @@ class LSTM:
         `model = LSTM().fit(train.df)`
         """
 
-        X, Y = self._make_windows(train_df) # (N, W-1, 2), (N, 2)
+        X, Y = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2)
 
         # standardise inputs using TRAIN statistics only, and remember them. Predict() must reuse these exact 
         # stats, so they are stored on self

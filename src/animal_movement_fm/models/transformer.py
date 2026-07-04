@@ -201,7 +201,7 @@ class Transformer:
         # auto label in results table
         self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}"
 
-    def _make_windows(self, df: pd.DataFrame) -> tuple[torch.Tensor, torch.Tensor]:
+    def _make_windows(self, df: pd.DataFrame, group_col: str = "individual_id") -> tuple[torch.Tensor, torch.Tensor]:
         """Turn a trajectory DataFrame into (inputs, targets) displacement tensors.
 
         Identical to the LSTM rung; window definition is delegated to the harness's `iter_windows` so the net trains on exactly the windows it 
@@ -214,7 +214,7 @@ class Transformer:
         Y : torch.Tensor, shape (n_windows, 2)
         """
         xs, ys = [], []
-        for _, traj in df.groupby("individual_id", sort=False):
+        for _, traj in df.groupby(group_col, sort=False):
             for history, target, _ts, _t in iter_windows(traj, self.context_length):
                 xs.append(np.diff(history, axis=0)) # (W-1, 2) input displacements
                 ys.append(target - history[-1]) # (2,) target displacement
@@ -226,14 +226,14 @@ class Transformer:
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
         return X, Y
 
-    def fit(self, train_df: pd.DataFrame) -> "Transformer":
+    def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "Transformer":
         """
         Train the network once on all trajectories in `train_df`.
 
         Builds displacement windows, standardises the inputs (storing the per-channel mean/std so `predict` can apply the identical transform), 
         then runs a standard mini-batch training loop. Returns self so callers can write `model = Transformer().fit(train_df)`.
         """
-        X, Y = self._make_windows(train_df) # (N, W-1, 2), (N, 2)
+        X, Y = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2)
 
         # standardise inputs using TRAIN statistics only, and remember them; predict() must reuse these exact stats, so they are stored on self
         self._mean = X.mean(dim=(0, 1), keepdim=True) # (1, 1, 2)
