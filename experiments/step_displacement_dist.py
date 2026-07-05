@@ -170,7 +170,7 @@ def main() -> None:
           f"{steps['segment_id'].nunique():,} segments, "
           f"{steps['individual_id'].nunique():,} individuals\n")
 
-    # clean 6h vs multi-bin (within-segment gaps the resampler kept)
+    # clean 6h vs multi-bin (within segment gaps the resampler kept)
     clean = steps[steps["step_bins"] == 1]
     print(f"step_bins == 1 (clean 6h): {len(clean):,} "
           f"({len(clean) / len(steps):.1%})  |  multi-bin steps: "
