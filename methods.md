@@ -218,7 +218,7 @@ The 6h step-length distribution is sharply bimodal on a log axis; a near station
 
 ### Finding: 6h resampling is lossy, asymmetrically (`within_bin_variance.py`, `within_bin_drilldown.py`)
 
-Going back to the raw fixes (median 46 fixes per surviving bin), the 6h resampling discards ~99.2% of raw observations, and within-bin spread rises with step length; the representation is lossiest exactly where movement is fast. A striking sub-case: some bins labelled near-stationary by their 6h step actually contain 30–100 km of within-window movement (out and back loops the grid cannot see). A drill-down classifier split these ~56% genuine foraging loops vs ~44% bad GPS fixes, so the effect is both a real representation limitation (argument for finer cadence) and a data-quality signal (a second, independent artefact detector alongside a speed cap). Threshold precision here is ±~5%; treated as indicative.
+Going back to the raw fixes (median 46 fixes per surviving bin), the 6h resampling discards approximately 99.2% of raw observations, and within-bin spread rises with step length; the representation is lossiest exactly where movement is fast. A striking sub-case: some bins labelled near-stationary by their 6h step actually contain 30–100 km of within-window movement (out and back loops the grid cannot see). A drill-down classifier split these into approximately 56% genuine foraging loops versus approximately 44% bad GPS fixes, so the effect is both a real representation limitation (argument for finer cadence) and a data quality signal (a second, independent artefact detector alongside a speed cap). Threshold precision here is approximately $\pm$ 5%; treated as indicative.
 
 ### Finding: the p99 tail is real migration, not artefact (`step3_error_dist.py`)
 
