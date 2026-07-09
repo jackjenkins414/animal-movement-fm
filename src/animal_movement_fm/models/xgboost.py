@@ -494,24 +494,23 @@ class XGBoost:
     
     # GenAI reference:  We used GenAI here to to help check the predict time logic (which it refined from my initial implementation), but
     # especially for the reconstruction of the final next position forecast from predicted dlon/dlat
-    def predict(
-        self,
-        history: np.ndarray,
-        timestamp: pd.Timestamp | None = None,
-    ) -> np.ndarray:
+    def predict(self, context) -> np.ndarray:
         """
-        Return predicted next (lon, lat) for the supplied history window.
+        Return predicted next (lon, lat) for the supplied context.
 
-        Builds the feature vector from `history`, runs both per-axis regressors, and adds the predicted 
-        displacement to `history[-1]` to produce the next-position forecast.
+        Builds the feature vector from `context.history`, runs both per-axis
+        regressors, and adds the predicted displacement to `history[-1]` to produce
+        the next-position forecast. If the model was fit with time features,
+        `context.timestamp` (the target step's time) drives the sin/cos time-of-day
+        feature; the harness now supplies this, so the midnight fallback fires only
+        when the timestamp is genuinely absent.
 
         Parameters
         ----------
-        history : np.ndarray
-            Shape (T, 2), columns (lon, lat). T here equals the harness's `context_length`. Must be >= n_lags.
-        timestamp : pd.Timestamp, optional
-            Timestamp of the target observation. Used only if the model was fit with time features. Currently 
-            the harness does not pass this through; see fallback note in _build_features.
+        context : PredictionContext
+            Carries `history`, shape (T, 2), columns (lon, lat), T == context_length,
+            T >= n_lags; and `timestamp`, the target observation's time (used only if
+            the model was fit with time features).
 
         Returns
         -------
@@ -532,9 +531,11 @@ class XGBoost:
                 "XGBoost.predict called before fit. Call fit(df_train) first."
             )
 
+        history = np.asarray(context.history, dtype=float)
+        timestamp = context.timestamp
+
         # Shape validation. _build_features will also check this, but the error message here can be more specific
         # about being called from the harness path
-        history = np.asarray(history, dtype=float)
         if history.ndim != 2 or history.shape[1] != 2:
             raise ValueError(
                 f"history must have shape (T, 2); got {history.shape}"
@@ -580,6 +581,3 @@ class XGBoost:
         next_pos[0] += dlon_hat
         next_pos[1] += dlat_hat
         return next_pos
-
-
-

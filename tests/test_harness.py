@@ -138,8 +138,8 @@ class _ConstantOffsetPredictor:
         self.offset = np.asarray(offset)
         self.name = f"ConstantOffset({offset})"
 
-    def predict(self, history: np.ndarray) -> np.ndarray:
-        return history[-1] + self.offset
+    def predict(self, context) -> np.ndarray:
+        return context.history[-1] + self.offset
 
 
 class TestHarness:

@@ -293,7 +293,7 @@ class Transformer:
             logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
         return self
 
-    def predict(self, history: np.ndarray) -> np.ndarray:
+    def predict(self, context) -> np.ndarray:
         """
         Predict the next (lon, lat) position from a window of history.
 
@@ -303,7 +303,8 @@ class Transformer:
 
         Parameters
         ----------
-        history : np.ndarray, shape (W, 2), columns (lon, lat).
+        context : PredictionContext, carrying `history` of shape (W, 2), columns (lon, lat). The transformer uses only the history; 
+        the timestamp is ignored as well for now...
 
         Returns
         -------
@@ -312,7 +313,7 @@ class Transformer:
         if self.net is None:
             raise RuntimeError("Model is not fitted. Call fit or load a checkpoint before predict")
 
-        history = np.asarray(history, dtype=np.float32)
+        history = np.asarray(context.history, dtype=np.float32)
         if history.ndim != 2 or history.shape[1] != 2:
             raise ValueError(f"history must have shape (W, 2), we got {history.shape} instead")
 

@@ -7,6 +7,7 @@ import logging
 import numpy as np
 import pytest
 
+from animal_movement_fm.eval.harness import PredictionContext
 from animal_movement_fm.models.arima import ARIMA
 
 # GenAI reference: These tests are also GenAI generated, where we asked to "give me more pytest tests 
@@ -66,34 +67,34 @@ class TestARIMAPredict:
         """T < min_history → returns last position unchanged."""
         history = np.array([[1.0, 2.0], [1.1, 2.1], [1.2, 2.2]])
         model = ARIMA(min_history=10)
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         np.testing.assert_array_equal(pred, np.array([1.2, 2.2]))
 
     def test_short_history_fallback_does_not_alias_input(self):
         """Persistence fallback must .copy() to avoid mutating caller's array."""
         history = np.array([[1.0, 2.0], [1.1, 2.1]])
         model = ARIMA(min_history=10)
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         pred[0] = 999.0
         assert history[-1, 0] == 1.1  # original untouched
 
     def test_constant_history_falls_back_per_channel(self):
         """A stationary animal (all displacements zero) returns the last position."""
         history = np.full((30, 2), 5.0)
-        pred = ARIMA().predict(history)
+        pred = ARIMA().predict(PredictionContext(history=history))
         np.testing.assert_allclose(pred, np.array([5.0, 5.0]))
 
     def test_output_shape(self):
         rng = np.random.default_rng(0)
         history = rng.standard_normal((30, 2)).cumsum(axis=0) * 0.01
-        pred = ARIMA().predict(history)
+        pred = ARIMA().predict(PredictionContext(history=history))
         assert pred.shape == (2,)
 
     def test_output_is_finite(self):
         """A successful fit on a normal trajectory should produce finite predictions."""
         rng = np.random.default_rng(42)
         history = rng.standard_normal((50, 2)).cumsum(axis=0) * 0.01
-        pred = ARIMA().predict(history)
+        pred = ARIMA().predict(PredictionContext(history=history))
         assert np.all(np.isfinite(pred))
 
     def test_prediction_near_last_position(self):
@@ -101,20 +102,20 @@ class TestARIMAPredict:
         the last observation (sanity check, not a tight bound)."""
         rng = np.random.default_rng(7)
         history = rng.standard_normal((40, 2)).cumsum(axis=0) * 0.001
-        pred = ARIMA().predict(history)
+        pred = ARIMA().predict(PredictionContext(history=history))
         # Step scale ~0.001 deg; prediction within a few step-scales of last point.
         np.testing.assert_allclose(pred, history[-1], atol=0.05)
 
     def test_rejects_wrong_shape(self):
         model = ARIMA()
         with pytest.raises(ValueError):
-            model.predict(np.zeros((24, 3)))
+            model.predict(PredictionContext(history=np.zeros((24, 3))))
         with pytest.raises(ValueError):
-            model.predict(np.zeros(24))
+            model.predict(PredictionContext(history=np.zeros(24)))
 
     def test_rejects_empty_history(self):
         with pytest.raises(ValueError):
-            ARIMA().predict(np.zeros((0, 2)))
+            ARIMA().predict(PredictionContext(history=np.zeros((0, 2))))
 
 
 class TestARIMAFallbackBehaviour:
@@ -126,7 +127,7 @@ class TestARIMAFallbackBehaviour:
         history = np.array([[0.0, 0.0], [0.1, 0.1], [0.2, 0.2]])
         model = ARIMA(min_history=2)
         with caplog.at_level(logging.WARNING, logger="animal_movement_fm.models.arima"):
-            pred = model.predict(history)
+            pred = model.predict(PredictionContext(history=history))
         # Should not crash; should return *something* of shape (2,).
         assert pred.shape == (2,)
         # If both channels fell back, prediction equals the last observation.
@@ -148,7 +149,7 @@ class TestARIMAFallbackBehaviour:
         lon = rng.standard_normal(T).cumsum() * 0.01
         lat = np.full(T, 10.0)
         history = np.column_stack([lon, lat])
-        pred = ARIMA().predict(history)
+        pred = ARIMA().predict(PredictionContext(history=history))
         # Latitude channel must have fallen back: predicted lat == last lat.
         assert pred[1] == 10.0
         # Longitude should have moved (forecast is some finite real number).
@@ -162,16 +163,16 @@ class TestARIMAProperties:
         rng = np.random.default_rng(1)
         history = rng.standard_normal((40, 2)).cumsum(axis=0) * 0.01
         offset = np.array([100.0, -50.0])
-        p1 = ARIMA().predict(history)
-        p2 = ARIMA().predict(history + offset)
+        p1 = ARIMA().predict(PredictionContext(history=history))
+        p2 = ARIMA().predict(PredictionContext(history=history + offset))
         np.testing.assert_allclose(p2, p1 + offset, atol=1e-6)
 
     def test_determinism_on_repeated_call(self):
         """Same input twice should give the same prediction (no hidden RNG state)."""
         rng = np.random.default_rng(99)
         history = rng.standard_normal((40, 2)).cumsum(axis=0) * 0.01
-        p1 = ARIMA().predict(history)
-        p2 = ARIMA().predict(history)
+        p1 = ARIMA().predict(PredictionContext(history=history))
+        p2 = ARIMA().predict(PredictionContext(history=history))
         np.testing.assert_allclose(p1, p2)
 
 
@@ -192,5 +193,5 @@ class TestARIMAPredictorContract:
         # Calling predict on a fresh instance with no prior fit must work.
         rng = np.random.default_rng(0)
         history = rng.standard_normal((30, 2)).cumsum(axis=0) * 0.01
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         assert pred.shape == (2,)

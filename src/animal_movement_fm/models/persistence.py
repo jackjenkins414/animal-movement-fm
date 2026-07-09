@@ -24,20 +24,20 @@ class Persistence:
     # Class attribute for tables produced by eval harness 
     name = "persistence"
 
-    def predict(self, history: np.ndarray) -> np.ndarray:
-        """Return the last (lon, lat) in ``history``.
+    def predict(self, context) -> np.ndarray:
+        """Return the last (lon, lat) in the context's history.
 
         Parameters
         ----------
-        history : np.ndarray
-            Shape (T, 2), columns (lon, lat). T == context_length.
+        context : PredictionContext
+            Carries `history`, shape (T, 2), columns (lon, lat), T == context_length. Persistence ignores the timestamp.
 
         Returns
         -------
         np.ndarray
             Shape (2,), the predicted next (lon, lat).
         """
-        history = np.asarray(history)
+        history = np.asarray(context.history)
         if history.ndim != 2 or history.shape[1] != 2:
             raise ValueError(
                 f"history must have shape (T, 2); got {history.shape}"

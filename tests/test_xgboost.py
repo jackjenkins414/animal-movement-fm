@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from animal_movement_fm.eval.harness import PredictionContext
 from animal_movement_fm.models.xgboost import XGBoost, _FeatureWindow
 
 # GenAI reference: These tests are also GenAI generated, where we asked to "give me pytest tests
@@ -336,42 +337,42 @@ class TestXGBoostPredict:
     def test_predict_before_fit_raises(self):
         model = XGBoost(n_lags=5)
         with pytest.raises(RuntimeError, match="called before fit"):
-            model.predict(np.zeros((10, 2)))
+            model.predict(PredictionContext(history=np.zeros((10, 2))))
 
     def test_predict_output_shape(self, fitted_model):
         history = np.arange(20.0).reshape(10, 2)
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         assert pred.shape == (2,)
 
     def test_predict_output_is_finite(self, fitted_model):
         rng = np.random.default_rng(42)
         history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         assert np.all(np.isfinite(pred))
 
     def test_predict_rejects_wrong_shape(self, fitted_model):
         with pytest.raises(ValueError):
-            fitted_model.predict(np.zeros((10, 3)))
+            fitted_model.predict(PredictionContext(history=np.zeros((10, 3))))
         with pytest.raises(ValueError):
-            fitted_model.predict(np.zeros(10))
+            fitted_model.predict(PredictionContext(history=np.zeros(10)))
 
     def test_predict_rejects_short_history(self, fitted_model):
         """history shorter than n_lags must raise; no silent fallback."""
         with pytest.raises(ValueError, match="shorter than"):
-            fitted_model.predict(np.zeros((3, 2)))
+            fitted_model.predict(PredictionContext(history=np.zeros((3, 2))))
 
     def test_predict_does_not_mutate_input(self, fitted_model):
         history = np.arange(20.0).reshape(10, 2).copy()
         history_before = history.copy()
-        _ = fitted_model.predict(history)
+        _ = fitted_model.predict(PredictionContext(history=history))
         np.testing.assert_array_equal(history, history_before)
 
     def test_predict_determinism_on_repeated_call(self, fitted_model):
         """Same input twice should give the same prediction."""
         rng = np.random.default_rng(99)
         history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
-        p1 = fitted_model.predict(history)
-        p2 = fitted_model.predict(history)
+        p1 = fitted_model.predict(PredictionContext(history=history))
+        p2 = fitted_model.predict(PredictionContext(history=history))
         np.testing.assert_allclose(p1, p2)
 
     def test_predict_near_last_position(self, fitted_model):
@@ -379,7 +380,7 @@ class TestXGBoostPredict:
         last observation (sanity check, not a tight bound)."""
         rng = np.random.default_rng(7)
         history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.001
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         # Step scale ~0.001 deg; prediction within a few step-scales.
         np.testing.assert_allclose(pred, history[-1], atol=0.5)
 
@@ -388,7 +389,24 @@ class TestXGBoostPredict:
         feed the regressors a malformed feature vector."""
         fitted_model.n_lags = 3  # was 5 at fit time
         with pytest.raises(RuntimeError, match="does not match"):
-            fitted_model.predict(np.arange(20.0).reshape(10, 2))
+            fitted_model.predict(PredictionContext(history=np.arange(20.0).reshape(10, 2)))
+
+    def test_timestamp_flows_through_context_to_time_feature(self, fitted_model):
+        """The point of the PredictionContext refactor: context.timestamp must
+        reach the sin/cos time-of-day features. We check the feature vector
+        directly rather than the prediction, because whether the *prediction*
+        changes depends on the trained model having learned an hour-dependence
+        — which the random-walk fixture deliberately has no signal for. What we
+        need to guarantee is that the timestamp is not dropped in transit."""
+        history = np.arange(20.0).reshape(10, 2).astype(float)
+        # fitted_model trained with timestamps, so sin_hour/cos_hour are in the layout.
+        assert "sin_hour" in fitted_model.feature_names_
+        feats_3am = fitted_model._build_features(
+            history, timestamp=pd.Timestamp("2024-06-01 03:00")).features
+        feats_3pm = fitted_model._build_features(
+            history, timestamp=pd.Timestamp("2024-06-01 15:00")).features
+        # The two sin/cos slots (last two features) must differ between times.
+        assert not np.allclose(feats_3am[-2:], feats_3pm[-2:])
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +419,7 @@ class TestXGBoostProperties:
         Predicted position should differ from history[-1] by exactly the
         predicted displacement (sanity check on the reconstruction step)."""
         history = np.arange(20.0).reshape(10, 2)
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         diff = pred - history[-1]
         # diff should be finite (whatever the model predicted).
         assert np.all(np.isfinite(diff))
@@ -420,8 +438,8 @@ class TestXGBoostProperties:
 
         m1 = XGBoost(n_lags=5, n_estimators=10, random_state=0).fit(simple_df)
         m2 = XGBoost(n_lags=5, n_estimators=10, random_state=1).fit(simple_df)
-        p1 = m1.predict(history)
-        p2 = m2.predict(history)
+        p1 = m1.predict(PredictionContext(history=history))
+        p2 = m2.predict(PredictionContext(history=history))
         # Both seeds produce identical predictions (no stochasticity in the
         # default config).
         np.testing.assert_allclose(p1, p2)
@@ -449,6 +467,6 @@ class TestXGBoostPredictorContract:
         """The harness expects shape (2,) from every predictor."""
         rng = np.random.default_rng(0)
         history = rng.standard_normal((20, 2)).cumsum(axis=0) * 0.01
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         assert isinstance(pred, np.ndarray)
         assert pred.shape == (2,)

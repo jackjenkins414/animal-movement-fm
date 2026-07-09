@@ -141,7 +141,7 @@ class ARIMA:
             )
             return None
 
-    def predict(self, history: np.ndarray) -> np.ndarray:
+    def predict(self, context) -> np.ndarray:
         """
         Return predicted next (lon, lat) for the supplied history window.
 
@@ -168,7 +168,7 @@ class ARIMA:
             If `history` is not 2D with two columns, or is empty.
         """
         # Shape validation first 
-        history = np.asarray(history)
+        history = np.asarray(context.history)
         if history.ndim != 2 or history.shape[1] != 2:
             raise ValueError(
                 f"history must have shape (T, 2); got {history.shape} instead"

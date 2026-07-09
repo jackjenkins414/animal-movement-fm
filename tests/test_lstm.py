@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 import torch
 
-from animal_movement_fm.eval.harness import iter_windows
+from animal_movement_fm.eval.harness import PredictionContext, iter_windows
 from animal_movement_fm.models.lstm import LSTM
 
 
@@ -36,11 +36,12 @@ def _make_df(n_individuals=3, n_steps=80, drift=(0.0, 0.0), noise=0.01, seed=0):
 
 
 def _mean_error(df, context_length, predict_fn):
-    """Mean Euclidean error of a predict_fn(history)->(2,) over all windows."""
+    """Mean Euclidean error of a predict_fn(context)->(2,) over all windows."""
     errs = []
     for _, traj in df.groupby("individual_id", sort=False):
         for history, target, _ts, _t in iter_windows(traj, context_length):
-            errs.append(np.linalg.norm(predict_fn(history) - target))
+            pred = predict_fn(PredictionContext(history=history))
+            errs.append(np.linalg.norm(pred - target))
     return float(np.mean(errs))
 
 
@@ -79,7 +80,7 @@ class TestProtocol:
 class TestUnfitted:
     def test_predict_before_fit_raises(self):
         with pytest.raises(RuntimeError):
-            LSTM().predict(np.zeros((12, 2), dtype=np.float32))
+            LSTM().predict(PredictionContext(history=np.zeros((12, 2), dtype=np.float32)))
 
     def test_save_before_fit_raises(self, tmp_path):
         with pytest.raises(RuntimeError):
@@ -113,21 +114,21 @@ class TestFit:
 
 class TestPredict:
     def test_predict_shape(self, fitted_model):
-        pred = fitted_model.predict(np.zeros((12, 2), dtype=np.float32))
+        pred = fitted_model.predict(PredictionContext(history=np.zeros((12, 2), dtype=np.float32)))
         assert pred.shape == (2,)
 
     def test_predict_bad_shape_raises(self, fitted_model):
         with pytest.raises(ValueError):
-            fitted_model.predict(np.zeros((12, 3)))
+            fitted_model.predict(PredictionContext(history=np.zeros((12, 3))))
 
     def test_predict_short_history_falls_back(self, fitted_model):
-        pred = fitted_model.predict(np.array([[1.0, 2.0]], dtype=np.float32))
+        pred = fitted_model.predict(PredictionContext(history=np.array([[1.0, 2.0]], dtype=np.float32)))
         np.testing.assert_allclose(pred, [1.0, 2.0])
 
     def test_predict_finite_and_near_last(self, fitted_model):
         rng = np.random.default_rng(1)
         history = (rng.standard_normal((12, 2)) * 0.01).cumsum(axis=0)
-        pred = fitted_model.predict(history)
+        pred = fitted_model.predict(PredictionContext(history=history))
         assert np.all(np.isfinite(pred))
         # Catch catastrophic failure (NaN/inf/huge jump), not exact value.
         assert np.linalg.norm(pred - history[-1]) < 1.0
@@ -140,12 +141,12 @@ class TestPredict:
 class TestCheckpoint:
     def test_roundtrip_predictions_match(self, fitted_model, tmp_path):
         history = (np.random.default_rng(2).standard_normal((12, 2)) * 0.01).cumsum(axis=0)
-        before = fitted_model.predict(history)
+        before = fitted_model.predict(PredictionContext(history=history))
 
         path = tmp_path / "ckpt.pt"
         fitted_model.save(path)
         reloaded = LSTM.from_checkpoint(path, device="cpu")
-        after = reloaded.predict(history)
+        after = reloaded.predict(PredictionContext(history=history))
 
         np.testing.assert_allclose(before, after, rtol=1e-5, atol=1e-6)
 
@@ -186,7 +187,7 @@ class TestLearning:
                      epochs=60, batch_size=32, lr=1e-2, device="cpu").fit(df)
 
         trained = _mean_error(df, cl, model.predict)
-        persistence = _mean_error(df, cl, lambda h: h[-1])
+        persistence = _mean_error(df, cl, lambda c: c.history[-1])
         assert trained < persistence
 
     def test_seeded_fit_is_deterministic(self, small_df):
@@ -195,4 +196,7 @@ class TestLearning:
         torch.manual_seed(0)
         m2 = LSTM(hidden_dim=8, context_length=12, epochs=3, device="cpu").fit(small_df)
         h = np.zeros((12, 2), dtype=np.float32)
-        np.testing.assert_allclose(m1.predict(h), m2.predict(h), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(
+            m1.predict(PredictionContext(history=h)),
+            m2.predict(PredictionContext(history=h)),
+            rtol=1e-5, atol=1e-6)

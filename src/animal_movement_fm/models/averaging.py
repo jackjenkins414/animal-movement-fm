@@ -57,36 +57,36 @@ class DisplacementAveraging:
         self.k = int(k)
         self.name= name if name is not None else f"averaging_k{self.k}"
 
-    def predict(self, history: np.ndarray) -> np.ndarray: 
+    def predict(self, context) -> np.ndarray:
         """
-        Return predicted next (lon, lat). 
+        Return predicted next (lon, lat).
 
         Parameters
+        ----------
+        context: PredictionContext
+          Carries `history`, shape (T, 2), columns (lon, lat), T == context_length. Averaging ignores the timestamp.
+
+        Returns
         -----
-        history: np.ndarray 
-          Shape (T, 2) columns (lon, lat). T == context_length. 
-        
-        Returns 
-        -----
-        np.ndarray 
-          Shape (2,), the predicted next (lon, lat). 
+        np.ndarray
+          Shape (2,), the predicted next (lon, lat).
         """
-        history = np.asarray(history)
+        history = np.asarray(context.history)
 
         if history.ndim != 2 or history.shape[1] != 2:
             raise ValueError(f"history must have shape (T, 2); got {history.shape} instead")
         T = history.shape[0]
-        if T < 1: 
+        if T < 1:
             raise ValueError("history must contain at least one observation")
-        
-        if T < 2: 
-            # No displacements availible; behave like persistence 
+
+        if T < 2:
+            # no displacements availible; behave like persistence
             return history[-1].copy()
-        
-        # Displacements: shape (T - 1, 2) 
+
+        # displacements; shape (T - 1, 2)
         displacements = np.diff(history, axis=0)
 
-        # Use most recent min(k, T - 1) of them. 
+        # use most recent min(k, T - 1) of them
         k_eff = min(self.k, displacements.shape[0])
         mean_disp = displacements[-k_eff:].mean(axis=0)
         return history[-1] + mean_disp

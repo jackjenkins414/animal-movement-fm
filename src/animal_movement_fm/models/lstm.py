@@ -186,7 +186,7 @@ class LSTM:
         return self 
 
     
-    def predict(self, history: np.ndarray) -> np.ndarray: 
+    def predict(self, context) -> np.ndarray:
         """
         Predicts the next (lon, lat) position from a window of history.
 
@@ -196,7 +196,8 @@ class LSTM:
 
         Parameters
         ----------
-        history: np.ndarray, shape (W, 2), columns (lon, lat). 
+        context: PredictionContext, carrying `history` of shape (W, 2), columns (lon, lat). The LSTM uses only the history; 
+        the timestamp is ignored for now...
 
         Returns
         -------
@@ -206,7 +207,7 @@ class LSTM:
         if self.net is None:
             raise RuntimeError("Model is not fitted. Call fit or load a checkpoint before predict")
         
-        history = np.asarray(history, dtype=np.float32)
+        history = np.asarray(context.history, dtype=np.float32)
         if history.ndim != 2 or history.shape[1] != 2: 
             raise ValueError(f"history must have shape (W, 2), we got {history.shape} instead")
         

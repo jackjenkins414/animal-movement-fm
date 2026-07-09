@@ -28,6 +28,9 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from dataclasses import dataclass, field
+from typing import Any
+
 import numpy as np 
 import pandas as pd 
 from tqdm import tqdm
@@ -46,21 +49,44 @@ from animal_movement_fm.eval.metrics import(
 # And persistence, averaging, ARIMA, XGBoost, LSTM etc are each of 
 # our "Concrete Strategy" from the Strategy design pattern 
 @runtime_checkable
-class Predictor(Protocol): 
+class Predictor(Protocol):
     """
-    A movement-prediction model. 
+    A movement-prediction model.
 
-    Implementations only need `predict`. The optional `name` attribute is used in 
-    results tables; if absent, the class name is used. 
+    Implementations only need `predict`. The optional `name` attribute is used in results tables; if absent, 
+    the class name is used.
 
-    `predict` takes a (T, 2) numpy array of (lon, lat) history with T == context_length, 
-    and returns a (2, ) array predicting the (lon, lat) of the next observation. Predictors
-    are stateless across calls; any learnable state lives inside the implementing object and 
-    is established before evaluation (e.g. via a `fit` method which is NOT part of thiis 
-    protocol because not all models have one, such as persistence). 
+    `predict` takes a PredictionContext (history + optional side info) and returns a (2,) array predicting the 
+    (lon, lat) of the next observation. Predictors are stateless across calls; any learnable state lives inside
+    the implementing object and is established before evaluation (e.g. via a `fit` method, which is NOT part
+    of this protocol because not all models have one, such as persistence).
     """
 
-    def predict(self, history: np.ndarray) -> np.ndarray: ...
+    def predict(self, context: "PredictionContext") -> np.ndarray: ...
+
+
+@dataclass(frozen=True)
+class PredictionContext:
+    """Everything a model needs to make one prediction.
+
+    Bundles the history window with any side information a model may consume, so new inputs (timestamps, 
+    environmental covariates etc) are added as fields here rather than by changing every model's 
+    predict signature.
+
+    Fields
+    ------
+    history : np.ndarray
+        Shape (T, 2), columns (lon, lat), T == context_length. The past positions; every model uses this.
+    timestamp : pd.Timestamp | None
+        Time of the target step (the one being predicted), for time of day features. None when unavailable
+        (e.g. synthetic data without real times).
+    extra : dict[str, Any]
+        Open slot for future side information (covariates, individual metadata) without another signature 
+        change. Empty for now.
+    """
+    history: np.ndarray
+    timestamp: "pd.Timestamp | None" = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 
@@ -186,7 +212,8 @@ def evaluate(
         # the protocol simple at the cost of some inefficiency for batched models
         # We can optimise in future if it becomes a bottleneck
         for (history, target, ts, _idx), (_, target_row) in zip(windows, target_rows.iterrows()):
-            pred = predictor.predict(history)
+            context = PredictionContext(history=history, timestamp=pd.Timestamp(ts))
+            pred = predictor.predict(context)
             err_m = haversine_distance(pred[0], pred[1], target[0], target[1])
             err_deg = euclidean_distance_degrees(pred[0], pred[1], target[0], target[1])
 

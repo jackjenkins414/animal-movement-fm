@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from animal_movement_fm.eval.harness import PredictionContext
 from animal_movement_fm.models.persistence import Persistence
 
 # GenAI reference: All tests here are GenAI generated, where the prompt was "write concise 
@@ -20,47 +21,49 @@ class TestPersistence:
     def test_predict_returns_last_row(self):
         model = Persistence()
         history = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         np.testing.assert_array_equal(pred, np.array([5.0, 6.0]))
 
     def test_predict_output_shape(self):
         model = Persistence()
         history = np.zeros((24, 2))
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         assert pred.shape == (2,)
 
     def test_predict_returns_copy_not_view(self):
         """Mutating the prediction must not corrupt history."""
         model = Persistence()
         history = np.array([[1.0, 2.0], [3.0, 4.0]])
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         pred[0] = 999.0
         assert history[-1, 0] == 3.0
 
     def test_predict_single_row_history(self):
         model = Persistence()
         history = np.array([[7.0, 8.0]])
-        pred = model.predict(history)
+        pred = model.predict(PredictionContext(history=history))
         np.testing.assert_array_equal(pred, np.array([7.0, 8.0]))
 
     def test_rejects_wrong_shape(self):
         model = Persistence()
         with pytest.raises(ValueError):
-            model.predict(np.zeros((24, 3)))
+            model.predict(PredictionContext(history=np.zeros((24, 3))))
         with pytest.raises(ValueError):
-            model.predict(np.zeros(24))
+            model.predict(PredictionContext(history=np.zeros(24)))
 
     def test_rejects_empty_history(self):
         model = Persistence()
         with pytest.raises(ValueError):
-            model.predict(np.zeros((0, 2)))
+            model.predict(PredictionContext(history=np.zeros((0, 2))))
 
     def test_no_fit_method(self):
         """Persistence is stateless; it should not advertise a fit method."""
         assert not hasattr(Persistence(), "fit")
 
     def test_accepts_list_input(self):
-        """The Protocol says ndarray; in practice np.asarray is forgiving."""
+        """The Protocol says ndarray; in practice np.asarray is forgiving.
+        The list now goes inside the context; the model's np.asarray still
+        converts it."""
         model = Persistence()
-        pred = model.predict([[1.0, 2.0], [3.0, 4.0]])
+        pred = model.predict(PredictionContext(history=[[1.0, 2.0], [3.0, 4.0]]))
         np.testing.assert_array_equal(pred, np.array([3.0, 4.0]))
