@@ -43,16 +43,17 @@ class Segment:
         return len(self.bin_index)
 
 # GenAI reference: my attempt at this function proved inefficient since it required a pass over all observations FINISH LATER 
+# Modified slightly to add cadence as a parameter 
 def _to_bins(
     timestamp: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
+    bin_seconds: int = BIN_SECONDS,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Reduce raw fixes to one representative per occupied 6h bin.
+    """Reduce raw fixes to one representative per occupied bin (nearest-to-centre).
 
-    For each bin, keeps the fix nearest the bin centre. Input need not be sorted; output is ordered by 
-    `bin_index`, one entry per occupied bin. Returns arrays in `Segment` field order: (bin_index, timestamp,
-    lat, lon, centre_offset_s).
+    `bin_seconds` defaults to the module cadence so existing callers and tests are
+    unaffected; the sweep passes other cadences.
     """
     if len(timestamp) == 0:
         empty_i = np.empty(0, dtype=np.int64)
@@ -60,12 +61,11 @@ def _to_bins(
         return empty_i, timestamp[:0], empty_f, empty_f, empty_f
 
     epoch_s = timestamp.astype("datetime64[us]").astype(np.int64) / 1_000_000.0
-    bin_index = np.floor(epoch_s / BIN_SECONDS).astype(np.int64)
-    centre_s = bin_index * BIN_SECONDS + BIN_SECONDS / 2.0
+    bin_index = np.floor(epoch_s / bin_seconds).astype(np.int64)
+    centre_s = bin_index * bin_seconds + bin_seconds / 2.0
     offset_s = np.abs(epoch_s - centre_s)
 
-    # Sort by bin, then by closeness to centre --- first row per bin is the winner.
-    order = np.lexsort((offset_s, bin_index))                   # primary key = bin_index
+    order = np.lexsort((offset_s, bin_index))
     bin_sorted = bin_index[order]
     first_in_bin = np.empty(len(bin_sorted), dtype=bool)
     first_in_bin[0] = True
@@ -80,24 +80,28 @@ def _to_bins(
         offset_s[keep],
     )
 ########## GenAI contribution ends here. 
-
+# same modification logic for the above as well
 def resample_trajectory(
     timestamp: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
+    *,
+    bin_seconds: int = BIN_SECONDS,
+    max_gap_bins: int = MAX_GAP_BINS,
+    min_segment_bins: int = MIN_SEGMENT_BINS,
 ) -> list[Segment]:
-    """Resample one trajectory to 6h bins and split it into clean segments.
+    """Resample one trajectory to `bin_seconds` bins and split into clean segments.
 
-    Bins each raw fix (nearest-to-centre representative), then splits wherever a hole exceeds `MAX_GAP_BINS`.
-    Segments shorter than `MIN_SEGMENT_BINS` are dropped. Returns segments in time order; may be empty if 
-    nothing survives.
+    Keyword cadence params default to the module constants (6h build), so the existing pipeline and tests are unchanged; 
+    the cadence sweep overrides them.
     """
-    bin_index, ts, lat_b, lon_b, offset = _to_bins(timestamp, lat, lon)
+    bin_index, ts, lat_b, lon_b, offset = _to_bins(
+        timestamp, lat, lon, bin_seconds=bin_seconds
+    )
     if len(bin_index) == 0:
         return []
 
-    # cut after every bin whose successor is more than MAX_GAP_BINS away
-    breaks = np.flatnonzero(np.diff(bin_index) > MAX_GAP_BINS) + 1
+    breaks = np.flatnonzero(np.diff(bin_index) > max_gap_bins) + 1
 
     segments = []
     for s_bin, s_ts, s_lat, s_lon, s_off in zip(
@@ -107,7 +111,7 @@ def resample_trajectory(
         np.split(lon_b, breaks),
         np.split(offset, breaks),
     ):
-        if len(s_bin) >= MIN_SEGMENT_BINS:
+        if len(s_bin) >= min_segment_bins:
             segments.append(
                 Segment(
                     bin_index=s_bin,
