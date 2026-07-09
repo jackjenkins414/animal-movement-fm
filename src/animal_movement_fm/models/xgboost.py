@@ -295,25 +295,27 @@ class XGBoost:
             dot = v1[0] * v2[0] + v1[1] * v2[1]
             feats.append(float(np.arctan2(cross, dot)))
 
-        # Time-of-day features (optional).
+        # time of day features (optional). Local solar corrected bc storks span ~3h of longitude, so UTC hour smears the diurnal 
+        # rhythm across birds. So we shift UTC hour by longitude/15 (15 deg = 1h of Earth's rotation) so every bird's solar 
+        # afternoon peak maps to the same corrected hour. Mean solar time only; the equation of time wobble (<=~15 min) is 
+        # pretty much negligible at 6h cadence.
         if self._has_time_features():
             if timestamp is None:
                 if not self._warned_missing_timestamp_:
                     logger.warning(
-                        "XGBoost.predict called without a timestamp but model "
-                        "was fit with time features; using midnight fallback "
-                        "(further occurrences in this fit will be silent)"
+                        "XGBoost.predict called without a timestamp but model was fit with time features; using midnight fallback "
                     )
                     self._warned_missing_timestamp_ = True
                 feats.append(0.0)
                 feats.append(1.0)
             else:
-                # Hour of day as a fraction of 2π, then sin/cos so the model sees 23:00 and 01:00 as 
-                # close on the cycle.
-                hour_frac = (
-                    timestamp.hour + timestamp.minute / 60.0
-                ) / 24.0
-                angle = 2.0 * np.pi * hour_frac
+                # longitude of the last observed position (where the bird is when it takes the step); over a 6h step its longitude 
+                # drift is <=~1-2 deg (<=~8 min of solar correction) so the last fix longitude is the right simple choice.
+                lon = float(history[-1, 0])
+                utc_hour = timestamp.hour + timestamp.minute / 60.0
+                solar_hour = (utc_hour + lon / 15.0) % 24.0
+                # fraction of 2π, then sin/cos so 23:00 and 01:00 sit close on the cycle.
+                angle = 2.0 * np.pi * (solar_hour / 24.0)
                 feats.append(float(np.sin(angle)))
                 feats.append(float(np.cos(angle)))
 
