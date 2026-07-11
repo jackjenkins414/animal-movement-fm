@@ -219,8 +219,8 @@ class LSTM:
         disp = np.diff(history, axis=0) # (W-1,2)
 
         # standardise with the stored TRAIN stats (never computed here)
-        mean = self._mean.numpy().reshape(1,2)
-        std = self._std.numpy().reshape(1,2)
+        mean = self._mean.detach().cpu().numpy().reshape(1,2)
+        std = self._std.detach().cpu().numpy().reshape(1,2)
         disp_n = (disp - mean) / std 
         
         # (W-1,2) -> (1, W-1, 2): the net expects a batch dimension
