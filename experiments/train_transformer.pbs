@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -P um09
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=90GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N train_transformer
+#PBS -j oe
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS        
+cd /g/data/um09/$USER/animal-movement-fm
+uv run python experiments/train_transformer_gadi.py

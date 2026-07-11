@@ -175,6 +175,7 @@ class Transformer:
         batch_size: int = 64,
         lr: float = 1e-3,
         warmup_frac: float = 0.0,
+        grad_clip: float | None = None,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -190,6 +191,10 @@ class Transformer:
         self.batch_size = int(batch_size)
         self.lr = float(lr)
         self.warmup_frac = float(warmup_frac)
+        # Max global grad norm for gradient clipping. None disables it (default), so existing behaviour and tests are 
+        # unchanged. A finite value (like 1.0 for ex) stabilises training by capping the update size when a batch 
+        # produces an unusually large gradient
+        self.grad_clip = None if grad_clip is None else float(grad_clip)
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -284,6 +289,8 @@ class Transformer:
                 pred = self.net(xb)
                 loss = loss_fn(pred, yb)
                 loss.backward()
+                if self.grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
                 optimiser.step()
                 scheduler.step()
 
@@ -382,7 +389,9 @@ class Transformer:
         without any retraining.
         """
         path = Path(path)
-        ckpt = torch.load(path, map_location=device or "cpu")
+        # weights_only=False: this is our own trusted checkpoint and it contains a non-tensor `config` dict; explicit here to 
+        # silence the FutureWarning and stay correct when torch flips the default to True
+        ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
 
         # rebuild the wrapper with the stored architecture.

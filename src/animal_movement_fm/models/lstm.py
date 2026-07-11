@@ -277,7 +277,9 @@ class LSTM:
         without any retraining.
         """
         path = Path(path)
-        ckpt = torch.load(path, map_location=device or "cpu")
+        # weights_only=False: this is our own trusted checkpoint and it contains a non-tensor `config` dict; explicit here to 
+        # silence the FutureWarning and stay correct when torch flips the default to True
+        ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
 
         # Rebuild the wrapper with the stored architecture.

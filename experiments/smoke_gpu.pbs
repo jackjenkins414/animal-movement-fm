@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -P um09
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=90GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=00:20:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N smoke_gpu
+#PBS -j oe
+
+export PATH="$HOME/.local/bin:$PATH"
+cd /g/data/um09/$USER/animal-movement-fm
+uv run python experiments/smoke_test_gpu.py
