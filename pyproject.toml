@@ -19,7 +19,7 @@ dependencies = [
     "scikit-learn>=1.4",   # split utilities, metrics scaffolding
     "statsmodels>=0.14",   # ARIMA baseline
     "xgboost>=2.0",        # XGBoost baseline
-    "torch>=2.2",          # LSTM, transformer
+    "torch==2.5.1",        # LSTM/transformer; pinned; Gadi's V100 (CC 7.0/Volta) needs a CUDA 12.x build; the latest torch uses CUDA 13, which dropped Volta.
     "matplotlib>=3.8",     # plots
     "seaborn>=0.13",       # plots
     "pyyaml>=6.0",         # config files
@@ -64,3 +64,14 @@ ignore = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+
+# On Linux (i.e. Gadi), pull torch from PyTorch's CUDA 12.1 wheel index so we get a
+# Volta-compatible (V100 / CC 7.0) build. On macOS this source doesn't apply, so uv
+# falls back to PyPI and installs the normal CPU/MPS torch for local development.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
