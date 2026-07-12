@@ -28,9 +28,8 @@ from pathlib import Path
 
 import numpy as np 
 import pandas as pd 
-import torch 
+import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from animal_movement_fm.eval.harness import iter_windows
 
@@ -245,8 +244,14 @@ class Transformer:
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0 duhh (forgot this lol)
         Xn = (X - self._mean) / self._std
 
-        # targets left in raw displacement units, exactly as the LSTM rung
-        loader = DataLoader(TensorDataset(Xn, Y), batch_size=self.batch_size, shuffle=True)
+        # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a 
+        # DataLoader that copies each batch CPU -> GPU. Our stork set is ~170 MB and so that fits easily in the V100's 32 GB, so this removes the 
+        # per-batch transfer + single process loader that starved the GPU in our prev iter1 (util ~15%). Shuffling still draws from torch's global RNG via 
+        # randperm, so the seeded determinism test is still unaffected. 
+        Xn = Xn.to(self.device) # live on GPU
+        Y = Y.to(self.device) # live on GPU
+        n_windows = Xn.size(0)
+        n_batches = math.ceil(n_windows / self.batch_size)
 
         self.net = _TransformerNet(
             input_dim=2,
@@ -263,7 +268,7 @@ class Transformer:
         # Warmup + cosine decay. warmup_frac<=0 is a constant-lr no-op, so the committed
         # default behaviour (and the passing tests) are unchanged; warmup_frac>0 applies the
         # transformer-standard recipe where `lr` is the peak reached at the end of warmup.
-        total_steps = max(1, self.epochs * len(loader))
+        total_steps = max(1, self.epochs * n_batches)
         warmup_steps = int(self.warmup_frac * total_steps)
 
         def _lr_scale(step: int) -> float:
@@ -282,8 +287,12 @@ class Transformer:
         self.net.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
-            for xb, yb in loader:
-                xb, yb = xb.to(self.device), yb.to(self.device)
+            # reshuffle each epoch; randperm on device, drawn from torch's global RNG
+            perm = torch.randperm(n_windows, device=self.device)
+            for start in range(0, n_windows, self.batch_size):
+                idx = perm[start : start + self.batch_size]
+                xb = Xn[idx]
+                yb = Y[idx]
 
                 optimiser.zero_grad()
                 pred = self.net(xb)
@@ -296,7 +305,7 @@ class Transformer:
 
                 epoch_loss += loss.item() * xb.size(0)
 
-            epoch_loss /= len(loader.dataset)
+            epoch_loss /= n_windows
             logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
         return self
 
@@ -351,11 +360,10 @@ class Transformer:
 # scalar stats, path, handling, state dict loading, return logic). The only difference is the class type, config keys, contructor arguments 
 # and network class, since we changed these to match the Transformer-specific config 
     def save(self, path: str | Path) -> None:
-        """Save trained weights, scaler stats, and architecture to `path`.
-        A checkpoint captures everything `predict` needs: the network weights,
-        the input-normalisation stats, and the architecture required to
-        rebuild the net before loading the weights into it. This decouples
-        expensive training (on NCI) from cheap, reproducible evaluation.
+        """
+        Save trained weights, scaler stats, and architecture to `path`.
+        A checkpoint captures everything `predict` needs: the network weights, the input-normalisation stats, and the architecture required to
+        rebuild the net before loading the weights into it. 
         """
         if self.net is None:
             raise RuntimeError("Nothing to save: model is not fitted.")
@@ -383,10 +391,10 @@ class Transformer:
 
     @classmethod
     def from_checkpoint(cls, path: str | Path, device: str | None = None) -> "Transformer":
-        """Rebuild a fitted model from a checkpoint written by `save`.
-        Reconstructs the model from the stored architecture, loads the weights,
-        and restores the scaler stats — yielding an instance ready to `predict`
-        without any retraining.
+        """
+        Rebuild a fitted model from a checkpoint written by `save`.
+        Reconstructs the model from the stored architecture, loads the weights, and restores the scaler stats; yielding an instance ready 
+        to `predict` without any retraining.
         """
         path = Path(path)
         # weights_only=False: this is our own trusted checkpoint and it contains a non-tensor `config` dict; explicit here to 
