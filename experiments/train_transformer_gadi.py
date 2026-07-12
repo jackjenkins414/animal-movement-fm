@@ -3,23 +3,31 @@
 # execution and the first convergence fix iteration. Specifically I wrote the docs, congfigs and a rough main
 # method which was polished and check by GenAI. 
 """
-Transformer training on Gadi (real stork data, full scale); convergence iteration 1.
+Transformer training on Gadi (real stork data, full scale); convergence iteration 2.
 
 Purpose
 -------
-As of now, our Transformer does not converge at 6h under the current constant-LR, unclipped recipe. This run applies the 
-standard transformer-stabilisation trio as a first principled attempt:
+Iteration 1 converged smoothly (train_mse 0.0482 -> 0.0214) but plateaued above the LSTM's 0.0179. The iter-1 recipe was
+doubly conservative: it lowered the peak LR (1e-3 -> 3e-4) and raised the batch (64 -> 256) at once, then cosine-decayed
+the LR to ~0. By the linear scaling rule a 4x larger batch wants a bigger peak LR, not a smaller one, so the optimiser was
+under driven and stalled before reaching the LSTM.
 
-  - lower peak LR      (3e-4, down from 1e-3)
-  - warmup + cosine    (warmup_frac=0.1; re-enabled)
-  - gradient clipping  (max global norm 1.0; new capability)
+Iteration 2 keeps everything from iter-1 except the peak LR:
 
-Architecture is held identical to the previous runs (d_model=64, nhead=4, num_layers=2) so any change in behaviour is 
-attributable to the optimisation recipe, not the model.
+  - raise peak LR      (1e-3, up from 3e-4)   OUR ONLY CHANGE 
+  - warmup + cosine    (warmup_frac=0.1; unchanged)
+  - gradient clipping  (max global norm 1.0; unchanged)
+  - batch_size 256, epochs 80 (unchanged)
 
-This is iteration 1, not a claimed fix. The signal to watch is the per-epoch `train_mse` in the log: the LSTM converges 
-to ~0.0179, so the target is to reach <= that and keep descending smoothly (no divergence / oscillation). The end of run 
-test summary is a secondary, human-readable check.
+Warmup + grad clipping are what make peak 1e-3 safe now; the original naive 1e-3 run (neither) diverged. Architecture is held
+identical to the previous runs (d_model=64, nhead=4, num_layers=2) so any change in behaviour is attributable to the LR, not
+the model.
+
+Also new this run: Transformer.fit() now preloads the training tensors onto the GPU once and indexes batches on-device, rather
+than streaming through a DataLoader with per-batch CPU->GPU copies. Iter-1 ran 72 min at ~15% GPU util (V100 starved); the
+whole train set is ~170 MB and fits easily in 32 GB, so this should cut the run to minutes without changing the maths.
+
+Note our the target is to reach <= the LSTM's 0.0179 and keep descending smoothly. 
 
 Differences from run_transformer_real.py (deliberate for Gadi):
   - device auto-selects cuda (the whole point of running here).
@@ -46,9 +54,9 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 # the checkout lives (Mac or /g/data on Gadi).
 REPO = Path(__file__).resolve().parents[1]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-CKPT = REPO / "checkpoints" / "transformer_stork_convergence_iter1.pt"
+CKPT = REPO / "checkpoints" / "transformer_stork_convergence_iter2.pt"
 
-# convergence fix hyperparameters (iteration 1)
+# convergence fix hyperparameters (iteration 2)
 CONFIG = dict(
     d_model=64,
     nhead=4,
@@ -58,7 +66,7 @@ CONFIG = dict(
     context_length=24,
     epochs=80,
     batch_size=256, # larger than the old 64: fewer, less-noisy updates -> steadier descent, better GPU use
-    lr=3e-4,   # lower peak LR
+    lr=1e-3,   # raised from iter-1's 3e-4: linear-scaling rule for the 4x batch; warmup + grad_clip keep it safe
     warmup_frac=0.1, # linear warmup then cosine decay
     grad_clip=1.0, # cap global grad norm
 )
@@ -66,7 +74,7 @@ CONFIG = dict(
 
 def main() -> None:
     print("=" * 70)
-    print("Transformer convergence run (iteration 1)")
+    print("Transformer convergence run (iteration 2)")
     print(f"device available : cuda={torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"gpu              : {torch.cuda.get_device_name(0)}")
