@@ -80,12 +80,18 @@ class PredictionContext:
     timestamp : pd.Timestamp | None
         Time of the target step (the one being predicted), for time of day features. None when unavailable
         (e.g. synthetic data without real times).
+    history_timestamps : np.ndarray | None
+        Shape (T,), the timestamp of each fix in `history`, row aligned with it (history_timestamps[i] is the
+        time of history[i]). Populated by `evaluate` alongside `timestamp`; None when times are unavailable.
+        This is what a per position time of day feature needs: the clock at every fix in the window, not just
+        the target's. Kept separate from `history` so the position array stays purely (lon, lat).
     extra : dict[str, Any]
-        Open slot for future side information (covariates, individual metadata) without another signature 
+        Open slot for future side information (covariates, individual metadata) without another signature
         change. Empty for now.
     """
     history: np.ndarray
     timestamp: "pd.Timestamp | None" = None
+    history_timestamps: "np.ndarray | None" = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -202,17 +208,25 @@ def evaluate(
         if not windows: 
             continue
 
-        # Pull the per-target rows from the original trajectory once 
+        # pull the per target rows from the original trajectory once
         # so we can carry through extra_cols (cheaper this way)
         target_indices = [w[3] for w in windows]
         target_rows = traj.iloc[target_indices]
 
-        # The prediction loop. Each model handles its own batching internally if it 
-        # wants to; the protocol contract is one prediction at a time. This keeps 
-        # the protocol simple at the cost of some inefficiency for batched models
-        # We can optimise in future if it becomes a bottleneck
+        # whole trajectory timestamp array, sliced per window below. iter_windows already gives us each window's target index, and 
+        # history is coords[idx-W:idx], so the row aligned per fix times are the same slice of this array. Lets models that use a 
+        # per-position time of day feature see every fix's clock, not just the target's, at zero extra windowing cost.
+        traj_timestamps = traj["timestamp"].to_numpy()
+
+        # The prediction loop. Each model handles its own batching internally if it wants to; the protocol contract is one prediction 
+        # at a time. This keeps the protocol simple at the cost of some inefficiency for batched models. Note, this is what we can 
+        # optimise in future if it becomes a bottleneck
         for (history, target, ts, _idx), (_, target_row) in zip(windows, target_rows.iterrows()):
-            context = PredictionContext(history=history, timestamp=pd.Timestamp(ts))
+            context = PredictionContext(
+                history=history,
+                timestamp=pd.Timestamp(ts),
+                history_timestamps=traj_timestamps[_idx - context_length : _idx],
+            )
             pred = predictor.predict(context)
             err_m = haversine_distance(pred[0], pred[1], target[0], target[1])
             err_deg = euclidean_distance_degrees(pred[0], pred[1], target[0], target[1])
