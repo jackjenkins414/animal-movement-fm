@@ -45,6 +45,18 @@ def _mean_error(df, context_length, predict_fn):
     return float(np.mean(errs))
 
 
+def _context_with_time(history, freq="6h", start="2024-06-01"):
+    """A PredictionContext carrying per-fix timestamps row-aligned with history (what Design B needs).
+
+    Mirrors what the harness threads through at eval time, so time-feature predicts can be exercised
+    directly without going through evaluate().
+    """
+    ts = pd.date_range(start, periods=len(history), freq=freq).to_numpy()
+    return PredictionContext(
+        history=history, timestamp=pd.Timestamp(ts[-1]), history_timestamps=ts
+    )
+
+
 @pytest.fixture
 def small_df():
     return _make_df()
@@ -56,6 +68,14 @@ def fitted_model():
     df = _make_df()
     return LSTM(hidden_dim=8, num_layers=1, context_length=12,
                 epochs=3, batch_size=32, device="cpu").fit(df)
+
+
+@pytest.fixture(scope="module")
+def fitted_time_model():
+    # Same tiny config but with Design B time-of-day on. _make_df carries a timestamp column.
+    df = _make_df()
+    return LSTM(hidden_dim=8, num_layers=1, context_length=12, epochs=3, batch_size=32,
+                use_time_features=True, device="cpu").fit(df)
 
 
 # ----------------------------------------------------------------------
@@ -71,6 +91,9 @@ class TestProtocol:
 
     def test_name_reflects_architecture(self):
         assert LSTM(hidden_dim=32, num_layers=2).name == "lstm_h32_l2"
+
+    def test_name_reflects_time_feature(self):
+        assert LSTM(hidden_dim=32, num_layers=2, use_time_features=True).name == "lstm_h32_l2_time"
 
 
 # ----------------------------------------------------------------------
@@ -166,11 +189,12 @@ class TestCheckpoint:
 class TestWindows:
     def test_window_shapes(self, small_df):
         model = LSTM(context_length=12, device="cpu")
-        X, Y = model._make_windows(small_df)
+        X, Y, T = model._make_windows(small_df)
         assert X.ndim == 3
         assert X.shape[1:] == (11, 2)   # context_length - 1 displacements, 2 channels
         assert Y.shape[1:] == (2,)
         assert X.shape[0] == Y.shape[0]
+        assert T is None                # time features off by default
 
 
 # ----------------------------------------------------------------------
@@ -200,3 +224,50 @@ class TestLearning:
             m1.predict(PredictionContext(history=h)),
             m2.predict(PredictionContext(history=h)),
             rtol=1e-5, atol=1e-6)
+
+
+# ----------------------------------------------------------------------
+# Time-of-day feature (Design B)
+# ----------------------------------------------------------------------
+
+class TestTimeFeatures:
+    def test_input_dim_toggles(self):
+        assert LSTM(use_time_features=False).input_dim == 2
+        assert LSTM(use_time_features=True).input_dim == 4
+
+    def test_make_windows_emits_time_channels(self, small_df):
+        model = LSTM(context_length=12, use_time_features=True, device="cpu")
+        X, Y, T = model._make_windows(small_df)
+        assert T is not None
+        assert T.shape == (X.shape[0], 11, 2)             # (n, W-1, [sin, cos])
+        r2 = T[..., 0] ** 2 + T[..., 1] ** 2              # sin^2 + cos^2 == 1
+        assert torch.allclose(r2, torch.ones_like(r2), atol=1e-5)
+
+    def test_fit_builds_four_channel_net(self, fitted_time_model):
+        assert fitted_time_model.use_time_features is True
+        assert fitted_time_model.net.lstm.input_size == 4   # 2 displacement + 2 time channels
+
+    def test_predict_requires_timestamps(self, fitted_time_model):
+        # Fitted with time but handed a context without per-fix times -> explicit error, not silent wrong answer.
+        with pytest.raises(ValueError):
+            fitted_time_model.predict(PredictionContext(history=np.zeros((12, 2), dtype=np.float32)))
+
+    def test_predict_with_time_shape(self, fitted_time_model):
+        history = (np.random.default_rng(3).standard_normal((12, 2)) * 0.01).cumsum(axis=0)
+        pred = fitted_time_model.predict(_context_with_time(history))
+        assert pred.shape == (2,)
+        assert np.all(np.isfinite(pred))
+
+    def test_checkpoint_roundtrip_with_time(self, fitted_time_model, tmp_path):
+        history = (np.random.default_rng(4).standard_normal((12, 2)) * 0.01).cumsum(axis=0)
+        ctx = _context_with_time(history)
+        before = fitted_time_model.predict(ctx)
+
+        path = tmp_path / "ckpt_time.pt"
+        fitted_time_model.save(path)
+        reloaded = LSTM.from_checkpoint(path, device="cpu")
+        assert reloaded.use_time_features is True
+        assert reloaded.input_dim == 4
+        after = reloaded.predict(ctx)
+
+        np.testing.assert_allclose(before, after, rtol=1e-5, atol=1e-6)

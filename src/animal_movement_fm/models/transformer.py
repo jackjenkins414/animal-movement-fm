@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 
 from animal_movement_fm.eval.harness import iter_windows
+from animal_movement_fm.features.time import local_solar_sincos
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,7 @@ class Transformer:
         lr: float = 1e-3,
         warmup_frac: float = 0.0,
         grad_clip: float | None = None,
+        use_time_features: bool = False,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -194,6 +196,10 @@ class Transformer:
         # unchanged. A finite value (like 1.0 for ex) stabilises training by capping the update size when a batch 
         # produces an unusually large gradient
         self.grad_clip = None if grad_clip is None else float(grad_clip)
+        # time of day: when on, each displacement gets its destination fix's local-solar (sin, cos) appended, so the net 
+        # input is 4 channels instead of 2. Default off keeps the raw sequence model, its checkpoints, and the tests unchanged
+        self.use_time_features = bool(use_time_features)
+        self.input_dim = 4 if self.use_time_features else 2
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -203,32 +209,46 @@ class Transformer:
         self._std: np.ndarray | None = None     # (2,) displacement std
 
         # auto label in results table
-        self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}"
+        suffix = "_time" if self.use_time_features else ""
+        self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}{suffix}"
 
-    def _make_windows(self, df: pd.DataFrame, group_col: str = "individual_id") -> tuple[torch.Tensor, torch.Tensor]:
-        """Turn a trajectory DataFrame into (inputs, targets) displacement tensors.
+    def _make_windows(
+        self, df: pd.DataFrame, group_col: str = "individual_id"
+    ) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]":
+        """Turn a trajectory DataFrame into (inputs, targets, time-features) tensors.
 
-        Identical to the LSTM rung; window definition is delegated to the harness's `iter_windows` so the net trains on exactly the windows it 
-        is evaluated on. Each window's (context_length, 2) position history is differenced into (context_length - 1, 2) input displacements; 
+        Identical to the LSTM rung; window definition is delegated to the harness's `iter_windows` so the net trains on exactly the windows it
+        is evaluated on. Each window's (context_length, 2) position history is differenced into (context_length - 1, 2) input displacements;
         the target is the single displacement from the last history position to the target position.
+
+        When `use_time_features` is on, each displacement is also tagged with the local-solar (sin, cos) of the fix it lands on: displacement i 
+        spans fix i -> i+1, so it carries fix i+1's clock. The last displacement therefore carries the most recent fix's time, i.e, the departure 
+        clock of the step being predicted. Time features are left raw (already in [-1, 1]); only the displacement channels are standardised, in `fit`.
 
         Returns
         -------
         X : torch.Tensor, shape (n_windows, context_length - 1, 2)
         Y : torch.Tensor, shape (n_windows, 2)
+        T : torch.Tensor | None, shape (n_windows, context_length - 1, 2) of (sin, cos), or None when time features are disabled.
         """
-        xs, ys = [], []
+        xs, ys, ts = [], [], []
         for _, traj in df.groupby(group_col, sort=False):
-            for history, target, _ts, _t in iter_windows(traj, self.context_length):
+            traj_ts = traj["timestamp"].to_numpy() if self.use_time_features else None
+            for history, target, _ts, t_idx in iter_windows(traj, self.context_length):
                 xs.append(np.diff(history, axis=0)) # (W-1, 2) input displacements
                 ys.append(target - history[-1]) # (2,) target displacement
+                if self.use_time_features:
+                    win_ts = traj_ts[t_idx - self.context_length : t_idx] # (W,) row aligned with history
+                    sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0]) # destination fixes 1..W-1
+                    ts.append(np.stack([sin, cos], axis=-1)) # (W-1, 2)
 
         if not xs:
             raise ValueError(f"No windows produced: every individual has fewer than " f"{self.context_length + 1} positions.")
 
         X = torch.tensor(np.stack(xs), dtype=torch.float32)
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
-        return X, Y
+        T = torch.tensor(np.stack(ts), dtype=torch.float32) if self.use_time_features else None
+        return X, Y, T
 
     def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "Transformer":
         """
@@ -237,24 +257,29 @@ class Transformer:
         Builds displacement windows, standardises the inputs (storing the per-channel mean/std so `predict` can apply the identical transform), 
         then runs a standard mini-batch training loop. Returns self so callers can write `model = Transformer().fit(train_df)`.
         """
-        X, Y = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2)
+        X, Y, T = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2), (N, W-1, 2)|None
 
-        # standardise inputs using TRAIN statistics only, and remember them; predict() must reuse these exact stats, so they are stored on self
+        # standardise the DISPLACEMENT channels using TRAIN statistics only, and remember them; predict() must reuse these exact stats. Time
+        # features (if any) are already bounded in [-1, 1] and are NOT standardised.
         self._mean = X.mean(dim=(0, 1), keepdim=True) # (1, 1, 2)
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0 duhh (forgot this lol)
         Xn = (X - self._mean) / self._std
 
-        # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a 
+        # append the raw time of day channels AFTER standardisation, so the net sees (N, W-1, 4)
+        if self.use_time_features:
+            Xn = torch.cat([Xn, T], dim=-1)
+
+        # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a
         # DataLoader that copies each batch CPU -> GPU. Our stork set is ~170 MB and so that fits easily in the V100's 32 GB, so this removes the 
         # per-batch transfer + single process loader that starved the GPU in our prev iter1 (util ~15%). Shuffling still draws from torch's global RNG via 
-        # randperm, so the seeded determinism test is still unaffected. 
+        # randperm, so the seeded determinism test is still unaffected
         Xn = Xn.to(self.device) # live on GPU
         Y = Y.to(self.device) # live on GPU
         n_windows = Xn.size(0)
         n_batches = math.ceil(n_windows / self.batch_size)
 
         self.net = _TransformerNet(
-            input_dim=2,
+            input_dim=self.input_dim,
             d_model=self.d_model,
             nhead=self.nhead,
             num_layers=self.num_layers,
@@ -339,15 +364,30 @@ class Transformer:
             return history[-1].copy()
 
         # (W-1, 2)
-        disp = np.diff(history, axis=0) 
+        disp = np.diff(history, axis=0)
 
         # standardise with the stored TRAIN stats (never computed here)
         mean = self._mean.detach().cpu().numpy().reshape(1, 2)
         std = self._std.detach().cpu().numpy().reshape(1, 2)
         disp_n = (disp - mean) / std
 
-        # (W-1, 2) -> (1, W-1, 2): the net expects a batch dimension
-        x = torch.tensor(disp_n, dtype=torch.float32).unsqueeze(0).to(self.device)
+        # append the same destination tagged local-solar (sin, cos) built in _make_windows, using the per fix timestamps the 
+        # harness threads through the context
+        if self.use_time_features:
+            if context.history_timestamps is None:
+                raise ValueError(
+                    "model was fitted with time features but context.history_timestamps is None; "
+                    "the harness populates it, so this is a direct predict() call missing the times."
+                )
+            win_ts = np.asarray(context.history_timestamps)
+            sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0])  # destination fixes 1..W-1
+            tfeat = np.stack([sin, cos], axis=-1).astype(np.float32)  # (W-1, 2)
+            feat = np.concatenate([disp_n, tfeat], axis=-1)  # (W-1, 4)
+        else:
+            feat = disp_n
+
+        # (W-1, C) -> (1, W-1, C): the net expects a batch dimension
+        x = torch.tensor(feat, dtype=torch.float32).unsqueeze(0).to(self.device)
 
         self.net.eval()
         with torch.no_grad():
@@ -383,6 +423,7 @@ class Transformer:
                     "dim_feedforward": self.dim_feedforward,
                     "dropout": self.dropout,
                     "context_length": self.context_length,
+                    "use_time_features": self.use_time_features,
                     "name": self.name,
                 },
             },
@@ -401,6 +442,7 @@ class Transformer:
         # silence the FutureWarning and stay correct when torch flips the default to True
         ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
+        use_time = cfg.get("use_time_features", False)   # old checkpoints predate the flag -> raw sequence
 
         # rebuild the wrapper with the stored architecture.
         model = cls(
@@ -410,13 +452,14 @@ class Transformer:
             dim_feedforward=cfg["dim_feedforward"],
             dropout=cfg["dropout"],
             context_length=cfg["context_length"],
+            use_time_features=use_time,
             device=device,
             name=cfg["name"],
         )
 
         # rebuild the net to match, load weights, restore scaler stats.
         model.net = _TransformerNet(
-            input_dim=2,
+            input_dim=model.input_dim,
             d_model=cfg["d_model"],
             nhead=cfg["nhead"],
             num_layers=cfg["num_layers"],

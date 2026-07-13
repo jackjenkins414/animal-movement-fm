@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from animal_movement_fm.eval.harness import iter_windows
+from animal_movement_fm.features.time import local_solar_sincos
 
 logger = logging.getLogger(__name__)
 
@@ -79,20 +80,26 @@ class LSTM:
         hidden_dim: int = 64, 
         num_layers: int = 1, 
         context_length: int = 24, # match harness, change/tune later 
-        epochs: int =30, 
-        batch_size: int = 64, 
-        lr: float = 1e-3, 
-        device: str | None = None, 
-        name: str | None = None, 
-    ) -> None: 
-        
-        # architecture & training cofig 
+        epochs: int =30,
+        batch_size: int = 64,
+        lr: float = 1e-3,
+        use_time_features: bool = False,
+        device: str | None = None,
+        name: str | None = None,
+    ) -> None:
+
+        # architecture & training cofig
         self.hidden_dim = int(hidden_dim)
         self.num_layers = int(num_layers)
         self.context_length = int(context_length)
         self.epochs = int(epochs)
         self.batch_size = int(batch_size)
         self.lr = float(lr)
+        # time of day: when on, each displacement gets its destination fix's local-solar (sin, cos) appended, 
+        # so the net input is 4 channels instead of 2. Default off keeps the raw sequence model, its checkpoints, 
+        # and the tests unchanged.
+        self.use_time_features = bool(use_time_features)
+        self.input_dim = 4 if self.use_time_features else 2
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -102,27 +109,41 @@ class LSTM:
         self._std: np.ndarray | None = None # (2,) displacement std 
 
 
-        # auto label in results table 
-        self.name = name or f"lstm_h{self.hidden_dim}_l{self.num_layers}"
+        # auto label in results table
+        suffix = "_time" if self.use_time_features else ""
+        self.name = name or f"lstm_h{self.hidden_dim}_l{self.num_layers}{suffix}"
 
-    def _make_windows(self, df: pd.DataFrame, group_col: str = "individual_id") -> tuple[torch.Tensor, torch.Tensor]:
-        """Turn a trajectory DataFrame into (inputs, targets) displacement tensors.
-        
-        Window definition is delegated to the harness's `iter_windows`, so the net trains on exactly 
-        the windows it is evaluated on. Each window's (context_length, 2) position history is 
-        differenced into (context_length - 1, 2) input displacements; the target is the single
-        displacement from the last history position to the target position.
+    def _make_windows(
+        self, df: pd.DataFrame, group_col: str = "individual_id"
+    ) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]":
+        """Turn a trajectory DataFrame into (inputs, targets, time-features) tensors.
+
+        Window definition is delegated to the harness's `iter_windows`, so the net trains on exactly the windows it is 
+        evaluated on. Each window's (context_length, 2) position history is differenced into (context_length - 1, 2) 
+        input displacements; the target is the single displacement from the last history position to the target position.
+
+        When `use_time_features` is on, each displacement is also tagged with the local solar (sin, cos) of the fix it 
+        lands on: displacement i spans fix i -> i+1, so it carries fix i+1's clock. The last displacement therefore 
+        carries the most recent fix's time, i.e. the departure clock of the step being predicted. Time features are left 
+        raw (already in [-1, 1]); only the displacement channels are standardised, in `fit`.
 
         Returns
         -------
         X : torch.Tensor, shape (n_windows, context_length - 1, 2)
         Y : torch.Tensor, shape (n_windows, 2)
+        T : torch.Tensor | None, shape (n_windows, context_length - 1, 2) of (sin, cos), or None when time features 
+            are disabled.
         """
-        xs, ys = [], []
+        xs, ys, ts = [], [], []
         for _, traj in df.groupby(group_col, sort=False):
-            for history, target, _ts, _t in iter_windows(traj, self.context_length):
-                xs.append(np.diff(history, axis=0))   # (W-1, 2) input displacements
-                ys.append(target - history[-1])       # (2,) target displacement
+            traj_ts = traj["timestamp"].to_numpy() if self.use_time_features else None
+            for history, target, _ts, t_idx in iter_windows(traj, self.context_length):
+                xs.append(np.diff(history, axis=0))  # (W-1, 2) input displacements
+                ys.append(target - history[-1])  # (2,) target displacement
+                if self.use_time_features:
+                    win_ts = traj_ts[t_idx - self.context_length : t_idx]   # (W,) row aligned with history
+                    sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0])   # destination fixes 1..W-1
+                    ts.append(np.stack([sin, cos], axis=-1))   # (W-1, 2)
 
         if not xs:
             raise ValueError(
@@ -132,7 +153,8 @@ class LSTM:
 
         X = torch.tensor(np.stack(xs), dtype=torch.float32)
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
-        return X, Y
+        T = torch.tensor(np.stack(ts), dtype=torch.float32) if self.use_time_features else None
+        return X, Y, T
     
     def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "LSTM":
         """
@@ -144,24 +166,28 @@ class LSTM:
         `model = LSTM().fit(train.df)`
         """
 
-        X, Y = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2)
+        X, Y, T = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2), (N, W-1, 2)|None
 
-        # standardise inputs using TRAIN statistics only, and remember them. Predict() must reuse these exact 
-        # stats, so they are stored on self
+        # standardise the DISPLACEMENT channels using TRAIN statistics only, and remember them. Predict() must reuse these exact stats, 
+        # so they are stored on self. Time features (if any) are already bounded in [-1, 1] and are NOT standardised.
         self._mean = X.mean(dim=(0, 1), keepdim=True) # (1, 1, 2)
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0
-        Xn = (X - self._mean) / self._std 
+        Xn = (X - self._mean) / self._std
 
-        # Preload the full training tensors onto the GPU once so batches are indexed on device, eliminating per batch CPU -> GPU 
+        # append the raw time of day channels AFTER standardisation, so the net sees (N, W-1, 4)
+        if self.use_time_features:
+            Xn = torch.cat([Xn, T], dim=-1)
+
+        # preload the full training tensors onto the GPU once so batches are indexed on device, eliminating per batch CPU -> GPU
         # transfers while still preserving deterministic shuffling
         Xn = Xn.to(self.device)
         Y = Y.to(self.device)
         n_windows = Xn.size(0)
 
         self.net = _LSTMNet(
-            input_dim=2, 
-            hidden_dim=self.hidden_dim, 
-            num_layers = self.num_layers, 
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            num_layers = self.num_layers,
             output_dim=2,
         ).to(self.device)
 
@@ -226,10 +252,25 @@ class LSTM:
         # standardise with the stored TRAIN stats (never computed here)
         mean = self._mean.detach().cpu().numpy().reshape(1,2)
         std = self._std.detach().cpu().numpy().reshape(1,2)
-        disp_n = (disp - mean) / std 
-        
-        # (W-1,2) -> (1, W-1, 2): the net expects a batch dimension
-        x = torch.tensor(disp_n, dtype=torch.float32).unsqueeze(0).to(self.device)
+        disp_n = (disp - mean) / std
+
+        # ADD TIME: append the same destination tagged local solar (sin, cos) built in _make_windows, using the per fix timestamps 
+        # the harness threads through the context
+        if self.use_time_features:
+            if context.history_timestamps is None:
+                raise ValueError(
+                    "model was fitted with time features but context.history_timestamps is None; "
+                    "the harness populates it, so this is a direct predict() call missing the times."
+                )
+            win_ts = np.asarray(context.history_timestamps)
+            sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0])   # destination fixes 1..W-1
+            tfeat = np.stack([sin, cos], axis=-1).astype(np.float32)    # (W-1, 2)
+            feat = np.concatenate([disp_n, tfeat], axis=-1)            # (W-1, 4)
+        else:
+            feat = disp_n
+
+        # (W-1, C) -> (1, W-1, C): the net expects a batch dimension
+        x = torch.tensor(feat, dtype=torch.float32).unsqueeze(0).to(self.device)
         
         self.net.eval()
         with torch.no_grad():
@@ -268,6 +309,7 @@ class LSTM:
                     "hidden_dim": self.hidden_dim,
                     "num_layers": self.num_layers,
                     "context_length": self.context_length,
+                    "use_time_features": self.use_time_features,
                     "name": self.name,
                 },
             },
@@ -286,19 +328,21 @@ class LSTM:
         # silence the FutureWarning and stay correct when torch flips the default to True
         ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
+        use_time = cfg.get("use_time_features", False)   # old checkpoints predate the flag -> raw sequence
 
         # Rebuild the wrapper with the stored architecture.
         model = cls(
             hidden_dim=cfg["hidden_dim"],
             num_layers=cfg["num_layers"],
             context_length=cfg["context_length"],
+            use_time_features=use_time,
             device=device,
             name=cfg["name"],
         )
 
         # Rebuild the net to match, load weights, restore scaler stats.
         model.net = _LSTMNet(
-            input_dim=2,
+            input_dim=model.input_dim,
             hidden_dim=cfg["hidden_dim"],
             num_layers=cfg["num_layers"],
             output_dim=2,
