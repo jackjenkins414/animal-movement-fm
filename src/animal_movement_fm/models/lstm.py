@@ -21,9 +21,8 @@ from pathlib import Path
 
 import numpy as np 
 import pandas as pd 
-import torch 
+import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset 
 
 from animal_movement_fm.eval.harness import iter_windows
 
@@ -153,9 +152,11 @@ class LSTM:
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0
         Xn = (X - self._mean) / self._std 
 
-        # targets are left in raw displacement units; the loss is then in the same units we care about, and 
-        # predict() adds the raw predicted displacement straight onto the last position
-        loader = DataLoader(TensorDataset(Xn, Y), batch_size=self.batch_size, shuffle=True)
+        # Preload the full training tensors onto the GPU once so batches are indexed on device, eliminating per batch CPU -> GPU 
+        # transfers while still preserving deterministic shuffling
+        Xn = Xn.to(self.device)
+        Y = Y.to(self.device)
+        n_windows = Xn.size(0)
 
         self.net = _LSTMNet(
             input_dim=2, 
@@ -170,8 +171,12 @@ class LSTM:
         self.net.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
-            for xb, yb in loader: 
-                xb, yb = xb.to(self.device), yb.to(self.device)
+            # reshuffle each epoch; randperm on device etc 
+            perm = torch.randperm(n_windows, device=self.device)
+            for start in range(0, n_windows, self.batch_size):
+                idx = perm[start : start + self.batch_size]
+                xb = Xn[idx]
+                yb = Y[idx]
 
                 optimiser.zero_grad()
                 pred = self.net(xb)
@@ -181,9 +186,9 @@ class LSTM:
 
                 epoch_loss += loss.item() * xb.size(0)
 
-            epoch_loss /= len(loader.dataset)
+            epoch_loss /= n_windows
             logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
-        return self 
+        return self
 
     
     def predict(self, context) -> np.ndarray:
