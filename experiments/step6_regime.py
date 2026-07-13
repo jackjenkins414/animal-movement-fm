@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 REPO = Path(__file__).resolve().parents[1]
 RESULTS = REPO / "experiments" / "results"
 
-MODELS = ["persistence", "avg_k1", "avg_k3", "lstm", "transformer"]
+MODELS = ["persistence", "avg_k1", "avg_k3", "lstm", "transformer", "lstm_time", "transformer_time"]
 REGIME_CUT_KM = 0.06        # Nominal foraging/moving trough (§5)
 HYST_LOW_KM = 0.04          # Clearly foraging below this
 HYST_HIGH_KM = 0.10         # Clearly moving above this --- 0.04-0.10 is the grey band
@@ -114,9 +114,16 @@ def bucket_stats(df: pd.DataFrame, model: str) -> list[dict]:
 def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
 
+    # only decompose models that actually have a preds parquet, so step6 runs before every cell of the
+    # time 2x2 is trained (missing models are skipped with a note, not an error)
+    present = [m for m in MODELS if (RESULTS / f"preds_{m}.parquet").exists()]
+    missing = [m for m in MODELS if m not in present]
+    if missing:
+        print(f"skipping models with no preds parquet: {missing}\n")
+
     all_rows = []
     regime_counts = None
-    for m in MODELS:
+    for m in present:
         df = tag_regime(load(m))
         if regime_counts is None:
             regime_counts = df["regime"].value_counts()
@@ -135,12 +142,12 @@ def main() -> None:
     # Per-regime table, models side by side on median
     print("median error by regime and model (km):")
     piv = table.pivot(index="model", columns="regime", values="median_km")
-    piv = piv.reindex(index=MODELS, columns=["foraging", "moving", "launch", "settle"])
+    piv = piv.reindex(index=present, columns=["foraging", "moving", "launch", "settle"])
     print(piv.to_string(float_format=lambda v: f"{v:.3f}"))
     print()
     print("p99 error by regime and model (km):")
     piv99 = table.pivot(index="model", columns="regime", values="p99_km")
-    piv99 = piv99.reindex(index=MODELS, columns=["foraging", "moving", "launch", "settle"])
+    piv99 = piv99.reindex(index=present, columns=["foraging", "moving", "launch", "settle"])
     print(piv99.to_string(float_format=lambda v: f"{v:.2f}"))
 
     # Grouped bar: median error per regime, per model
@@ -149,18 +156,20 @@ def main() -> None:
     x = np.arange(len(regimes))
     w = 0.15
     colours = {"persistence": "#4C72B0", "avg_k1": "#8172B3", "avg_k3": "#937860",
-               "lstm": "#DA8BC3", "transformer": "#C44E52"}
-    for i, m in enumerate(MODELS):
+               "lstm": "#DA8BC3", "transformer": "#C44E52",
+               "lstm_time": "#55A868", "transformer_time": "#CCB974"}
+    for i, m in enumerate(present):
         med = [table[(table.model == m) & (table.regime == r)]["median_km"].values
                for r in regimes]
         med = [v[0] if len(v) else np.nan for v in med]
-        a_med.bar(x + i * w, med, w, label=m, color=colours[m])
+        a_med.bar(x + i * w, med, w, label=m, color=colours.get(m, "#888888"))
         p99 = [table[(table.model == m) & (table.regime == r)]["p99_km"].values
                for r in regimes]
         p99 = [v[0] if len(v) else np.nan for v in p99]
-        a_p99.bar(x + i * w, p99, w, label=m, color=colours[m])
+        a_p99.bar(x + i * w, p99, w, label=m, color=colours.get(m, "#888888"))
+    centre = (len(present) - 1) / 2.0 * w   # centre each regime's tick under its group, whatever the model count
     for ax, ttl in [(a_med, "median"), (a_p99, "p99")]:
-        ax.set_xticks(x + 2 * w); ax.set_xticklabels(regimes)
+        ax.set_xticks(x + centre); ax.set_xticklabels(regimes)
         ax.set_ylabel(f"{ttl} error (km)"); ax.set_title(f"{ttl} error by regime")
         ax.legend(fontsize=8)
     fig.tight_layout()

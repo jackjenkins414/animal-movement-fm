@@ -44,8 +44,15 @@ REPO = Path(__file__).resolve().parents[1]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
 RESULTS = REPO / "experiments" / "results"
 CHECKPOINTS = REPO / "checkpoints"
-LSTM_CKPT = CHECKPOINTS / "lstm_stork_h64_l1_e60.pt"
-TRANSFORMER_CKPT = CHECKPOINTS / "transformer_stork_d64_l2_e60.pt"
+
+# checkpoints (80 epochs / batch 256, Gadi) for the raw sequence head to head
+#  hese supersede our prev convergence e60 checkpoints used in our diagnostic dump
+LSTM_CKPT = CHECKPOINTS / "lstm_stork_convergence_matched.pt"
+TRANSFORMER_CKPT = CHECKPOINTS / "transformer_stork_convergence_iter1.pt"
+# time of day variants; same recipe as the raw ones + use_time_features=True. from_checkpoint reads the
+# flag, so these load as 4channel nets and evaluate() supplies the per fix timestamps automatically
+LSTM_TIME_CKPT = CHECKPOINTS / "lstm_stork_time.pt"
+TRANSFORMER_TIME_CKPT = CHECKPOINTS / "transformer_stork_time.pt"
 CONTEXT_LENGTH = 24
 
 
@@ -118,6 +125,8 @@ def main() -> None:
     neural = [
         (LSTM_CKPT, LSTM, "lstm"),
         (TRANSFORMER_CKPT, Transformer, "transformer"),
+        (LSTM_TIME_CKPT, LSTM, "lstm_time"),
+        (TRANSFORMER_TIME_CKPT, Transformer, "transformer_time"),
     ]
     for ckpt_path, cls, name in neural:
         if not ckpt_path.exists():
