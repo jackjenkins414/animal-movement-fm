@@ -285,3 +285,63 @@ Based off our diurnal finding, and now that PredictionContext delivers the targe
 **Local-solar correction.** We then corrected the feature inside `_build_features` by shifting the hour by `longitude / 15` (15 degrees = 1 h of Earth's rotation, using the last history fix's longitude) before the sin/cos, so every bird's solar afternoon peak maps to the same corrected hour. Mean solar time only, the equation of time wobble ($\leq$  ~15 min) is negligible at 6 h cadence, so we omit it. Re-running the A/B, the correction lifted the **body** further (median +2.8 -> +4.4 %, p90 +4.0 -> +5.1 %) while leaving the **p99 tail unchanged** (+2.5 -> +2.4 %).
 
 **Interpretation.** The correction did the physically sensible thing and confirmed our hypothesis that aligning solar phase across birds extracted more signal. But the benefit appears to land on the day to day movement body, not the migration tail, which makes sense, because the p99 tail is launch onset timing (a seasonal/calendar event) that time of day cannot reach, while the body carries the daily thermal soaring on/off rhythm the feature captures. The effect is real but modest, on untuned XGBoost treating sin/cos as two columns among thirty. Verdict for the plan is therefore that time of day earns its place and the solar correction is worth keeping, so it is carried forward to the neural models at step 3 (once they converge first (we have to fix that next)), with the expectation that the benefit is a body tightening one concentrated off the tail.s
+
+## 2026-07-12: Transformer convergence resolved on real 6h stork data (Gadi V100)
+
+Before adding the time of day feature to the neural models, we first isolated the existing Transformer training problem at 6h cadence and changed no model inputs or architectural components. Training was moved to NCI Gadi using a V100 32 GB GPU on the `gpuvolta` queue. Three enabling changes were made: PyTorch was pinned to `2.5.1+cu121`, because newer CUDA 13 wheels no longer supported the V100's compute capability 7.0 and produced `CUBLAS_STATUS_ARCH_MISMATCH`; optional gradient clipping was added to the Transformer, with a default of `None` so existing behaviour and tests remain unchanged; and the approximately 170 MB training tensor set was preloaded onto the GPU once inside `Transformer.fit()`, with batches selected using an on-device `randperm` rather than copied from host memory through a `DataLoader` each iteration. The training entry point is `experiments/train_transformer_gadi.py`, submitted through `experiments/train_transformer.pbs`.
+
+The optimisation diagnostic was per-epoch training MSE. The previously converged LSTM training MSE of `0.0179` is our reference, although the two architectures need not share the same attainable training loss and the final comparison remains based on held-out movement error.
+
+### Two learning-rate runs
+
+Both Transformer runs used the same architecture and training configuration:
+
+* `d_model=64`
+* `nhead=4`
+* `num_layers=2`
+* `dim_feedforward=128`
+* `dropout=0.1`
+* `context_length=24`
+* `batch_size=256`
+* `epochs=80`
+* `warmup_frac=0.1`
+* linear warmup followed by cosine decay to approximately zero
+* `grad_clip=1.0`
+* Adam optimiser
+* MSE loss
+
+The only experimental difference was the peak learning rate, which we discuss below. 
+
+* **iter-1 (`lr=3e-4`).** This run applied the full Transformer stabilisation recipe at 6h for the first time: a lower peak learning rate, linear warmup, cosine decay, and gradient clipping. Training was smooth and approximately monotonic, with `train_mse` decreasing from `0.0482` to `0.0214` and flattening over roughly the final 15 epochs. On the 121,656 held out test predictions, the model achieved a median error of 1.25 km, mean error of 6.97 km, p90 of 14.3 km, and p99 of 106 km. Training took approximately 72 minutes, with observed GPU utilisation around 15%.
+
+* **iter-2 (`lr=1e-3`).** The second run tested whether iter-1 had become under-driven after the batch size was increased from 64 to 256 while the peak learning rate was reduced. Under a simple linear-scaling intuition, the larger batch might have supported a larger learning rate and potentially closed some of the training loss gap to the LSTM. The run remained stable and continued improving throughout training, with `train_mse` decreasing from `0.0510` to `0.0227`, but it finished above iter-1 and had not reached an equally clear plateau by epoch 80.
+
+| run                | peak lr | final train_mse | test median |    test p90 |   test p99 |
+| ------------------ | ------: | --------------: | ----------: | ----------: | ---------: |
+| LSTM reference     |       — |          0.0179 |           — |           — |          — |
+| Transformer iter-1 |  `3e-4` |      **0.0214** |     1.25 km | **14.3 km** | **106 km** |
+| Transformer iter-2 |  `1e-3` |          0.0227 | **1.07 km** |     15.1 km |     109 km |
+
+### The larger learning rate does not support the under-driven hypothesis
+
+The iter-2 curve does not show conventional optimisation instability: the loss does not diverge, oscillate strongly, or produce numerical failures. Its small epoch to epoch increases are consistent with ordinary minibatch and dropout variation. We initially hypothesised the results as “learning rate too high” signature, but after investigation we cannot conclude this.
+
+The comparison provides useful evidence against the specific hypothesis that iter-1 was simply under-driven. Increasing the peak learning rate from `3e-4` to `1e-3`, while holding the architecture, batch size, scheduler, clipping, epoch budget, and dataset fixed, did not reduce the final training MSE. The higher-LR run instead finished at `0.0227`, compared with `0.0214` for iter-1. The loss also improved only slowly during the early and middle portions of training before declining more strongly later in the schedule, suggesting that the larger peak learning rate did not improve optimisation efficiency under this configuration.
+
+This result does not establish a universal upper learning rate limit, nor does it identify the exact optimisation mechanism. In particular, the two run comparison is insufficient to conclude that rare migration displacements created a sharp or ill conditioned loss surface (which we also initially suspected), even though the heavy tailed target distribution makes that a plausible hypothesis. So our conclusion is narrower; `1e-3` was less effective than `3e-4` under the tested recipe, and there is no evidence from this experiment that the lower-LR run was limited by updates that were too small.
+
+### Median–tail trade-off
+
+The held-out results reveal a trade-off that is not visible from training MSE alone. Iter-2 improved the median test error from 1.25 km to 1.07 km, while worsening p90 from 14.3 km to 15.1 km and p99 from 106 km to 109 km. The higher-LR checkpoint therefore performed better on the typical prediction but slightly worse in the upper tail.
+
+This pattern is consistent with the model fitting the common, low displacement portion of the distribution differently from the rarer high displacement portion, but the aggregate metrics do not establish which behavioural regimes caused the change. In particular, they are not sufficient to claim that the higher learning rate fitted stationary steps at the expense of moving or launch steps. That mechanism must be checked directly using the existing foraging, moving, launch, and settle decomposition.
+
+Also recall that the result also reinforces that pooled training MSE is not the final optimisation target for our project. Since squared error weights large displacement errors heavily, it is sensitive to the rare movement tail, while the geographic median is dominated by the much more common low-movement body. So our Transformer vs LSTM comparison must therefore use held out, regime decomposed errors, with particular attention to the moving and launch tails.
+
+### Verdict and GPU-preload result
+
+We retain **iter-1 (`lr=3e-4`, `transformer_stork_convergence_iter1.pt`) as the best tested Transformer checkpoint at 6h cadence**. It achieved the lowest training MSE and the stronger p90 and p99 results, while iter-2's only clear advantage was the aggregate median. The approximately `0.0214` training MSE is treated as a practical convergence result for this architecture and training recipe, not as an architecture level lower bound. A denser learning-rate sweep and repeated seeds could refine the estimate, but the current evidence is sufficient to proceed without attributing the earlier underperformance to insufficient training duration.
+
+Transformer convergence at 6h is therefore considered operationally resolved: with warmup, cosine decay, clipping, and a suitable peak learning rate, the model trains stably and reaches a clear plateau. we can now complete the uncontaminated raw-sequence Transformer vs LSTM comparison and then propagate the local solar time of day feature to both neural models as a separate experimental increment.
+
+The GPU preload produced only a modest runtime improvement, from approximately 72 minutes to 58 minutes, while GPU utilisation remained low at around 11% and reported device memory use was approximately 656 MB, including the preloaded training tensors. This indicates that host to device transfer was not the main bottleneck. The model and current batch are small enough that Python loop and kernel launch overhead likely dominate device computation. A substantially larger batch could improve utilisation now that the complete training set resides on the GPU, but batch size also changes the optimisation regime and is therefore deferred rather than altered solely for throughput.
