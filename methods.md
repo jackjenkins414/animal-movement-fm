@@ -345,3 +345,84 @@ We retain **iter-1 (`lr=3e-4`, `transformer_stork_convergence_iter1.pt`) as the 
 Transformer convergence at 6h is therefore considered operationally resolved: with warmup, cosine decay, clipping, and a suitable peak learning rate, the model trains stably and reaches a clear plateau. we can now complete the uncontaminated raw-sequence Transformer vs LSTM comparison and then propagate the local solar time of day feature to both neural models as a separate experimental increment.
 
 The GPU preload produced only a modest runtime improvement, from approximately 72 minutes to 58 minutes, while GPU utilisation remained low at around 11% and reported device memory use was approximately 656 MB, including the preloaded training tensors. This indicates that host to device transfer was not the main bottleneck. The model and current batch are small enough that Python loop and kernel launch overhead likely dominate device computation. A substantially larger batch could improve utilisation now that the complete training set resides on the GPU, but batch size also changes the optimisation regime and is therefore deferred rather than altered solely for throughput.
+
+## 2026-07-13: Raw sequence Transformer vs LSTM head to head (regime decomposed)
+
+We now have both neural rungs converged at 6h under a matched budget, we ran the comparison the Transformer rung exists to make: does attention beat recurrence on this data? Because aggregate error is floored by the stationary body, the comparison is decomposed by regime, with attention on the moving and launch tails. Note this version is the raw sequence one, so no time of day feature on either model (yet; that is next), and kept deliberately clean so the architecture difference is not confounded with a feature. 
+
+### Matched LSTM checkpoint
+
+Our prev on disk LSTM (`lstm_stork_h64_l1_e60.pt`) was trained pre-Gadi at 60 epochs / batch 64, so it was not budget matched to the 80 epoch / batch-256 Transformer. We retrained it on Gadi under the Transformer's same budget (80 epochs, batch 256, same seed=42 split, with the GPU preload mirrored into `lstm.py`'s `fit()`), keeping the LSTM's conventional constant learning rate (no warmup/cosine, no clipping; each architecture keeps its own recipe). `train_mse` descended smoothly to 0.0165; below the old checkpoint's 0.0179, and was somewhat near plateau by epoch 80 (the last ~15 epochs drift ~0.13%/epoch with noise), so the ~3x fewer optimiser steps at batch 256 did not under converge it. Saved as `lstm_stork_convergence_matched.pt`.
+
+### Method
+
+`dump_predictions.py` was pointed at the two converged checkpoints (`lstm_stork_convergence_matched.pt`, `transformer_stork_convergence_iter1.pt`) and re-run to refresh the per prediction dumps; the existing `step6_regime.py` decomposition then ran unchanged (60 m foraging/moving cut with a 40–100 m hysteresis band, transitions split by direction into launch and settle). Coherence guards held: persistence median 0.599 km (the fixed split guard between regimes), and the LSTM/Transformer test medians (1.29 / 1.25 km) match their Gadi self evaluations. Both neural dumps were produced on mac M3 Pro CPU, so the two models are compared on identical footing. Regime composition of the 121,656 test predictions: foraging 14.2%, moving 53.7%, launch 16.0%, settle 16.0%, unknown 0.1%.
+
+### Result: no evidence attention beats recurrence at this scale
+
+The two tail regimes that carry the architecture question (p99, km):
+
+| regime | persistence | lstm | transformer |
+| --- | ---: | ---: | ---: |
+| moving p99 | 193.2 | 127.4 | 129.0 |
+| launch p99 | 81.3 | 60.4 | 60.9 |
+
+The LSTM and Transformer are indistinguishable on both: moving p99 127.4 vs 129.0 and launch p99 60.4 vs 60.9, each ~1% apart. The remaining regimes only shuffle tiny, alternating edges; the Transformer is marginally cleaner on the stationary regimes (foraging p99 5.4 vs 7.7, settle p99 16.7 vs 17.1) and on moving median (2.07 vs 2.12 km), the LSTM marginally better on moving p99 and launch median. There is no consistent winner; every gap is somewhat 1–2 km on quantities of 60–130 km. On real 6h stork data, with matcheing converged models, attention does not beat recurrence; the same conclusion our previous 06-28 synthetic benchmark reached, now on real data. Because this is a single training seed and the gaps sit within plausible seed noise, the we don't overstate this and so can conclude that, as of now, there is "no evidence attention beats recurrence."
+
+### What the learners buy, and what they pay
+
+The comparison against persistence sharpens the 07-05 picture. The learned models' value is concentrated at the extreme moving tail: moving p99 falls 193 -> ~128 km (~34%). But at moving p90 they are slightly worse than persistence (27.6 vs 25.8 km) and at moving median clearly worse (2.1 vs 1.56 km); they do not predict the typical moving step better, they only suppress the worst case blow ups. On the stationary regimes they pay the stillness tax documented throughout: persistence sits at ~0.007 km median on both foraging and settle, the learned models at 0.2–0.7 km, with settle p99 increasing to ~17 km where the models inject motion into a bird that has actually stopped.
+
+### Launch tail: tractable, not hopeless
+
+Both learners cut launch p99 from the ~81 km baseline to ~60 km (~26%). This qualifies our 07-05 characterisation of launch as "near-unpredictable for every model": the converged learners clearly beat the baselines on the launch tail, so onset timing is partially recoverable, not hopeless, and could imporve with later additions. The moving p99 (~128 km) is unchanged from the 07-05 run, a useful coherence check. Whether convergence is what unlocked the launch improvement, or the earlier learned models already did this and the entry was worded around the baseline figure, is not recoverable; the pre-convergence per-regime numbers were not archived (results are gitignored).
+
+### Caveat and next step
+
+This is one training seed, and every LSTM vs Transformer gap is 1–2%, which is inside single seed variance. To state a genuine tie rather than a slight edge, both models should be retrained across a small set of training seeds (split seed 42 held fixed, training seed swept) and the moving/launch p99 reported with spread. The next increment is the local solar time of day feature on both neural rungs; and form our 07-09 XGBoost evidence that lift lands on the median/body and leaves the tail essentially unchanged, so it is expected to move the stationary and moving median numbers here rather than the moving/launch p99 the architecture question turns on.
+
+## 2026-07-14: Time of day 2x2 table; attention exploits time, recurrence does not
+
+We now ropagate the local solar time of day feature to the neural rungs as its own isolated increment, giving a 2x2 (raw vs time, LSTM vs Transformer). Each time model is its raw counterpart's recipe with the feature turned on as the single change (Transformer: iter-1's lr=3e-4 / warmup / clip; LSTM: matched constant lr=1e-3), so time vs raw is a one variable ablation per architecture. Our 07-09 XGBoost A/B  test predicted the lift would land on the median/body and leave the p99 tail flat; that prediction held for the LSTM but was overturned for the Transformer.
+
+### The feature and its wiring (Design B)
+
+The new feature lives in `features/time.py` (`local_solar_sincos`, and comes from XGBoost so the definition is shared and identical). We chose per-position injection over a single target time value: each displacement is tagged with the local solar (sin, cos) of the fix it lands on (destination tagging), so the input is 4 channels `[dlon, dlat, sin, cos]` and the sequence model sees time at every step; for the Transformer this means attention can weight fixes by time of day, which is the whole point of asking whether attention buys anything. Note, only the two displacement channels are standardised; the sin/cos are already bounded. `PredictionContext` gained a `history_timestamps` field so `evaluate` threads each window's per-fix clocks through to predict time, matching the fit time feature exactly. The whole thing is a default-off toggle (`use_time_features`), so the raw models, their checkpoints, and the tests are untouched (suite now 214 with the time coverage). Trained on Gadi to `transformer_stork_time.pt` and `lstm_stork_time.pt`; both converged cleanly (train_mse 0.0182 and 0.0146, each below its raw counterpart's 0.0214 / 0.0165; a lower training loss with the extra informative feature, no instability). Same `dump_predictions.py` / `step6_regime.py`, `MODELS` extended to the four neural cells. Coherence held with persistence median 0.599 km; time model medians (transformer 0.95, lstm 1.37 km) match their Gadi self evaluations.
+
+### Result: a stark architecture x feature interaction
+
+p99 error by regime and model (km):
+
+| regime | persistence | lstm | transformer | lstm_time | transformer_time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| foraging | 0.09 | 7.66 | 5.43 | 7.80 | **4.62** |
+| moving | 193.2 | 127.4 | 129.0 | 122.4 | **120.8** |
+| launch | 81.3 | 60.4 | 60.9 | 61.5 | **57.5** |
+| settle | 0.04 | 17.08 | 16.69 | 14.75 | **6.22** |
+
+median error by regime and model (km):
+
+| regime | persistence | lstm | transformer | lstm_time | transformer_time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| foraging | 0.007 | 0.202 | 0.402 | 0.493 | 0.258 |
+| moving | 1.558 | 2.121 | 2.071 | 2.247 | **1.833** |
+| launch | 1.619 | 1.697 | 1.807 | 1.756 | 1.660 |
+| settle | 0.007 | 0.709 | 0.661 | 0.584 | 0.388 |
+
+We interpret this as evidence of an architecture by feature interaction under the tested recipes. The Transformer improves relative to its raw counterpart in every reported regime on both median and p99: foraging p99 falls from 5.43 to 4.62 km, moving p99 from 129.0 to 120.8 km and moving median from 2.07 to 1.83 km, launch p99 from 60.9 to 57.5 km, and settle p99 from 16.7 to 6.22 km. The LSTM response is mixed: moving median worsens from 2.12 to 2.25 km, foraging median rises from 0.20 to 0.49 km, and launch p99 changes little, while moving and settle p99 improve modestly. Under this feature wiring and these training recipes, the Transformer therefore makes broader use of the temporal covariate than the LSTM. `transformer_time` is the best learned model in every p99 regime and in the moving, launch, and settle medians; the raw LSTM retains the best learned model foraging median.
+
+### Time reached the tail, with the largest gain on settling transitions
+
+The Transformer result overturns the earlier expectation that time would affect only the distribution body. Relative to the raw Transformer, moving p99 falls from 129.0 to 120.8 km and launch p99 from 60.9 to 57.5 km, both reductions of approximately 6%. These effects are modest and require multi-seed confirmation, particularly for launch.
+
+The clearest effect occurs on steps classified retrospectively as settling: Transformer p99 falls from 16.7 to 6.22 km, a reduction of approximately 63%, while median error falls from 0.661 to 0.388 km. This is consistent with local solar time helping the model avoid extrapolating recent movement into periods when continued movement is less likely. It does not mean that the model directly identifies the settling regime, and persistence remains structurally dominant once the realised target step is near-stationary.
+
+### Synthesis
+
+Taken together, the raw and time augmented runs show that the two neural architectures are difficult to distinguish when trained only on displacement history, but respond differently when local solar time is attached to every position. Under the tested recipes, the Transformer converts the additional temporal information into improvements across all four regimes and across both the distribution body and tail. The LSTM achieves a lower training MSE but shows mixed held out effects, improving some tail and settling errors while worsening several regime medians.
+
+This is evidence that the Transformer is the more effective covariate-conditioned architecture in the present experiment, rather than evidence that recurrence is generally unable to use temporal covariates. It supports carrying a Transformer conditioned on side information forward into the foundation-model design, while leaving the strength and reproducibility of the architecture by feature interaction to be established through repeated training seeds and additional covariates.
+
+### Caveats and next
+
+Single training seed. The Transformer's large effects (settle p99 -63%, aggregate median 1.25 -> 0.95 km) are big enough to be almost certainly real; the ~6% tail moves and the LSTM's small negatives sit within plausible seed noise and will need multi-seed confirmation (split seed 42 fixed, training seed swept, p99 reported with spread) before they are leaned on. It is also a single covariate; the launch residual the calendar cannot reach still motivates environmental covariates later. Immediate follow-ups: the multi-seed spread, and refactoring `xgboost.py` to call the shared `local_solar_sincos` (its inline copy is identical but not yet the single source of truth).
