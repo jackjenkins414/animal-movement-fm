@@ -39,9 +39,9 @@ from scipy import stats
 from animal_movement_fm.eval.metrics import haversine_distance
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 STATIONARY_KM = 0.1  # steps below this (100 m) are treated as effectively stationary
 

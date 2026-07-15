@@ -41,10 +41,10 @@ from animal_movement_fm.models.persistence import Persistence
 from animal_movement_fm.models.xgboost import XGBoost
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 STORK_FIXES = REPO / "data" / "processed" / "stork_fixes.parquet"
 SEGMENTS_6H = REPO / "data" / "processed" / "stork_segments.parquet"  # for the canonical split
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 # label -> bin seconds
 CADENCE_GRID = {"6h": 21600, "3h": 10800, "1h": 3600, "30min": 1800}

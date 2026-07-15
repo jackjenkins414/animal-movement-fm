@@ -14,4 +14,4 @@
 export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=$PBS_NCPUS        
 cd /g/data/um09/$USER/animal-movement-fm
-uv run python experiments/train_transformer_gadi.py
+uv run python experiments/training/train_transformer_gadi.py

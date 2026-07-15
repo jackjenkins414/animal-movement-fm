@@ -1,21 +1,22 @@
+# GenAI reference: I used GenAI to only refine the print statements witin the main method.
 """
-LSTM training on Gadi (real stork data, full scale); matched recipe run for the head to head.
+Transformer + time of day training on Gadi (real stork data)
 
-Purpose
--------
-Produce a converged LSTM checkpoint trained under a recipe matched to the converged Transformer (iter-1), so the raw-sequence 
-Transformer vs LSTM comparison is apples to apples and any difference is then attributable to architecture (attention vs 
-recurrence), not to training budget. The existing on disk checkpoint (`lstm_stork_h64_l1_e60.pt`) was trained pre-Gadi at 60 
-epochs / batch 64, so it is not budget matched to the 80 epoch / batch 256 Transformer.
+The aim here is to propagate the local solar time of day feature to the neural rungs, as its own isolated increment, now that 
+the raw sequence head to head is done. This trains the time augmented Transformer so it can be compared against the raw sequence 
+Transformer (iter-1) it mirrors.
 
-What is held identical to the Transformer run:
-  - data + split (same seed=42 make_split, grouped by segment_id)
-  - context_length=24, epochs=80, batch_size=256
-  - Adam, MSE loss, GPU preload in fit()
+Clean ablation recipe
+---------------------
+The raw Transformer we carry forward is iter-1 (lr=3e-4, warmup+cosine, grad_clip 1.0), NOT iter-2 (lr=1e-3, which converged worse). 
+So this run uses the iter-1 recipe unchanged and turns time ON as the single difference, so transformer time vs transformer raw is 
+a one variable ablation:
 
-What differs, deliberately, and is the LSTM's conventional setup:
-  - constant learning rate (no warmup/cosine schedule)
-  - no gradient clipping
+
+From features/time.py: each displacement is now tagged with the local solar (sin, cos) of the fix it lands on (destination tagging), 
+so the 4 channel input lets attention weight fixes by time of day. Only the two displacement channels are standardised; the sin/cos 
+are already bounded. On the 07-09 XGBoost note the diurnal lift lands on the median/body and leaves the p99 tail (launch onset) 
+essentially unchanged, so we will see how the the stationary/moving median numbers (not the moving/launch tail) look here. 
 """
 
 from __future__ import annotations
@@ -29,28 +30,35 @@ import torch
 from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.split import make_split, window_counts_per_individual
 from animal_movement_fm.eval.harness import evaluate, stratified_summary
-from animal_movement_fm.models.lstm import LSTM
+from animal_movement_fm.models.transformer import Transformer
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-REPO = Path(__file__).resolve().parents[1]
+# repo-relative paths; parents[2] is the repo root wherever the checkout lives (Mac or /g/data on Gadi).
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-CKPT = REPO / "checkpoints" / "lstm_stork_convergence_matched.pt"
+CKPT = REPO / "checkpoints" / "transformer_stork_time.pt"
 
-
+# iter 1 recipe (from raw Transformer) + time of day ON as the only change
 CONFIG = dict(
-    hidden_dim=64,
-    num_layers=1,
+    d_model=64,
+    nhead=4,
+    num_layers=2,
+    dim_feedforward=128,
+    dropout=0.1,
     context_length=24,
-    epochs=80,   # matched to the Transformer run
-    batch_size=256,  # matched to the Transformer run (was 64 pre-Gadi)
-    lr=1e-3,    # the LSTM's established constant LR; no warmup/cosine, no clipping
+    epochs=80,
+    batch_size=256,
+    lr=3e-4,            
+    warmup_frac=0.1,  
+    grad_clip=1.0,      
+    use_time_features=True, #per position local-solar (sin, cos)
 )
 
-# Note this main method was copied from tran_transformer_gadi.py and just modified slightly for the LSTM 
+
 def main() -> None:
     print("=" * 70)
-    print("LSTM matched-recipe convergence run (for the raw-sequence head-to-head)")
+    print("Transformer + time-of-day run (Design B; time 2x2)")
     print(f"device available : cuda={torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"gpu              : {torch.cuda.get_device_name(0)}")
@@ -73,11 +81,11 @@ def main() -> None:
     print(f"  train: {len(train_frame):,} rows / {train_frame['segment_id'].nunique()} segments")
     print(f"  test : {len(test_frame):,} rows / {test_frame['segment_id'].nunique()} segments")
 
-    model = LSTM(**CONFIG)
+    model = Transformer(**CONFIG)
 
     print(f"\ntraining for {CONFIG['epochs']} epochs...")
     t0 = time.time()
-    model.fit(train_frame, group_col="segment_id")  
+    model.fit(train_frame, group_col="segment_id") 
     fit_min = (time.time() - t0) / 60
     print(f"  fit done in {fit_min:.1f} min on device={model.device}")
 
@@ -90,7 +98,7 @@ def main() -> None:
         test_frame,
         context_length=CONFIG["context_length"],
         individual_col="segment_id",
-        show_progress=False,    
+        show_progress=False,  
         extra_cols=("individual_id",),
     )
     print(f"\n{len(results):,} predictions")

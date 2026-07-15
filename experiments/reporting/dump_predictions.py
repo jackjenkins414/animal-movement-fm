@@ -40,9 +40,9 @@ from animal_movement_fm.eval.metrics import haversine_distance
 from animal_movement_fm.models.persistence import Persistence
 from animal_movement_fm.models.averaging import DisplacementAveraging
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 CHECKPOINTS = REPO / "checkpoints"
 
 # checkpoints (80 epochs / batch 256, Gadi) for the raw sequence head to head
@@ -135,7 +135,7 @@ def main() -> None:
         model = cls.from_checkpoint(ckpt_path, device="cpu")
         dump_predictor(model, frame, name)
 
-    print("\nall available prediction dumps written to experiments/results/")
+    print("\nall available prediction dumps written to results/")
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ import pandas as pd
 
 from animal_movement_fm.eval.metrics import haversine_distance
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 FIXES = REPO / "data" / "processed" / "stork_fixes.parquet"
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
 

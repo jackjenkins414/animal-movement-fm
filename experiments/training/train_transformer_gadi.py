@@ -50,9 +50,9 @@ from animal_movement_fm.models.transformer import Transformer
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-# repo relative paths; this file is <repo>/experiments/train_transformer_gadi.py, so parents[1] is the repo root wherever
+# repo relative paths; this file is <repo>/experiments/train_transformer_gadi.py, so parents[2] is the repo root wherever
 # the checkout lives (Mac or /g/data on Gadi).
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
 CKPT = REPO / "checkpoints" / "transformer_stork_convergence_iter2.pt"
 

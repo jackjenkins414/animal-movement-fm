@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 
 from animal_movement_fm.eval.metrics import haversine_distance
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 REGIME_CUT_KM = 0.06
 
 

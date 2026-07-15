@@ -26,9 +26,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 STORK_FIXES = REPO / "data" / "processed" / "stork_fixes.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 # cadences we might sweep; the current build cadence (6h) is included for reference
 CANDIDATE_CADENCES_S = {

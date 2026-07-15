@@ -33,10 +33,10 @@ from animal_movement_fm.data.benchmark import evaluate_on_split
 from animal_movement_fm.models.persistence import Persistence
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 STORK_FIXES = REPO / "data" / "processed" / "stork_fixes.parquet"
 SEGMENTS_6H = REPO / "data" / "processed" / "stork_segments.parquet"  
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 # coarse -> fine, so the cheap but starved runs validate the loop before the dense ones
 CADENCE_GRID = {

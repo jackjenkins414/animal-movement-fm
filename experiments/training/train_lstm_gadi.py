@@ -1,24 +1,22 @@
-# GenAI reference: I used GenAI to help with the main method print statemets (it minorly changed the structure too). 
 """
-LSTM + time of day training on Gadi (real stork data)
+LSTM training on Gadi (real stork data, full scale); matched recipe run for the head to head.
 
-The aim here is to propagate the local solar time of day feature to the neural rungs, as its own isolated increment, now that
-the raw sequence head to head is done. This trains the time augmented LSTM so it can be compared against the raw sequence
-LSTM it mirrors.
+Purpose
+-------
+Produce a converged LSTM checkpoint trained under a recipe matched to the converged Transformer (iter-1), so the raw-sequence 
+Transformer vs LSTM comparison is apples to apples and any difference is then attributable to architecture (attention vs 
+recurrence), not to training budget. The existing on disk checkpoint (`lstm_stork_h64_l1_e60.pt`) was trained pre-Gadi at 60 
+epochs / batch 64, so it is not budget matched to the 80 epoch / batch 256 Transformer.
 
-Clean ablation recipe
----------------------
+What is held identical to the Transformer run:
+  - data + split (same seed=42 make_split, grouped by segment_id)
+  - context_length=24, epochs=80, batch_size=256
+  - Adam, MSE loss, GPU preload in fit()
 
-The raw LSTM we carry forward is the convergence matched LSTM (80 epochs, batch 256, constant lr=1e-3, no warmup/cosine and no
-clipping). So this run uses the matched recipe unchanged and turns time ON as the single difference, so LSTM time vs LSTM raw is
-a one variable ablation:
-
-From features/time.py: each displacement is now tagged with the local solar (sin, cos) of the fix it lands on (destination tagging),
-so the 4 channel input lets the recurrence condition on time of day at each step. Only the two displacement channels are standardised;
-the sin/cos are already bounded. On the 07-09 XGBoost note the diurnal lift lands on the median/body and leaves the p99 tail
-(launch onset) essentially unchanged, so we will see how the stationary/moving median numbers (not the moving/launch tail) look here.
+What differs, deliberately, and is the LSTM's conventional setup:
+  - constant learning rate (no warmup/cosine schedule)
+  - no gradient clipping
 """
-
 
 from __future__ import annotations
 
@@ -35,24 +33,24 @@ from animal_movement_fm.models.lstm import LSTM
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-CKPT = REPO / "checkpoints" / "lstm_stork_time.pt"
+CKPT = REPO / "checkpoints" / "lstm_stork_convergence_matched.pt"
 
-# matched-LSTM recipe 
+
 CONFIG = dict(
     hidden_dim=64,
     num_layers=1,
     context_length=24,
-    epochs=80,          
-    batch_size=256,     
-    lr=1e-3,            
-    use_time_features=True, # per pos local solar time 
+    epochs=80,   # matched to the Transformer run
+    batch_size=256,  # matched to the Transformer run (was 64 pre-Gadi)
+    lr=1e-3,    # the LSTM's established constant LR; no warmup/cosine, no clipping
 )
 
+# Note this main method was copied from tran_transformer_gadi.py and just modified slightly for the LSTM 
 def main() -> None:
     print("=" * 70)
-    print("LSTM + time-of-day run (Design B; time 2x2)")
+    print("LSTM matched-recipe convergence run (for the raw-sequence head-to-head)")
     print(f"device available : cuda={torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"gpu              : {torch.cuda.get_device_name(0)}")
@@ -92,7 +90,7 @@ def main() -> None:
         test_frame,
         context_length=CONFIG["context_length"],
         individual_col="segment_id",
-        show_progress=False,   
+        show_progress=False,    
         extra_cols=("individual_id",),
     )
     print(f"\n{len(results):,} predictions")

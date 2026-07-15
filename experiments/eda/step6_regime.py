@@ -31,8 +31,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-REPO = Path(__file__).resolve().parents[1]
-RESULTS = REPO / "experiments" / "results"
+REPO = Path(__file__).resolve().parents[2]
+RESULTS = REPO / "results"
 
 MODELS = ["persistence", "avg_k1", "avg_k3", "lstm", "transformer", "lstm_time", "transformer_time"]
 REGIME_CUT_KM = 0.06        # Nominal foraging/moving trough (§5)

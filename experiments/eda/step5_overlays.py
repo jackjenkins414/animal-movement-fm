@@ -29,8 +29,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
-REPO = Path(__file__).resolve().parents[1]
-RESULTS = REPO / "experiments" / "results"
+REPO = Path(__file__).resolve().parents[2]
+RESULTS = REPO / "results"
 
 REF_MODEL = "persistence" # ranking reference
 OVERLAY_MODELS = ["persistence", "transformer"]

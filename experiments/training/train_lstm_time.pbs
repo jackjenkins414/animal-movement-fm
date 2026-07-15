@@ -8,10 +8,10 @@
 #PBS -l walltime=04:00:00
 #PBS -l storage=scratch/um09+gdata/um09
 #PBS -l wd
-#PBS -N train_transformer_time
+#PBS -N train_lstm_time
 #PBS -j oe
 
 export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=$PBS_NCPUS
 cd /g/data/um09/$USER/animal-movement-fm
-uv run python experiments/train_transformer_time_gadi.py
+uv run python experiments/training/train_lstm_time_gadi.py

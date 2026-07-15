@@ -32,9 +32,9 @@ from animal_movement_fm.models.persistence import Persistence
 from animal_movement_fm.models.averaging import DisplacementAveraging
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS_6H = REPO / "data" / "processed" / "stork_segments.parquet"  
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 CADENCE_GRID = ["24h", "12h", "6h", "3h", "1h", "30min"]
 

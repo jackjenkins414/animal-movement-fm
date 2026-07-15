@@ -36,9 +36,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 BASELINES = ["persistence", "avg_k1", "avg_k3"]
 BIN_HOURS = 6.0

@@ -37,10 +37,10 @@ from animal_movement_fm.data.benchmark import load_split_frame, evaluate_on_spli
 from animal_movement_fm.models.xgboost import XGBoost
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 STORK_FIXES = REPO / "data" / "processed" / "stork_fixes.parquet"
 SEGMENTS_6H = REPO / "data" / "processed" / "stork_segments.parquet"
-RESULTS = REPO / "experiments" / "results"
+RESULTS = REPO / "results"
 
 BIN_SECONDS = 21600 # 6h
 MAX_GAP_BINS = 8  # >2d at 6h
