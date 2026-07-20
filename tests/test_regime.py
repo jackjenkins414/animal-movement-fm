@@ -7,9 +7,13 @@ import pandas as pd
 import pytest
 
 from animal_movement_fm.analysis.regime import (
+    MIGRATORY_NET_KM,
+    REFINED_STATES,
     REGIMES,
     add_step_length_km,
+    label_migratory_launches,
     label_regimes,
+    moving_bouts,
     tag_regime,
     _hysteresis_regime,
 )
@@ -146,3 +150,73 @@ class TestLabelRegimes:
         a = label_regimes(df).reset_index(drop=True)
         b = label_regimes(shuffled).reset_index(drop=True)
         pd.testing.assert_frame_equal(a, b)
+
+
+# One track with a long straight-north migratory bout (4 x 10 km = 40 km net) and a short local
+# bout (2 x 0.20 km = 0.40 km net), so bout geometry and the 37 km split are analytically known.
+#   idx:  0       1        2        3      4      5      6      7       8      9      10
+#   step: NaN     0.01     0.01     10     10     10     10     0.01    0.20   0.20   0.01
+_MIG_STEPS = [0.01, 0.01, 10.0, 10.0, 10.0, 10.0, 0.01, 0.20, 0.20, 0.01]
+
+
+def _mig_labelled():
+    return label_regimes(_segment("a", _MIG_STEPS))
+
+
+class TestMovingBouts:
+    def test_two_bouts_with_expected_geometry(self):
+        b = moving_bouts(_mig_labelled()).sort_values("first_idx").reset_index(drop=True)
+        assert len(b) == 2
+        # migratory bout: fixes 3-6, anchored at 2; net ~40 km, perfectly straight
+        assert b.loc[0, "n_steps"] == 4
+        assert (int(b.loc[0, "first_idx"]), int(b.loc[0, "last_idx"])) == (3, 6)
+        assert b.loc[0, "net_km"] == pytest.approx(40.0, rel=1e-4)
+        assert b.loc[0, "path_km"] == pytest.approx(40.0, rel=1e-4)
+        assert b.loc[0, "straightness"] == pytest.approx(1.0, rel=1e-4)
+        # local bout: fixes 8-9; net ~0.40 km
+        assert b.loc[1, "n_steps"] == 2
+        assert (int(b.loc[1, "first_idx"]), int(b.loc[1, "last_idx"])) == (8, 9)
+        assert b.loc[1, "net_km"] == pytest.approx(0.40, rel=1e-3)
+
+    def test_segment_start_moving_run_forms_a_bout(self):
+        # A segment that opens straight into movement (opener preceded by 'unknown', not 'foraging')
+        # still forms a bout; its first moving fix is index 1.
+        b = moving_bouts(label_regimes(_segment("a", [10.0, 10.0])))
+        assert len(b) == 1
+        assert int(b.iloc[0]["first_idx"]) == 1
+        assert b.iloc[0]["net_km"] == pytest.approx(20.0, rel=1e-4)
+
+
+class TestLabelMigratoryLaunches:
+    def test_splits_launch_by_bout_scale(self):
+        out = label_migratory_launches(_mig_labelled())
+        assert list(out["state"]) == [
+            "unknown", "foraging", "foraging", "migratory_launch", "moving", "moving",
+            "moving", "settle", "local_launch", "moving", "settle",
+        ]
+
+    def test_bout_net_km_on_moving_fixes_only(self):
+        out = label_migratory_launches(_mig_labelled())
+        bn = out["bout_net_km"].to_numpy()
+        moving = (out["base_regime"] == "moving").to_numpy()
+        assert np.isnan(bn[~moving]).all()
+        assert np.isfinite(bn[moving]).all()
+        assert bn[3] == pytest.approx(40.0, rel=1e-4)   # migratory bout net on its launch fix
+        assert bn[8] == pytest.approx(0.40, rel=1e-3)   # local bout net on its launch fix
+
+    def test_threshold_is_configurable(self):
+        # Dropping the cut below the local bout's 0.40 km net promotes it to migratory.
+        out = label_migratory_launches(_mig_labelled(), migratory_net_km=0.30)
+        assert out.loc[8, "state"] == "migratory_launch"
+
+    def test_only_launches_are_relabelled(self):
+        base = _mig_labelled()
+        out = label_migratory_launches(base)
+        non_launch = (base["regime"] != "launch").to_numpy()
+        assert (out["state"].to_numpy()[non_launch] == base["regime"].to_numpy()[non_launch]).all()
+
+    def test_constants(self):
+        assert MIGRATORY_NET_KM == 37.0
+        assert set(REFINED_STATES) == {
+            "foraging", "moving", "local_launch", "migratory_launch", "settle",
+        }

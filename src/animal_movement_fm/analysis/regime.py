@@ -40,6 +40,15 @@ HYST_HIGH_KM = 0.10  # clearly moving above this; 0.04-0.10 is the grey band
 
 REGIMES = ("foraging", "moving", "launch", "settle")
 
+# migratory launch refinement. We claim launch opens a moving bout; we call that launch 'migratory' when the bout's net (straight line) displacement reaches the 
+# C. ciconia migratory-day threshold, which from our literature search, we can classify a white stork DAY as migratory vs stopover at 37 km moved between 
+# consecutive night roosts; so we apply the same 37 km to a bout's net displacement, since a bout reaching 37 km net in <1 day is at least a migratory day's worth 
+# of directed travel. So this sits above the resident foraging range (<=28 km breeding/ <=48 km to landfills 
+MIGRATORY_NET_KM = 37.0
+
+# four base states with 'launch' split by bout scale 
+REFINED_STATES = ("foraging", "moving", "local_launch", "migratory_launch", "settle")
+
 
 def add_step_length_km(
     df: pd.DataFrame,
@@ -172,3 +181,106 @@ def label_regimes(
         timestamp_col=timestamp_col,
     )
     return tag_regime(labelled, group_col=group_col)
+
+
+def _moving_bout_ids(lab: pd.DataFrame, *, group_col: str = "segment_id") -> np.ndarray:
+    """
+    Per fix moving-bout id: 0 outside a moving bout, 1..K within the k-th bout (in row order)
+
+    A bout is a maximal run of base_regime == 'moving' within a group. `lab` must be sorted with a reset index (as label_regimes returns), 
+    so positional order is time order within each group
+    """
+    seg = lab[group_col].to_numpy()
+    is_mov = (lab["base_regime"] == "moving").to_numpy()
+
+    prev_mov = np.zeros(len(lab), dtype=bool)
+    prev_mov[1:] = is_mov[:-1] & (seg[1:] == seg[:-1])
+    new_bout = is_mov & ~prev_mov
+    ids = np.cumsum(new_bout)  # constant within a bout; read only on moving fixes
+    return np.where(is_mov, ids, 0)
+
+
+def moving_bouts(
+    lab: pd.DataFrame,
+    *,
+    group_col: str = "segment_id",
+    lon_col: str = "lon",
+    lat_col: str = "lat",
+    step_col: str = "step_km",
+) -> pd.DataFrame:
+    """
+    One row per moving bout, with its displacement/straightness/length.
+
+    A bout is a maximal run of base_regime == 'moving' within a segment (i.e,, the span a launch opens up to the next settle); `lab` must be a 
+    label_regimes output (sorted, reset index) so positional index == row order; returns columns:
+
+      segment_id, bout_id, first_idx, last_idx, n_steps,
+      net_km        straight-line distance from the pre-launch fix to the bout's last moving fix
+      path_km       summed step length over the bout (includes the launch step)
+      straightness  net_km / path_km  (1 = straight transit, ~0 = out-and-back local trip)
+
+    first_idx /last_idx are positional indices into `lab`, so callers can map bout properties back onto individual fixes.
+    """
+    bout_id = _moving_bout_ids(lab, group_col=group_col)
+    seg = lab[group_col].to_numpy()
+    lon = lab[lon_col].to_numpy()
+    lat = lab[lat_col].to_numpy()
+    step_km = lab[step_col].to_numpy()
+
+    mov = np.where(bout_id > 0)[0]
+    mdf = pd.DataFrame({"bout": bout_id[mov], "idx": mov, "seg": seg[mov], "step_km": step_km[mov]})
+    agg = mdf.groupby("bout", sort=True).agg(
+        first_idx=("idx", "first"), last_idx=("idx", "last"),
+        n_steps=("idx", "size"), path_km=("step_km", "sum"), seg=("seg", "first"),
+    )
+    first_idx = agg["first_idx"].to_numpy()
+    last_idx = agg["last_idx"].to_numpy()
+    bout_seg = agg["seg"].to_numpy()
+    path_km = agg["path_km"].to_numpy()
+
+    # anchor = the pre-launch fix (one before the bout), when it exists in the same segment
+    prev_idx = first_idx - 1
+    same_seg = (first_idx > 0) & (seg[np.maximum(prev_idx, 0)] == bout_seg)
+    anchor_idx = np.where(same_seg, prev_idx, first_idx)
+
+    net_km = haversine_distance(
+        lon[anchor_idx], lat[anchor_idx], lon[last_idx], lat[last_idx]) / 1000.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        straightness = np.where(path_km > 0, net_km / path_km, np.nan)
+
+    return pd.DataFrame({
+        "segment_id": bout_seg,
+        "bout_id": agg.index.to_numpy(),
+        "first_idx": first_idx, "last_idx": last_idx, "n_steps": agg["n_steps"].to_numpy(),
+        "net_km": net_km, "path_km": path_km, "straightness": straightness,
+    })
+
+
+def label_migratory_launches(
+    lab: pd.DataFrame,
+    *,
+    migratory_net_km: float = MIGRATORY_NET_KM,
+    group_col: str = "segment_id",
+) -> pd.DataFrame:
+    """
+    Refine 'launch' into 'migratory_launch' / 'local_launch' by the scale of the bout it opens.
+
+    See earlier comment. 
+
+      bout_net_km : net displacement (km) of the moving bout each moving fix belongs to; NaN elsewhere
+      state       : REFINED_STATES; identical to `regime` except each launch is relabelled migratory_launch / local_launch
+
+    Every launch fix is the first fix of a bout, so its `bout_net_km` is always defined.
+    """
+    lab = lab.copy()
+    bout_id = _moving_bout_ids(lab, group_col=group_col)
+    net_by_bout = moving_bouts(lab, group_col=group_col).set_index("bout_id")["net_km"]
+    lab["bout_net_km"] = pd.Series(bout_id, index=lab.index).map(net_by_bout)
+
+    state = lab["regime"].to_numpy().astype(object).copy()
+    is_launch = state == "launch"
+    migratory = is_launch & (lab["bout_net_km"].to_numpy() >= migratory_net_km)
+    state[is_launch & ~migratory] = "local_launch"
+    state[migratory] = "migratory_launch"
+    lab["state"] = state
+    return lab
