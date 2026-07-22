@@ -11,8 +11,10 @@ import pandas as pd
 import pytest
 
 from animal_movement_fm.features.time import (
+    DAYS_PER_YEAR,
     DEG_LON_PER_HOUR,
     HOURS_PER_DAY,
+    day_of_year_sincos,
     local_solar_sincos,
 )
 
@@ -96,4 +98,75 @@ class TestReferenceFormula:
         solar_hour = (utc_hour + lon / DEG_LON_PER_HOUR) % HOURS_PER_DAY
         angle = 2.0 * np.pi * (solar_hour / HOURS_PER_DAY)
         s, c = local_solar_sincos(t, lon)
+        np.testing.assert_allclose([s, c], [np.sin(angle), np.cos(angle)], atol=1e-12)
+
+# GenAI generated, but again, I broke down what I wanted it to test, reformated some of the code slighlty and verified the output
+class TestDayOfYearAnchors:
+    def test_new_year_maps_to_0_1(self):
+        # 1 Jan is day 1 -> angle 0 -> (sin, cos) = (0, 1)
+        s, c = day_of_year_sincos(pd.Timestamp("2023-01-01 09:00"))
+        np.testing.assert_allclose([s, c], [0.0, 1.0], atol=1e-12)
+
+    def test_mid_year_is_roughly_opposite(self):
+        # ~3 July is day 184, i.e. about half the annual cycle -> angle ~pi -> (0, -1)
+        s, c = day_of_year_sincos(pd.Timestamp("2023-07-03"))
+        np.testing.assert_allclose([s, c], [0.0, -1.0], atol=0.02)
+
+    def test_circular_continuity_across_new_year(self):
+        # 31 Dec and 1 Jan are one day apart on the annual circle -> tiny chord, not opposite ends.
+        s1, c1 = day_of_year_sincos(pd.Timestamp("2023-12-31"))
+        s2, c2 = day_of_year_sincos(pd.Timestamp("2024-01-01"))
+        assert np.hypot(s1 - s2, c1 - c2) < 0.05
+
+    def test_autumn_and_spring_migration_windows_differ(self):
+        # The feature must separate the two migration seasons (Aug departure vs Mar return).
+        aug = np.array(day_of_year_sincos(pd.Timestamp("2023-08-20")))
+        mar = np.array(day_of_year_sincos(pd.Timestamp("2023-03-20")))
+        assert np.hypot(*(aug - mar)) > 1.0
+
+
+class TestDayOfYearProperties:
+    def test_on_unit_circle(self):
+        s, c = day_of_year_sincos(pd.Timestamp("2023-09-14"))
+        assert np.isclose(s**2 + c**2, 1.0)
+
+    def test_same_date_different_years_matches(self):
+        # Cyclic only: the encoding carries no absolute year, so it cannot memorise a given year.
+        a = day_of_year_sincos(pd.Timestamp("2019-08-20"))
+        b = day_of_year_sincos(pd.Timestamp("2023-08-20"))
+        np.testing.assert_allclose(a, b, atol=1e-12)
+
+    def test_leap_day_is_handled(self):
+        s, c = day_of_year_sincos(pd.Timestamp("2024-02-29"))
+        assert np.isfinite(s) and np.isfinite(c)
+
+    def test_no_longitude_argument_needed(self):
+        # Season is one calendar cycle corpus-wide; the helper takes only a timestamp.
+        with pytest.raises(TypeError):
+            day_of_year_sincos(pd.Timestamp("2023-08-20"), 15.0)
+
+
+class TestDayOfYearVectorised:
+    def test_array_equals_elementwise(self):
+        ts = pd.to_datetime(["2023-01-15", "2023-06-30", "2023-11-02"])
+        sv, cv = day_of_year_sincos(ts.to_numpy())
+        for i in range(len(ts)):
+            s, c = day_of_year_sincos(ts[i])
+            assert np.isclose(sv[i], s)
+            assert np.isclose(cv[i], c)
+
+    def test_array_output_shapes(self):
+        ts = pd.to_datetime(["2023-01-01", "2023-07-01"]).to_numpy()
+        s, c = day_of_year_sincos(ts)
+        assert s.shape == (2,)
+        assert c.shape == (2,)
+
+
+class TestDayOfYearReferenceFormula:
+    # Independent recomputation of the documented formula (not a second call to the function).
+    @pytest.mark.parametrize("ts", ["2023-01-02", "2023-08-20", "2024-02-29", "2024-12-31"])
+    def test_matches_manual_formula(self, ts):
+        t = pd.Timestamp(ts)
+        angle = 2.0 * np.pi * ((t.dayofyear - 1.0) / DAYS_PER_YEAR)
+        s, c = day_of_year_sincos(t)
         np.testing.assert_allclose([s, c], [np.sin(angle), np.cos(angle)], atol=1e-12)

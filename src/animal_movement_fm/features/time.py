@@ -1,8 +1,8 @@
 """
-Local solar time of day feature (canonical definition).
+Cyclic time features (canonical definitions): local solar time of day, and day of year.
 
-This is the single source of truth for the sin/cos time of day feature used across the project. We first had it in 
-`models/xgboost.py`; that definition is lifted here so the neural rungs (LSTM, Transformer) consume the identical 
+This is the single source of truth for the sin/cos time features used across the project. We first had time of day in
+`models/xgboost.py`; that definition is lifted here so the neural rungs (LSTM, Transformer) consume the identical
 feature, and XGBoost will be refactored too (remove once done....)
 
 Why local solar, not raw UTC
@@ -18,8 +18,26 @@ Encoding
 The corrected solar hour is mapped onto the unit circle as (sin, cos) of `2*pi * solar_hour / 24`. The circular encoding 
 makes 23:00 and 01:00 sit close together (as they should) rather than at opposite ends of a linear [0, 24) scale.
 
-Precision note: to stay identical to the original XGBoost feature, the UTC hour of day is taken as `hour + minute/60` (seconds 
+Precision note: to stay identical to the original XGBoost feature, the UTC hour of day is taken as `hour + minute/60` (seconds
 dropped); sub minute precision is irrelevant on a 6 h grid.
+
+Day of year (season)
+--------------------
+`day_of_year_sincos` encodes where in the annual cycle a fix sits, motivated by the diagnostics' seasonal migration
+component and by the state work (season is what should distinguish a migratory departure from a local trip precisely
+when the recent movement history is uninformative, i.e. the cold first departure). We deliberately encode ONE seasonal
+resolution: month, season and day of year are the same signal coarsened, so carrying several would only add redundant
+channels. It is cyclic only, with no absolute year or monotonic time index, which would invite memorising particular
+years rather than the annual cycle.
+
+Unlike time of day, no longitude or hemisphere correction is applied. The population follows a single annual cycle
+(breeding in Europe, wintering in Africa), so flipping the phase below the equator would misalign birds that are simply
+at the southern end of that one cycle; the model should learn "August means autumn departure" corpus wide.
+
+The mechanism also differs from time of day, which matters for interpreting the architectures. Solar hour varies
+strongly WITHIN a 24 fix (6 day) window, which is what lets attention weight individual positions by it; day of year is
+near constant across such a window, so it acts as a conditioning signal about what kind of period this is rather than
+something attention can differentiate positions by.
 """
 
 from __future__ import annotations
@@ -29,6 +47,7 @@ import pandas as pd
 
 HOURS_PER_DAY = 24.0
 DEG_LON_PER_HOUR = 15.0  # 360 deg / 24 h: earth's rotation rate in longitude
+DAYS_PER_YEAR = 365.25 # averages the leap cycle, so the phase does not drift year to year
 
 
 def local_solar_sincos(timestamp, lon):
@@ -64,4 +83,40 @@ def local_solar_sincos(timestamp, lon):
     lon_arr = np.asarray(lon, dtype=float)
     solar_hour = np.mod(utc_hour + lon_arr / DEG_LON_PER_HOUR, HOURS_PER_DAY)
     angle = 2.0 * np.pi * (solar_hour / HOURS_PER_DAY)
+    return np.sin(angle), np.cos(angle)
+
+
+def day_of_year_sincos(timestamp):
+    """
+    Map a timestamp to a day of year (seasonal) (sin, cos) pair.
+
+    Vectorised in the same way as `local_solar_sincos`: pass a single timestamp to get two scalars, or an array like of
+    them (e.g. every fix in a window) to get two arrays. `timestamp` may be anything `pandas.to_datetime` accepts. No
+    longitude is needed, since the seasonal cycle is taken as one calendar cycle for the whole corpus (see module
+    docstring).
+
+    Day of year is 1-based, so we shift by one before scaling: 1 Jan maps to angle 0, mirroring the way hour 0 maps to
+    angle 0 in the time-of-day feature. The period is `DAYS_PER_YEAR = 365.25`, which averages the leap cycle so the
+    same calendar date lands at the same phase in any year. The circular encoding makes 31 Dec and 1 Jan neighbours
+    rather than opposite ends of a linear [1, 365] scale.
+
+    Parameters
+    ----------
+    timestamp : pd.Timestamp | datetime64 | array-like of them
+        The time(s) whose seasonal phase we want. For the models this is the time of each fix in the window.
+
+    Returns
+    -------
+    (sin, cos) : tuple of float or np.ndarray
+        The circular encoding of the day of year. Scalar in, scalar out; array in, array out.
+    """
+    ts = pd.to_datetime(timestamp)
+
+    if isinstance(ts, pd.Timestamp):
+        doy = float(ts.dayofyear)
+    else:
+        ts = pd.DatetimeIndex(ts)
+        doy = ts.dayofyear.to_numpy(dtype=float)
+
+    angle = 2.0 * np.pi * ((doy - 1.0) / DAYS_PER_YEAR)
     return np.sin(angle), np.cos(angle)
