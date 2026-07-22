@@ -1,0 +1,48 @@
+#!/bin/bash
+# One submission runs the whole 3 cells x 2 architectures x 5 seeds grid as a PBS job ARRAY.
+# -J 0-29 creates 30 independent subjobs; each gets its own $PBS_ARRAY_INDEX, which
+# train_multiseed_gadi.py decodes into (feature cell, architecture, training seed).
+# The resource request below is PER SUBJOB, not for the array as a whole.
+#
+# Submit:   qsub experiments/training/train_multiseed.pbs
+# Monitor:  qstat -u $USER            (the array shows as one job id ending in [])
+#           qstat -t <jobid>[]        (per-subjob states)
+# Logs:     train_multiseed.o<jobid>.<index>   one per subjob
+#
+# QUEUE: gpuhopper. Confirmed from the scheduler (NCI's public queue docs are stale and predate it):
+# the queue is backed by gadi-gpu-h200 nodes with 48 ncpus / 4 ngpus, i.e. H200s (Hopper, 141GB HBM3e)
+# rather than the H100s we were told, and 12 CPUs per GPU -- the same ratio gpuvolta uses. To fall back
+# to V100s, the only change needed is -q gpuvolta; the ratio below is already valid for both.
+#
+# mem: iteration-1 on a V100 requested 90GB and used 3.01GB, so 32GB is ~10x headroom and keeps the
+# request comfortably inside any node's per-GPU share.
+#
+# torch stays pinned at 2.5.1+cu121, which ships kernels for BOTH sm_70 (Volta) and sm_90 (Hopper), so
+# the same environment runs on either queue. If a subjob dies with a kernel/architecture mismatch on
+# H200, that pin is the first thing to revisit.
+#
+# QUEUE LIMITS (from qstat -Qf gpuhopper-exec): max_run is 10 per user / 8 per project, so subjobs
+# trickle through ~8-10 at a time rather than all 30 at once. queued_jobs_threshold is 20 per user, so
+# a 30-element array MAY be refused at submission. If qsub complains about exceeding the queued limit,
+# submit in chunks, overriding -J from the command line (the script needs no edit):
+#     qsub -J 0-9  experiments/training/train_multiseed.pbs
+#     qsub -J 10-19 experiments/training/train_multiseed.pbs
+#     qsub -J 20-29 experiments/training/train_multiseed.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N train_multiseed
+#PBS -j oe
+#PBS -J 0-29
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+cd /g/data/um09/$USER/animal-movement-fm
+uv run python experiments/training/train_multiseed_gadi.py
