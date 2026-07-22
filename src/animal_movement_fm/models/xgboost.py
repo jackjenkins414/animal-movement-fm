@@ -36,6 +36,8 @@ import pandas as pd
 
 from xgboost import XGBRegressor
 
+from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -101,6 +103,10 @@ class XGBoost:
     use_time_features : bool, default True
         If True and `fit` is given a `timestamp` column, include sin/cos time-of-day features.
         Falls back to False silently if no timestamps are available at fit time.
+    use_season_features : bool, default False
+        If True and `fit` is given a `timestamp` column, include sin/cos day-of-year (season) features.
+        Defaults False, unlike `use_time_features`, so the committed XGBoost results (including the
+        time-of-day ablation) are reproduced unchanged unless season is asked for explicitly.
     random_state : int, default 0
         Seed passed to XGBRegressor for reproducibility.
     name : str, optional
@@ -123,8 +129,9 @@ class XGBoost:
             n_estimators: int = 200,
             max_depth: int = 6,
             learning_rate: float = 0.1, 
-            use_time_features: bool = True, 
-            random_state: int = 0, 
+            use_time_features: bool = True,
+            use_season_features: bool = False,
+            random_state: int = 0,
             name: str | None = None, 
     ) -> None: 
         # n_lags >= 2, since turning angle needs 2 consecutive displacement vectors, which needs
@@ -153,6 +160,7 @@ class XGBoost:
         self.max_depth = int(max_depth)
         self.learning_rate = float(learning_rate)
         self.use_time_features = bool(use_time_features)
+        self.use_season_features = bool(use_season_features)
         self.random_state = int(random_state)
 
         self.name = (
@@ -179,6 +187,7 @@ class XGBoost:
           - lag speeds: speed_lag_{1..n_lags-1}
           - lag turning angles: turn_lag_{1..n_lags-2}
           - time-of-day (only if use_time_features and fit saw timestamps): sin_hour, cos_hour
+          - season (only if use_season_features and fit saw timestamps): sin_doy, cos_doy
         """
         names: list[str] = []
 
@@ -210,6 +219,11 @@ class XGBoost:
             names.append("sin_hour")
             names.append("cos_hour")
 
+        # Season appended after time of day, matching the channel order used by the neural rungs.
+        if self.use_season_features and self._has_season_features():
+            names.append("sin_doy")
+            names.append("cos_doy")
+
         return names
 
     def _has_time_features(self) -> bool:
@@ -221,6 +235,15 @@ class XGBoost:
         if self.feature_names_ is None:
             return self.use_time_features
         return "sin_hour" in self.feature_names_
+
+    def _has_season_features(self) -> bool:
+        """
+        Whether the trained model includes day-of-year (season) features. Mirrors `_has_time_features`: after fit we
+        read the committed layout, before fit we fall back to the constructor flag.
+        """
+        if self.feature_names_ is None:
+            return self.use_season_features
+        return "sin_doy" in self.feature_names_
 
     def _build_features(
         self,
@@ -295,29 +318,33 @@ class XGBoost:
             dot = v1[0] * v2[0] + v1[1] * v2[1]
             feats.append(float(np.arctan2(cross, dot)))
 
-        # time of day features (optional). Local solar corrected bc storks span ~3h of longitude, so UTC hour smears the diurnal 
-        # rhythm across birds. So we shift UTC hour by longitude/15 (15 deg = 1h of Earth's rotation) so every bird's solar 
-        # afternoon peak maps to the same corrected hour. Mean solar time only; the equation of time wobble (<=~15 min) is 
-        # pretty much negligible at 6h cadence.
-        if self._has_time_features():
-            if timestamp is None:
-                if not self._warned_missing_timestamp_:
-                    logger.warning(
-                        "XGBoost.predict called without a timestamp but model was fit with time features; using midnight fallback "
-                    )
-                    self._warned_missing_timestamp_ = True
-                feats.append(0.0)
-                feats.append(1.0)
-            else:
-                # longitude of the last observed position (where the bird is when it takes the step); over a 6h step its longitude 
-                # drift is <=~1-2 deg (<=~8 min of solar correction) so the last fix longitude is the right simple choice.
-                lon = float(history[-1, 0])
-                utc_hour = timestamp.hour + timestamp.minute / 60.0
-                solar_hour = (utc_hour + lon / 15.0) % 24.0
-                # fraction of 2π, then sin/cos so 23:00 and 01:00 sit close on the cycle.
-                angle = 2.0 * np.pi * (solar_hour / 24.0)
-                feats.append(float(np.sin(angle)))
-                feats.append(float(np.cos(angle)))
+        # Optional cyclic time covariates, both computed from the TARGET timestamp (the step being predicted).
+        # These now call the canonical helpers in `features/time.py` rather than an inline copy of the maths, so
+        # XGBoost and the neural rungs consume an identical definition. The formula is unchanged, so previously
+        # committed XGBoost numbers are reproduced exactly.
+        use_time, use_season = self._has_time_features(), self._has_season_features()
+        if (use_time or use_season) and timestamp is None:
+            if not self._warned_missing_timestamp_:
+                logger.warning(
+                    "XGBoost.predict called without a timestamp but model was fit with time/season features; "
+                    "using the angle-zero fallback (midnight / 1 Jan)"
+                )
+                self._warned_missing_timestamp_ = True
+            if use_time:
+                feats.extend([0.0, 1.0])
+            if use_season:
+                feats.extend([0.0, 1.0])
+        else:
+            if use_time:
+                # Longitude of the last observed position (where the bird is when it takes the step); over a 6h step its
+                # longitude drift is <=~1-2 deg (<=~8 min of solar correction), so the last fix longitude is the right
+                # simple choice.
+                sin_h, cos_h = local_solar_sincos(timestamp, float(history[-1, 0]))
+                feats.extend([float(sin_h), float(cos_h)])
+            if use_season:
+                # No longitude needed: season is one calendar cycle corpus-wide (see features/time.py).
+                sin_d, cos_d = day_of_year_sincos(timestamp)
+                feats.extend([float(sin_d), float(cos_d)])
 
         return _FeatureWindow(
             features=np.asarray(feats, dtype=float),
@@ -365,18 +392,17 @@ class XGBoost:
         # Decide once whether timestamps are usable. The constructor flag says "use them if available"; 
         # this is where "available" gets resolved. Mutating the flag (rather than passing it around)
         # means _has_time_features() and _build_features() agree without extra args
-        has_timestamps = (
-            self.use_time_features
-            and "timestamp" in df_train.columns
-        )
-        # Reconcile the constructor's optimistic flag with reality. If the user asked for time features 
-        # but the data has none, log it and disable
-        if self.use_time_features and not has_timestamps:
+        wants_timestamps = self.use_time_features or self.use_season_features
+        has_timestamps = wants_timestamps and "timestamp" in df_train.columns
+        # Reconcile the constructor's optimistic flags with reality. If the user asked for time or season
+        # features but the data has none, log it and disable both.
+        if wants_timestamps and not has_timestamps:
             logger.info(
-                "XGBoost.fit: use_time_features=True but no 'timestamp' "
-                "column found; disabling time features"
+                "XGBoost.fit: time/season features requested but no 'timestamp' "
+                "column found; disabling them"
             )
             self.use_time_features = False
+            self.use_season_features = False
 
         # Lock the feature layout *before* the loop so _build_features sees a stable answer 
         # from _has_time_features(). We assign feature_names_ provisionally here, then verify post-loop that the 

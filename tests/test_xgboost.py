@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from animal_movement_fm.eval.harness import PredictionContext
+from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
 from animal_movement_fm.models.xgboost import XGBoost, _FeatureWindow
 
 # GenAI reference: These tests are also GenAI generated, where we asked to "give me pytest tests
@@ -470,3 +471,94 @@ class TestXGBoostPredictorContract:
         pred = fitted_model.predict(PredictionContext(history=history))
         assert isinstance(pred, np.ndarray)
         assert pred.shape == (2,)
+
+
+# ---------------------------------------------------------------------------
+# Day-of-year (season) feature
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def yearlong_df():
+    """Trajectories spanning a full year, so day-of-year genuinely varies (simple_df covers ~2 days)."""
+    rng = np.random.default_rng(1)
+    rows = []
+    for ind in range(2):
+        T = 200
+        positions = rng.standard_normal((T, 2)).cumsum(axis=0) * 0.01
+        for t in range(T):
+            rows.append({
+                "individual_id": f"ind_{ind}",
+                "timestamp": pd.Timestamp("2024-01-01") + pd.Timedelta(hours=6 * t),
+                "lon": positions[t, 0],
+                "lat": positions[t, 1],
+            })
+    return pd.DataFrame(rows)
+
+
+class TestSeasonFeatures:
+    def test_season_is_off_by_default(self):
+        # Unlike use_time_features, season defaults off so committed XGBoost results are unchanged.
+        model = XGBoost()
+        assert model.use_season_features is False
+        assert "sin_doy" not in model._feature_layout()
+
+    def test_layout_includes_season_when_enabled(self):
+        names = XGBoost(use_season_features=True)._feature_layout()
+        assert "sin_doy" in names and "cos_doy" in names
+
+    def test_season_adds_exactly_two_features(self):
+        base = len(XGBoost(use_time_features=False)._feature_layout())
+        season = len(XGBoost(use_time_features=False, use_season_features=True)._feature_layout())
+        both = len(XGBoost(use_time_features=True, use_season_features=True)._feature_layout())
+        assert season == base + 2
+        assert both == base + 4
+
+    def test_time_precedes_season_in_layout(self):
+        # Order must match the neural rungs: time of day, then season.
+        names = XGBoost(use_time_features=True, use_season_features=True)._feature_layout()
+        assert names[-4:] == ["sin_hour", "cos_hour", "sin_doy", "cos_doy"]
+
+    def test_built_values_match_canonical_helpers(self):
+        # The appended values must be exactly what features/time.py produces for the TARGET timestamp.
+        model = XGBoost(n_lags=3, use_time_features=True, use_season_features=True)
+        history = np.array([[10.0, 45.0], [10.1, 45.1], [10.2, 45.2]])
+        ts = pd.Timestamp("2024-08-20 14:30")
+        feats = model._build_features(history, ts).features
+
+        sin_h, cos_h = local_solar_sincos(ts, float(history[-1, 0]))
+        sin_d, cos_d = day_of_year_sincos(ts)
+        np.testing.assert_allclose(feats[-4:], [sin_h, cos_h, sin_d, cos_d], atol=1e-12)
+
+    def test_season_varies_across_the_year(self):
+        # August and March must produce clearly different seasonal features.
+        model = XGBoost(n_lags=3, use_time_features=False, use_season_features=True)
+        history = np.array([[10.0, 45.0], [10.1, 45.1], [10.2, 45.2]])
+        aug = model._build_features(history, pd.Timestamp("2024-08-20")).features[-2:]
+        mar = model._build_features(history, pd.Timestamp("2024-03-20")).features[-2:]
+        assert np.hypot(*(aug - mar)) > 1.0
+
+    def test_fit_predict_roundtrip_with_season(self, yearlong_df):
+        model = XGBoost(n_lags=5, n_estimators=10, max_depth=3, use_season_features=True)
+        model.fit(yearlong_df)
+        assert "sin_doy" in model.feature_names_
+        history = yearlong_df.loc[yearlong_df.individual_id == "ind_0", ["lon", "lat"]].to_numpy()[:10]
+        pred = model.predict(
+            PredictionContext(history=history, timestamp=pd.Timestamp("2024-09-01 12:00"))
+        )
+        assert pred.shape == (2,) and np.all(np.isfinite(pred))
+
+    def test_missing_timestamp_column_disables_both(self, yearlong_df):
+        # Asking for season with no timestamp column must disable cleanly, not crash mid-fit.
+        model = XGBoost(n_lags=5, n_estimators=10, max_depth=3, use_season_features=True)
+        model.fit(yearlong_df.drop(columns=["timestamp"]))
+        assert model.use_season_features is False
+        assert model.use_time_features is False
+        assert "sin_doy" not in model.feature_names_
+
+    def test_predict_without_timestamp_uses_fallback(self, yearlong_df):
+        # Fitted with season but handed no timestamp -> angle-zero fallback, still a valid prediction.
+        model = XGBoost(n_lags=5, n_estimators=10, max_depth=3, use_season_features=True)
+        model.fit(yearlong_df)
+        history = yearlong_df.loc[yearlong_df.individual_id == "ind_0", ["lon", "lat"]].to_numpy()[:10]
+        pred = model.predict(PredictionContext(history=history))
+        assert pred.shape == (2,) and np.all(np.isfinite(pred))
