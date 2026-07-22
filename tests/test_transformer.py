@@ -273,3 +273,90 @@ class TestTimeFeatures:
         after = reloaded.predict(ctx)
 
         np.testing.assert_allclose(before, after, rtol=1e-5, atol=1e-6)
+
+
+# ----------------------------------------------------------------------
+# Day-of-year (season) feature
+# ----------------------------------------------------------------------
+
+class TestSeasonFeatures:
+    def _season_model(self, **kw):
+        return Transformer(d_model=16, nhead=2, context_length=12, epochs=2, batch_size=32,
+                           device="cpu", **kw)
+
+    def test_input_dim_toggles(self):
+        assert Transformer(use_season_features=True).input_dim == 4
+        assert Transformer(use_time_features=True, use_season_features=True).input_dim == 6
+
+    def test_name_reflects_season(self):
+        assert Transformer(d_model=32, num_layers=2, use_season_features=True).name == \
+            "transformer_d32_l2_season"
+        assert Transformer(d_model=32, num_layers=2, use_time_features=True,
+                           use_season_features=True).name == "transformer_d32_l2_time_season"
+
+    def test_make_windows_emits_season_channels(self, small_df):
+        model = self._season_model(use_season_features=True)
+        X, _, T = model._make_windows(small_df)
+        assert T.shape == (X.shape[0], 11, 2)
+        r2 = T[..., 0] ** 2 + T[..., 1] ** 2
+        assert torch.allclose(r2, torch.ones_like(r2), atol=1e-5)
+
+    def test_channel_order_is_time_then_season(self, small_df):
+        # With both flags on the layout must be [disp, time_sin, time_cos, season_sin, season_cos];
+        # each half must equal what the single-feature models emit, so fit/predict/checkpoints agree.
+        both = self._season_model(use_time_features=True, use_season_features=True)
+        only_time = self._season_model(use_time_features=True)
+        only_season = self._season_model(use_season_features=True)
+
+        _, _, T_both = both._make_windows(small_df)
+        _, _, T_time = only_time._make_windows(small_df)
+        _, _, T_season = only_season._make_windows(small_df)
+
+        assert T_both.shape[-1] == 4
+        assert torch.allclose(T_both[..., :2], T_time, atol=1e-6)
+        assert torch.allclose(T_both[..., 2:], T_season, atol=1e-6)
+
+    def test_season_is_near_constant_within_a_window(self, small_df):
+        # Day of year barely moves across a 6 day window: it conditions the window rather than
+        # differentiating positions (unlike time of day, which swings through the diurnal cycle).
+        model = self._season_model(use_time_features=True, use_season_features=True)
+        _, _, T = model._make_windows(small_df)
+        time_spread = (T[..., 0].max(dim=1).values - T[..., 0].min(dim=1).values).mean()
+        season_spread = (T[..., 2].max(dim=1).values - T[..., 2].min(dim=1).values).mean()
+        assert season_spread < time_spread
+
+    def test_fit_builds_six_channel_net(self, small_df):
+        model = self._season_model(use_time_features=True, use_season_features=True).fit(small_df)
+        assert model.net.input_proj.in_features == 6
+
+    def test_predict_requires_timestamps_with_season_only(self, small_df):
+        # Season alone still needs the per-fix times; missing them must raise, not silently mispredict.
+        model = self._season_model(use_season_features=True).fit(small_df)
+        with pytest.raises(ValueError):
+            model.predict(PredictionContext(history=np.zeros((12, 2), dtype=np.float32)))
+
+    def test_checkpoint_roundtrip_with_season(self, small_df, tmp_path):
+        model = self._season_model(use_time_features=True, use_season_features=True).fit(small_df)
+        history = (np.random.default_rng(7).standard_normal((12, 2)) * 0.01).cumsum(axis=0)
+        ctx = _context_with_time(history)
+        before = model.predict(ctx)
+
+        path = tmp_path / "ckpt_season.pt"
+        model.save(path)
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_season_features is True
+        assert reloaded.input_dim == 6
+        np.testing.assert_allclose(before, reloaded.predict(ctx), rtol=1e-5, atol=1e-6)
+
+    def test_old_checkpoint_defaults_to_no_season(self, small_df, tmp_path):
+        # A checkpoint written before the flag existed must still load as a raw/time model.
+        model = self._season_model(use_time_features=True).fit(small_df)
+        path = tmp_path / "ckpt_legacy.pt"
+        model.save(path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        del ckpt["config"]["use_season_features"]
+        torch.save(ckpt, path)
+
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_season_features is False
+        assert reloaded.input_dim == 4

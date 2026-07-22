@@ -32,7 +32,7 @@ import torch
 import torch.nn as nn
 
 from animal_movement_fm.eval.harness import iter_windows
-from animal_movement_fm.features.time import local_solar_sincos
+from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,7 @@ class Transformer:
         warmup_frac: float = 0.0,
         grad_clip: float | None = None,
         use_time_features: bool = False,
+        use_season_features: bool = False,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -196,10 +197,20 @@ class Transformer:
         # unchanged. A finite value (like 1.0 for ex) stabilises training by capping the update size when a batch 
         # produces an unusually large gradient
         self.grad_clip = None if grad_clip is None else float(grad_clip)
-        # time of day: when on, each displacement gets its destination fix's local-solar (sin, cos) appended, so the net 
-        # input is 4 channels instead of 2. Default off keeps the raw sequence model, its checkpoints, and the tests unchanged
+        # Per-position covariates, each appended as a (sin, cos) pair tagged on the fix the displacement lands on:
+        #   1. use_time_features; local solar time of day (diurnal; varies strongly WITHIN a window, which is what lets
+        #                        attention weight individual positions by it)
+        #   2. use_season_features; day of year (near constant across a 6 day window, so it conditions the whole window 
+        #                         rather than differentiating positions)
+        # Independent flags, so raw / time / season / both are all reachable for ablation. Both default off, which keeps
+        # the raw sequence model, every existing checkpoint, and the tests unchanged
         self.use_time_features = bool(use_time_features)
-        self.input_dim = 4 if self.use_time_features else 2
+        self.use_season_features = bool(use_season_features)
+        self.input_dim = (
+            2
+            + (2 if self.use_time_features else 0)
+            + (2 if self.use_season_features else 0)
+        )
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -209,8 +220,30 @@ class Transformer:
         self._std: np.ndarray | None = None     # (2,) displacement std
 
         # auto label in results table
-        suffix = "_time" if self.use_time_features else ""
+        suffix = ("_time" if self.use_time_features else "") + ("_season" if self.use_season_features else "")
         self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}{suffix}"
+
+    def _covariate_channels(self, dest_ts, dest_lon) -> np.ndarray:
+        """
+        Per-position covariate channels for the destination fixes of a window's displacements.
+
+        Displacement i spans fix i -> i+1, so it is tagged with fix i+1's clock and date; the last displacement therefore
+        carries the most recent fix's time, i.e. the departure clock of the step being predicted. Channels are appended in
+        a fixed order (time of day, then season) so the input layout is stable across `fit`, `predict` and checkpoints.
+        All are already bounded in [-1, 1] and are never standardised.
+
+        Returns
+        -------
+        np.ndarray, shape (len(dest_ts), n_covariate_channels)
+        """
+        chans = []
+        if self.use_time_features:
+            sin, cos = local_solar_sincos(dest_ts, dest_lon)
+            chans += [sin, cos]
+        if self.use_season_features:
+            sin, cos = day_of_year_sincos(dest_ts)
+            chans += [sin, cos]
+        return np.stack(chans, axis=-1)
 
     def _make_windows(
         self, df: pd.DataFrame, group_col: str = "individual_id"
@@ -232,22 +265,22 @@ class Transformer:
         T : torch.Tensor | None, shape (n_windows, context_length - 1, 2) of (sin, cos), or None when time features are disabled.
         """
         xs, ys, ts = [], [], []
+        needs_ts = self.use_time_features or self.use_season_features
         for _, traj in df.groupby(group_col, sort=False):
-            traj_ts = traj["timestamp"].to_numpy() if self.use_time_features else None
+            traj_ts = traj["timestamp"].to_numpy() if needs_ts else None
             for history, target, _ts, t_idx in iter_windows(traj, self.context_length):
                 xs.append(np.diff(history, axis=0)) # (W-1, 2) input displacements
                 ys.append(target - history[-1]) # (2,) target displacement
-                if self.use_time_features:
+                if needs_ts:
                     win_ts = traj_ts[t_idx - self.context_length : t_idx] # (W,) row aligned with history
-                    sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0]) # destination fixes 1..W-1
-                    ts.append(np.stack([sin, cos], axis=-1)) # (W-1, 2)
+                    ts.append(self._covariate_channels(win_ts[1:], history[1:, 0])) # destination fixes 1..W-1
 
         if not xs:
             raise ValueError(f"No windows produced: every individual has fewer than " f"{self.context_length + 1} positions.")
 
         X = torch.tensor(np.stack(xs), dtype=torch.float32)
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
-        T = torch.tensor(np.stack(ts), dtype=torch.float32) if self.use_time_features else None
+        T = torch.tensor(np.stack(ts), dtype=torch.float32) if needs_ts else None
         return X, Y, T
 
     def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "Transformer":
@@ -265,8 +298,8 @@ class Transformer:
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0 duhh (forgot this lol)
         Xn = (X - self._mean) / self._std
 
-        # append the raw time of day channels AFTER standardisation, so the net sees (N, W-1, 4)
-        if self.use_time_features:
+        # append the raw covariate channels AFTER standardisation, so the net sees (N, W-1, input_dim)
+        if T is not None:
             Xn = torch.cat([Xn, T], dim=-1)
 
         # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a
@@ -373,16 +406,15 @@ class Transformer:
 
         # append the same destination tagged local-solar (sin, cos) built in _make_windows, using the per fix timestamps the 
         # harness threads through the context
-        if self.use_time_features:
+        if self.use_time_features or self.use_season_features:
             if context.history_timestamps is None:
                 raise ValueError(
-                    "model was fitted with time features but context.history_timestamps is None; "
+                    "model was fitted with time/season features but context.history_timestamps is None; "
                     "the harness populates it, so this is a direct predict() call missing the times."
                 )
             win_ts = np.asarray(context.history_timestamps)
-            sin, cos = local_solar_sincos(win_ts[1:], history[1:, 0])  # destination fixes 1..W-1
-            tfeat = np.stack([sin, cos], axis=-1).astype(np.float32)  # (W-1, 2)
-            feat = np.concatenate([disp_n, tfeat], axis=-1)  # (W-1, 4)
+            cov = self._covariate_channels(win_ts[1:], history[1:, 0]).astype(np.float32)  # (W-1, n_cov)
+            feat = np.concatenate([disp_n, cov], axis=-1)  # (W-1, input_dim)
         else:
             feat = disp_n
 
@@ -424,6 +456,7 @@ class Transformer:
                     "dropout": self.dropout,
                     "context_length": self.context_length,
                     "use_time_features": self.use_time_features,
+                    "use_season_features": self.use_season_features,
                     "name": self.name,
                 },
             },
@@ -442,7 +475,9 @@ class Transformer:
         # silence the FutureWarning and stay correct when torch flips the default to True
         ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
-        use_time = cfg.get("use_time_features", False)   # old checkpoints predate the flag -> raw sequence
+        # old checkpoints predate these flags -> raw sequence
+        use_time = cfg.get("use_time_features", False)
+        use_season = cfg.get("use_season_features", False)
 
         # rebuild the wrapper with the stored architecture.
         model = cls(
@@ -453,6 +488,7 @@ class Transformer:
             dropout=cfg["dropout"],
             context_length=cfg["context_length"],
             use_time_features=use_time,
+            use_season_features=use_season,
             device=device,
             name=cfg["name"],
         )
