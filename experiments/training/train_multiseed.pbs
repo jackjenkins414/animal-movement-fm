@@ -41,6 +41,11 @@
 #PBS -N train_multiseed
 #PBS -j oe
 #PBS -J 0-29
+# PBS Pro requires array jobs to be rerunnable, and Gadi's site default submits with -r n, which
+# fails with "cannot submit non-rerunable Array Job". Rerunnable is safe here: each subjob writes
+# only its own run_id-keyed checkpoint/preds/summary, so a requeued subjob just overwrites its own
+# outputs rather than corrupting another run's.
+#PBS -r y
 
 export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=$PBS_NCPUS
