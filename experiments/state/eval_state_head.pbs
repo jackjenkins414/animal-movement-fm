@@ -1,0 +1,42 @@
+#!/bin/bash
+# Two-factor state-head evaluation on Gadi, as a 2-element PBS job ARRAY:
+#   index 0 -> lstm         index 1 -> transformer
+# Each subjob trains the baseline (time+season) and the treatment (+ state head) for that architecture on the
+# seed-42 split and evaluates both on test, writing results/state_head/eval_state_head_<arch>_s0.{json,csv}.
+# The resource request below is PER SUBJOB.
+#
+# Submit:   qsub experiments/state/eval_state_head.pbs
+# Monitor:  qstat -u $USER            (the array shows as one job id ending in [])
+#           qstat -t <jobid>[]        (per-subjob states)
+# Logs:     eval_state_head.o<jobid>.<index>   one per subjob
+#
+# QUEUE: gpuhopper (gadi-gpu-h200, 48 ncpus / 4 ngpus, 12 CPUs per GPU). Fall back to V100s with -q gpuvolta;
+# the 12:1 ratio below is valid for both. torch stays pinned at 2.5.1+cu121 (kernels for sm_70 and sm_90).
+#
+# WALLTIME: each subjob trains TWO 80-epoch models back to back, so ~2x a single multiseed cell (which used 4h);
+# 06:00:00 leaves headroom. mem: iteration-1 used ~3GB, so 32GB is ample.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=06:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N eval_state_head
+#PBS -j oe
+#PBS -J 0-1
+# PBS Pro requires array jobs to be rerunnable (Gadi's site default -r n rejects them). Safe here: each subjob
+# writes only its own arch-keyed outputs, so a requeue overwrites its own files rather than another run's.
+#PBS -r y
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+cd /g/data/um09/$USER/animal-movement-fm
+
+ARCHS=(lstm transformer)
+ARCH=${ARCHS[$PBS_ARRAY_INDEX]}
+echo "state-head eval: arch=$ARCH  (array index $PBS_ARRAY_INDEX)"
+uv run python experiments/state/eval_state_head.py --arch "$ARCH" --seed 0
