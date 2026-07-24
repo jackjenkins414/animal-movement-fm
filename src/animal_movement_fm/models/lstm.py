@@ -24,45 +24,71 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from animal_movement_fm.analysis.regime import label_migratory_launches, label_regimes
 from animal_movement_fm.eval.harness import iter_windows
 from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
+from animal_movement_fm.state.dataset import STATE_TO_IDX
 
 logger = logging.getLogger(__name__)
 
 class _LSTMNet(nn.Module):
     """
-    Inner network: LSTM encoder + linear head
+    Inner network: LSTM encoder + linear head(s).
 
     Shapes
     ------
     input: (batch, seq_len, input_dim)
-    output: (batch, output_dim)
+    output: (batch, output_dim)                       when use_state_head is False
+    output: (batch, output_dim), (batch, n_states)    when use_state_head is True
+
+    Two-factor state head (Rung 2)
+    ------------------------------
+    When `use_state_head` is on, a second linear head reads the same trunk summary `last` and emits `n_states` state
+    logits. The softmax of those logits (the soft state distribution, differentiable so gradients flow end to end) is
+    concatenated onto `last` before the position head, so the displacement prediction is explicitly conditioned on the
+    regime the trunk thinks is coming. With the flag off, the module is byte-for-byte our original raw sequence net
+    (position head reads `last` directly), so every existing checkpoint, prediction and test is still unchanged.
     """
 
     def __init__(
-            self, 
-            input_dim: int = 2, 
-            hidden_dim: int = 64, # DEFAULT FOR NOW 
+            self,
+            input_dim: int = 2,
+            hidden_dim: int = 64, # DEFAULT FOR NOW
             num_layers: int = 1, # SAME HERE
             output_dim: int = 2,
-    ) -> None: 
+            use_state_head: bool = False,
+            n_states: int = 5,
+    ) -> None:
         super().__init__()
         self.lstm = nn.LSTM(
-            input_dim, 
-            hidden_dim, 
-            num_layers, 
+            input_dim,
+            hidden_dim,
+            num_layers,
             batch_first=True,
         )
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.use_state_head = bool(use_state_head)
+        self.n_states = int(n_states)
+        if self.use_state_head:
+            self.state_head = nn.Linear(hidden_dim, self.n_states)
+            # position head conditioned on the soft state distribution appended to the trunk summary
+            self.fc = nn.Linear(hidden_dim + self.n_states, output_dim)
+        else:
+            self.fc = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         # x: (batch, seq_len, input-dim)
 
         # out: (batch, seq_len, hidden_dim)
         out, _ = self.lstm(x)
 
-        # (batch, hidden_dim); summary of the window 
+        # (batch, hidden_dim); summary of the window
         last = out[:, -1, :]
+
+        if self.use_state_head:
+            state_logits = self.state_head(last)   # (batch, n_states)
+            p_state = torch.softmax(state_logits, dim=-1)  # soft, differentiable conditioning
+            pos = self.fc(torch.cat([last, p_state], dim=-1)) # (batch, output_dim)
+            return pos, state_logits
 
         # (batch, output_dim)
         return self.fc(last)
@@ -85,6 +111,9 @@ class LSTM:
         lr: float = 1e-3,
         use_time_features: bool = False,
         use_season_features: bool = False,
+        use_state_head: bool = False,
+        state_loss_weight: float = 0.5,
+        n_states: int = 5,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -110,16 +139,27 @@ class LSTM:
             + (2 if self.use_season_features else 0)
         )
 
+        # two factor state head (Rung 2); a second head predicts the next fix's state and its soft distribution
+        # conditions the position head. The state head is on the trunk, so it does NOT change input_dim. Off by
+        # default, which leaves the raw/time/season models, their checkpoints and tests untouched.
+        self.use_state_head = bool(use_state_head)
+        self.state_loss_weight = float(state_loss_weight)
+        self.n_states = int(n_states)
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # set by `fit` (or `from_checkpoint`); None on a fresh, unfitted model 
-        self.net: _LSTMNet | None = None 
+        # set by `fit` (or `from_checkpoint`); none on a fresh, unfitted model
+        self.net: _LSTMNet | None = None
         self._mean: np.ndarray | None = None # (2,) displacement mean
-        self._std: np.ndarray | None = None # (2,) displacement std 
+        self._std: np.ndarray | None = None # (2,) displacement std
 
 
         # auto label in results table
-        suffix = ("_time" if self.use_time_features else "") + ("_season" if self.use_season_features else "")
+        suffix = (
+            ("_time" if self.use_time_features else "")
+            + ("_season" if self.use_season_features else "")
+            + ("_state" if self.use_state_head else "")
+        )
         self.name = name or f"lstm_h{self.hidden_dim}_l{self.num_layers}{suffix}"
 
     def _covariate_channels(self, dest_ts, dest_lon) -> np.ndarray:
@@ -186,7 +226,45 @@ class LSTM:
         Y = torch.tensor(np.stack(ys), dtype=torch.float32)
         T = torch.tensor(np.stack(ts), dtype=torch.float32) if needs_ts else None
         return X, Y, T
-    
+
+    def _state_labels(self, df: pd.DataFrame, group_col: str = "individual_id") -> torch.Tensor:
+        """Per-window next state labels, aligned one-to-one with `_make_windows` output.
+
+        Re-runs the exact same grouping + `iter_windows` loop as `_make_windows`, so the i-th label corresponds to the
+        i-th (X, Y) window. The label is the canonical refined state of the window's TARGET fix (`state[t_idx]`), i.e.
+        the same fix whose displacement the position head predicts, which makes the state head a "one step" forecast and
+        identical to the labels the standalone classifier uses (`state.dataset.build_state_windows`).
+
+        Labels come from the canonical labeller (`label_regimes` -> `label_migratory_launches`), keyed on
+        (segment_id, timestamp) so alignment is order independent. Requires a `segment_id` column (the labeller defines
+        states within segments); raises if it is missing.
+
+        Returns
+        -------
+        torch.Tensor, shape (n_windows,), dtype long : integer state index (STATE_TO_IDX) per window.
+        """
+        if "segment_id" not in df.columns:
+            raise ValueError(
+                "use_state_head=True requires a 'segment_id' column to derive next-state labels; "
+                "the segment product provides it."
+            )
+        labelled = label_migratory_launches(label_regimes(df))
+        state_by_fix = labelled.set_index(["segment_id", "timestamp"])["state"].map(STATE_TO_IDX)
+
+        ss: list[int] = []
+        for _, traj in df.groupby(group_col, sort=False):
+            idx = pd.MultiIndex.from_arrays([traj["segment_id"], traj["timestamp"]])
+            traj_state = state_by_fix.reindex(idx).to_numpy()
+            for _history, _target, _ts, t_idx in iter_windows(traj, self.context_length):
+                ss.append(int(traj_state[t_idx]))
+
+        if not ss:
+            raise ValueError(
+                f"No windows produced for state labels: every individual has fewer than "
+                f"{self.context_length + 1} positions."
+            )
+        return torch.tensor(ss, dtype=torch.long)
+
     def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "LSTM":
         """
         Train the network once on all trajectories in `train_df`.
@@ -199,7 +277,7 @@ class LSTM:
 
         X, Y, T = self._make_windows(train_df, group_col=group_col)   # (N, W-1, 2), (N, 2), (N, W-1, 2)|None
 
-        # standardise the DISPLACEMENT channels using TRAIN statistics only, and remember them. Predict() must reuse these exact stats, 
+        # standardise the DISPLACEMENT channels using TRAIN statistics only, and remember them. Predict() must reuse these exact stats,
         # so they are stored on self. Time features (if any) are already bounded in [-1, 1] and are NOT standardised.
         self._mean = X.mean(dim=(0, 1), keepdim=True) # (1, 1, 2)
         self._std = X.std(dim=(0, 1), keepdim=True).clamp_min(1e-8) # avoid /0
@@ -209,10 +287,15 @@ class LSTM:
         if T is not None:
             Xn = torch.cat([Xn, T], dim=-1)
 
+        # per-window next state labels for the state head, aligned to (Xn, Y) by construction (same window loop)
+        S = self._state_labels(train_df, group_col=group_col) if self.use_state_head else None
+
         # preload the full training tensors onto the GPU once so batches are indexed on device, eliminating per batch CPU -> GPU
         # transfers while still preserving deterministic shuffling
         Xn = Xn.to(self.device)
         Y = Y.to(self.device)
+        if S is not None:
+            S = S.to(self.device)
         n_windows = Xn.size(0)
 
         self.net = _LSTMNet(
@@ -220,15 +303,19 @@ class LSTM:
             hidden_dim=self.hidden_dim,
             num_layers = self.num_layers,
             output_dim=2,
+            use_state_head=self.use_state_head,
+            n_states=self.n_states,
         ).to(self.device)
 
         optimiser = torch.optim.Adam(self.net.parameters(), lr=self.lr)
         loss_fn = nn.MSELoss()
+        ce_fn = nn.CrossEntropyLoss() if self.use_state_head else None
 
         self.net.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
-            # reshuffle each epoch; randperm on device etc 
+            epoch_state = 0.0
+            # reshuffle each epoch; randperm on device etc
             perm = torch.randperm(n_windows, device=self.device)
             for start in range(0, n_windows, self.batch_size):
                 idx = perm[start : start + self.batch_size]
@@ -236,15 +323,30 @@ class LSTM:
                 yb = Y[idx]
 
                 optimiser.zero_grad()
-                pred = self.net(xb)
-                loss = loss_fn(pred, yb)
+                if self.use_state_head:
+                    pred, state_logits = self.net(xb)
+                    loss_pos = loss_fn(pred, yb)
+                    loss_state = ce_fn(state_logits, S[idx])
+                    # joint objective: position MSE (primary) + weighted state cross-entropy (auxiliary conditioning)
+                    loss = loss_pos + self.state_loss_weight * loss_state
+                    epoch_state += loss_state.item() * xb.size(0)
+                else:
+                    pred = self.net(xb)
+                    loss = loss_fn(pred, yb)
                 loss.backward()
                 optimiser.step()
 
                 epoch_loss += loss.item() * xb.size(0)
 
             epoch_loss /= n_windows
-            logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
+            if self.use_state_head:
+                epoch_state /= n_windows
+                logger.info(
+                    "epoch %d/%d train_loss=%.6g state_ce=%.6g",
+                    epoch + 1, self.epochs, epoch_loss, epoch_state,
+                )
+            else:
+                logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
         return self
 
     
@@ -304,7 +406,10 @@ class LSTM:
         
         self.net.eval()
         with torch.no_grad():
-            pred_disp = self.net(x) # (1,2)
+            out = self.net(x)
+            # with the state head on, the net returns (pos, state_logits); the state head conditions the position
+            # internally, so predict still returns only the (lon, lat) position and the harness contract is unchanged
+            pred_disp = out[0] if self.use_state_head else out  # (1,2)
 
         pred_disp = pred_disp.squeeze(0).cpu().numpy() # (2,)
         return history[-1] + pred_disp
@@ -341,6 +446,9 @@ class LSTM:
                     "context_length": self.context_length,
                     "use_time_features": self.use_time_features,
                     "use_season_features": self.use_season_features,
+                    "use_state_head": self.use_state_head,
+                    "state_loss_weight": self.state_loss_weight,
+                    "n_states": self.n_states,
                     "name": self.name,
                 },
             },
@@ -359,9 +467,11 @@ class LSTM:
         # silence the FutureWarning and stay correct when torch flips the default to True
         ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
-        # old checkpoints predate these flags -> raw sequence
+        # old checkpoints predate these flags -> raw sequence, no state head
         use_time = cfg.get("use_time_features", False)
         use_season = cfg.get("use_season_features", False)
+        use_state_head = cfg.get("use_state_head", False)
+        n_states = cfg.get("n_states", 5)
 
         # Rebuild the wrapper with the stored architecture.
         model = cls(
@@ -370,6 +480,9 @@ class LSTM:
             context_length=cfg["context_length"],
             use_time_features=use_time,
             use_season_features=use_season,
+            use_state_head=use_state_head,
+            state_loss_weight=cfg.get("state_loss_weight", 0.5),
+            n_states=n_states,
             device=device,
             name=cfg["name"],
         )
@@ -380,6 +493,8 @@ class LSTM:
             hidden_dim=cfg["hidden_dim"],
             num_layers=cfg["num_layers"],
             output_dim=2,
+            use_state_head=use_state_head,
+            n_states=n_states,
         ).to(model.device)
         model.net.load_state_dict(ckpt["state_dict"])
         model._mean = ckpt["mean"]
