@@ -12,6 +12,7 @@ import torch
 
 from animal_movement_fm.eval.harness import PredictionContext, iter_windows
 from animal_movement_fm.models.transformer import Transformer
+from animal_movement_fm.state.dataset import build_state_windows
 
 
 # ----------------------------------------------------------------------
@@ -75,6 +76,34 @@ def fitted_time_model():
     df = _make_df()
     return Transformer(d_model=16, nhead=2, num_layers=1, dim_feedforward=32, context_length=12,
                        epochs=3, batch_size=32, use_time_features=True, device="cpu").fit(df)
+
+
+def _make_seg_df(n_segments=3, n_steps=40, noise=0.02, seed=0):
+    """Random-walk frame WITH a segment_id column (what the state head needs to label states).
+
+    One segment per individual, concatenated in sorted segment-id order ('s0','s1',...) at 6 h cadence, so the frame is
+    pre-sorted by (segment_id, timestamp) and the model's per-segment window order matches build_state_windows'.
+    """
+    rng = np.random.default_rng(seed)
+    frames = []
+    for i in range(n_segments):
+        coords = (rng.standard_normal((n_steps, 2)) * noise).cumsum(axis=0)
+        frames.append(pd.DataFrame({
+            "segment_id": f"s{i}",
+            "individual_id": i,
+            "timestamp": pd.date_range("2024-03-01", periods=n_steps, freq="6h"),
+            "lon": coords[:, 0],
+            "lat": coords[:, 1],
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+@pytest.fixture(scope="module")
+def fitted_state_model():
+    # Tiny state-head transformer on a segment frame; exercises the joint MSE + state-CE training path.
+    df = _make_seg_df()
+    return Transformer(d_model=16, nhead=2, num_layers=1, dim_feedforward=32, context_length=12,
+                       epochs=3, batch_size=32, use_state_head=True, device="cpu").fit(df, group_col="segment_id")
 
 
 # ----------------------------------------------------------------------
@@ -360,3 +389,86 @@ class TestSeasonFeatures:
         reloaded = Transformer.from_checkpoint(path, device="cpu")
         assert reloaded.use_season_features is False
         assert reloaded.input_dim == 4
+
+
+# ----------------------------------------------------------------------
+# Two-factor state head (Rung 2)
+# ----------------------------------------------------------------------
+
+class TestStateHead:
+    def test_name_reflects_state_head(self):
+        assert Transformer(d_model=32, num_layers=2, use_state_head=True).name == "transformer_d32_l2_state"
+        assert (
+            Transformer(d_model=32, num_layers=2, use_time_features=True,
+                        use_season_features=True, use_state_head=True).name
+            == "transformer_d32_l2_time_season_state"
+        )
+
+    def test_state_head_does_not_change_input_dim(self):
+        # The head is on the window summary, not the input sequence, so input_dim is unaffected.
+        assert Transformer(use_state_head=True).input_dim == 2
+        assert Transformer(use_time_features=True, use_season_features=True, use_state_head=True).input_dim == 6
+
+    def test_flag_off_net_is_unconditioned(self, fitted_model):
+        # Default model: no state head, position head reads the window summary directly, forward returns one tensor.
+        assert fitted_model.net.use_state_head is False
+        assert fitted_model.net.head.in_features == fitted_model.d_model
+        assert not hasattr(fitted_model.net, "state_head")
+        out = fitted_model.net(torch.zeros(1, 11, 2))
+        assert isinstance(out, torch.Tensor)
+
+    def test_head_on_wires_conditioning(self, fitted_state_model):
+        net = fitted_state_model.net
+        assert net.use_state_head is True
+        assert net.state_head.out_features == 5
+        # position head is fed [window_summary, softmax(state)] -> d_model + n_states inputs
+        assert net.head.in_features == fitted_state_model.d_model + 5
+        pos, logits = net(torch.zeros(1, 11, 2))
+        assert pos.shape == (1, 2)
+        assert logits.shape == (1, 5)
+
+    def test_state_labels_align_with_canonical_windows(self):
+        # _state_labels must reproduce the standalone classifier's labels window-for-window (same labeller, same order).
+        df = _make_seg_df()
+        cl = 12
+        model = Transformer(d_model=16, nhead=2, context_length=cl, use_state_head=True, device="cpu")
+        S = model._state_labels(df, group_col="segment_id").numpy()
+        sw = build_state_windows(df, context_length=cl)
+        assert S.tolist() == sw.y.tolist()
+
+    def test_fit_requires_segment_id(self, small_df):
+        # small_df has no segment_id; a state-head fit must fail loudly rather than silently mislabel.
+        with pytest.raises(ValueError):
+            Transformer(d_model=16, nhead=2, context_length=12, epochs=1,
+                        use_state_head=True, device="cpu").fit(small_df)
+
+    def test_predict_shape_with_state_head(self, fitted_state_model):
+        history = (np.random.default_rng(5).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        pred = fitted_state_model.predict(PredictionContext(history=history))
+        assert pred.shape == (2,)
+        assert np.all(np.isfinite(pred))
+
+    def test_checkpoint_roundtrip_with_state_head(self, fitted_state_model, tmp_path):
+        history = (np.random.default_rng(6).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        ctx = PredictionContext(history=history)
+        before = fitted_state_model.predict(ctx)
+
+        path = tmp_path / "ckpt_state.pt"
+        fitted_state_model.save(path)
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_state_head is True
+        assert reloaded.net.head.in_features == fitted_state_model.d_model + 5
+        np.testing.assert_allclose(before, reloaded.predict(ctx), rtol=1e-5, atol=1e-6)
+
+    def test_old_checkpoint_defaults_to_no_state_head(self, small_df, tmp_path):
+        # A checkpoint predating the flag must load as an unconditioned model.
+        model = Transformer(d_model=16, nhead=2, context_length=12, epochs=1, device="cpu").fit(small_df)
+        path = tmp_path / "ckpt_prestate.pt"
+        model.save(path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        del ckpt["config"]["use_state_head"]
+        torch.save(ckpt, path)
+
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_state_head is False
+        assert reloaded.net.head.in_features == reloaded.d_model

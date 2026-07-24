@@ -31,8 +31,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from animal_movement_fm.analysis.regime import label_migratory_launches, label_regimes
 from animal_movement_fm.eval.harness import iter_windows
 from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
+from animal_movement_fm.state.dataset import STATE_TO_IDX
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +99,28 @@ class _TransformerNet(nn.Module):
     Shapes
     ------
     Input: (batch, seq_len, input_dim)
-    Output: (batch, output_dim)
+    Output: (batch, output_dim)                       when use_state_head is False
+    Output: (batch, output_dim), (batch, n_states)    when use_state_head is True
+
+    Two-factor state head (Rung 2)
+    ------------------------------
+    Identical mechanism to the LSTM rung: when `use_state_head` is on, a second linear head reads the same window
+    summary (the last position after attention) and emits `n_states` state logits; the softmax of those logits (soft,
+    differentiable) is concatenated onto the summary before the position head, so the displacement prediction is
+    conditioned on the regime attention thinks is coming. Off -> byte-for-byte our original net.
     """
 
     def __init__(
-            self, 
-            input_dim: int = 2, 
-            d_model: int = 64, 
-            nhead: int = 4, 
-            num_layers: int = 2, 
-            dim_feedforward: int = 128, 
-            dropout: float = 0.1, 
-            output_dim: int = 2, 
+            self,
+            input_dim: int = 2,
+            d_model: int = 64,
+            nhead: int = 4,
+            num_layers: int = 2,
+            dim_feedforward: int = 128,
+            dropout: float = 0.1,
+            output_dim: int = 2,
+            use_state_head: bool = False,
+            n_states: int = 5,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -127,10 +139,17 @@ class _TransformerNet(nn.Module):
 
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # (d_model -> output_dim); same role as the LSTMs `fc`; turn the window summary into a 2-element displacement 
-        self.head = nn.Linear(d_model, output_dim)
+        # (d_model -> output_dim); same role as the LSTMs `fc`; turn the window summary into a 2-element displacement
+        self.use_state_head = bool(use_state_head)
+        self.n_states = int(n_states)
+        if self.use_state_head:
+            self.state_head = nn.Linear(d_model, self.n_states)
+            # position head conditioned on the soft state distribution appended to the window summary
+            self.head = nn.Linear(d_model + self.n_states, output_dim)
+        else:
+            self.head = nn.Linear(d_model, output_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor: 
+    def forward(self, x: torch.Tensor):
         # x; (batch, seq_len, input_dim)
 
         # project up then scale; the position waves are bounded in [-1, 1] so we bring the learned content to a comparable magnitude (sqrt(d_model), 
@@ -144,9 +163,15 @@ class _TransformerNet(nn.Module):
         # attention is correct here; the causal mask is the foundation model's concern when it trains on every position 
         out = self.encoder(x)
 
-        # (batch, d_model); take the last position as the window summary, mirroring the LSTMs out[:, -1, :] so the two rungs differ only in how 
-        # that summary was formed 
+        # (batch, d_model); take the last position as the window summary, mirroring the LSTMs out[:, -1, :] so the two rungs differ only in how
+        # that summary was formed
         last = out[:, -1, :]
+
+        if self.use_state_head:
+            state_logits = self.state_head(last) # (batch, n_states)
+            p_state = torch.softmax(state_logits, dim=-1)  # soft, differentiable conditioning
+            pos = self.head(torch.cat([last, p_state], dim=-1))  # (batch, output_dim)
+            return pos, state_logits
 
         # (batch, output_dim)
         return self.head(last)
@@ -178,6 +203,9 @@ class Transformer:
         grad_clip: float | None = None,
         use_time_features: bool = False,
         use_season_features: bool = False,
+        use_state_head: bool = False,
+        state_loss_weight: float = 0.5,
+        n_states: int = 5,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -212,6 +240,13 @@ class Transformer:
             + (2 if self.use_season_features else 0)
         )
 
+        # two factor state head (Rung 2); a second head predicts the next fix's state and its soft distribution
+        # conditions the position head. On the window summary, so it does NOT change input_dim. Off by default,
+        # leaving our prev raw/time/season models, their checkpoints and tests untouched
+        self.use_state_head = bool(use_state_head)
+        self.state_loss_weight = float(state_loss_weight)
+        self.n_states = int(n_states)
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # set by `fit` (or `from_checkpoint`); None on a fresh, unfitted model
@@ -220,7 +255,11 @@ class Transformer:
         self._std: np.ndarray | None = None     # (2,) displacement std
 
         # auto label in results table
-        suffix = ("_time" if self.use_time_features else "") + ("_season" if self.use_season_features else "")
+        suffix = (
+            ("_time" if self.use_time_features else "")
+            + ("_season" if self.use_season_features else "")
+            + ("_state" if self.use_state_head else "")
+        )
         self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}{suffix}"
 
     def _covariate_channels(self, dest_ts, dest_lon) -> np.ndarray:
@@ -283,6 +322,40 @@ class Transformer:
         T = torch.tensor(np.stack(ts), dtype=torch.float32) if needs_ts else None
         return X, Y, T
 
+    def _state_labels(self, df: pd.DataFrame, group_col: str = "individual_id") -> torch.Tensor:
+        """Per-window next state labels, aligned one-to-one with `_make_windows` output.
+
+        Identical to the LSTM rung: re-runs the same grouping + `iter_windows` loop so the i-th label matches the i-th
+        (X, Y) window, and labels the window's TARGET fix with the canonical refined state (`state[t_idx]`) — the same
+        fix whose displacement the position head predicts, and the same label the standalone classifier uses. Keyed on
+        (segment_id, timestamp) so alignment is order-independent; requires a `segment_id` column.
+
+        Returns
+        -------
+        torch.Tensor, shape (n_windows,), dtype long : integer state index (STATE_TO_IDX) per window.
+        """
+        if "segment_id" not in df.columns:
+            raise ValueError(
+                "use_state_head=True requires a 'segment_id' column to derive next state labels; "
+                "the segment produc provides it."
+            )
+        labelled = label_migratory_launches(label_regimes(df))
+        state_by_fix = labelled.set_index(["segment_id", "timestamp"])["state"].map(STATE_TO_IDX)
+
+        ss: list[int] = []
+        for _, traj in df.groupby(group_col, sort=False):
+            idx = pd.MultiIndex.from_arrays([traj["segment_id"], traj["timestamp"]])
+            traj_state = state_by_fix.reindex(idx).to_numpy()
+            for _history, _target, _ts, t_idx in iter_windows(traj, self.context_length):
+                ss.append(int(traj_state[t_idx]))
+
+        if not ss:
+            raise ValueError(
+                f"No windows produced for state labels: every individual has fewer than "
+                f"{self.context_length + 1} positions"
+            )
+        return torch.tensor(ss, dtype=torch.long)
+
     def fit(self, train_df: pd.DataFrame, group_col: str = "individual_id") -> "Transformer":
         """
         Train the network once on all trajectories in `train_df`.
@@ -302,12 +375,17 @@ class Transformer:
         if T is not None:
             Xn = torch.cat([Xn, T], dim=-1)
 
+        # per window next state labels for the state head, aligned to (Xn, Y) by construction (same window loop)
+        S = self._state_labels(train_df, group_col=group_col) if self.use_state_head else None
+
         # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a
-        # DataLoader that copies each batch CPU -> GPU. Our stork set is ~170 MB and so that fits easily in the V100's 32 GB, so this removes the 
-        # per-batch transfer + single process loader that starved the GPU in our prev iter1 (util ~15%). Shuffling still draws from torch's global RNG via 
+        # DataLoader that copies each batch CPU -> GPU. Our stork set is ~170 MB and so that fits easily in the V100's 32 GB, so this removes the
+        # per-batch transfer + single process loader that starved the GPU in our prev iter1 (util ~15%). Shuffling still draws from torch's global RNG via
         # randperm, so the seeded determinism test is still unaffected
         Xn = Xn.to(self.device) # live on GPU
         Y = Y.to(self.device) # live on GPU
+        if S is not None:
+            S = S.to(self.device)
         n_windows = Xn.size(0)
         n_batches = math.ceil(n_windows / self.batch_size)
 
@@ -319,6 +397,8 @@ class Transformer:
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             output_dim=2,
+            use_state_head=self.use_state_head,
+            n_states=self.n_states,
         ).to(self.device)
 
         optimiser = torch.optim.Adam(self.net.parameters(), lr=self.lr)
@@ -341,10 +421,12 @@ class Transformer:
         #################
 
         loss_fn = nn.MSELoss()
+        ce_fn = nn.CrossEntropyLoss() if self.use_state_head else None
 
         self.net.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
+            epoch_state = 0.0
             # reshuffle each epoch; randperm on device, drawn from torch's global RNG
             perm = torch.randperm(n_windows, device=self.device)
             for start in range(0, n_windows, self.batch_size):
@@ -353,8 +435,16 @@ class Transformer:
                 yb = Y[idx]
 
                 optimiser.zero_grad()
-                pred = self.net(xb)
-                loss = loss_fn(pred, yb)
+                if self.use_state_head:
+                    pred, state_logits = self.net(xb)
+                    loss_pos = loss_fn(pred, yb)
+                    loss_state = ce_fn(state_logits, S[idx])
+                    # joint objective; position MSE (primary) + weighted state cross-entropy (auxiliary conditioning)
+                    loss = loss_pos + self.state_loss_weight * loss_state
+                    epoch_state += loss_state.item() * xb.size(0)
+                else:
+                    pred = self.net(xb)
+                    loss = loss_fn(pred, yb)
                 loss.backward()
                 if self.grad_clip is not None:
                     torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
@@ -364,7 +454,14 @@ class Transformer:
                 epoch_loss += loss.item() * xb.size(0)
 
             epoch_loss /= n_windows
-            logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
+            if self.use_state_head:
+                epoch_state /= n_windows
+                logger.info(
+                    "epoch %d/%d train_loss=%.6g state_ce=%.6g",
+                    epoch + 1, self.epochs, epoch_loss, epoch_state,
+                )
+            else:
+                logger.info("epoch %d/%d train_mse=%.6g", epoch + 1, self.epochs, epoch_loss)
         return self
 
     def predict(self, context) -> np.ndarray:
@@ -423,7 +520,10 @@ class Transformer:
 
         self.net.eval()
         with torch.no_grad():
-            pred_disp = self.net(x) # (1, 2)
+            out = self.net(x)
+            # with the state head on, the net returns (pos, state_logits); the state head conditions the position
+            # internally, so predict still returns only the (lon, lat) position and the harness contract is unchanged.
+            pred_disp = out[0] if self.use_state_head else out  # (1, 2)
 
         pred_disp = pred_disp.squeeze(0).cpu().numpy() # (2,)
         return history[-1] + pred_disp
@@ -457,6 +557,9 @@ class Transformer:
                     "context_length": self.context_length,
                     "use_time_features": self.use_time_features,
                     "use_season_features": self.use_season_features,
+                    "use_state_head": self.use_state_head,
+                    "state_loss_weight": self.state_loss_weight,
+                    "n_states": self.n_states,
                     "name": self.name,
                 },
             },
@@ -475,9 +578,11 @@ class Transformer:
         # silence the FutureWarning and stay correct when torch flips the default to True
         ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
         cfg = ckpt["config"]
-        # old checkpoints predate these flags -> raw sequence
+        # old checkpoints predate these flags -> raw sequence, no state head
         use_time = cfg.get("use_time_features", False)
         use_season = cfg.get("use_season_features", False)
+        use_state_head = cfg.get("use_state_head", False)
+        n_states = cfg.get("n_states", 5)
 
         # rebuild the wrapper with the stored architecture.
         model = cls(
@@ -489,6 +594,9 @@ class Transformer:
             context_length=cfg["context_length"],
             use_time_features=use_time,
             use_season_features=use_season,
+            use_state_head=use_state_head,
+            state_loss_weight=cfg.get("state_loss_weight", 0.5),
+            n_states=n_states,
             device=device,
             name=cfg["name"],
         )
@@ -502,6 +610,8 @@ class Transformer:
             dim_feedforward=cfg["dim_feedforward"],
             dropout=cfg["dropout"],
             output_dim=2,
+            use_state_head=use_state_head,
+            n_states=n_states,
         ).to(model.device)
         model.net.load_state_dict(ckpt["state_dict"])
         model._mean = ckpt["mean"]
