@@ -6,27 +6,27 @@ Format: every entry has a date, a short title, and 1–4 sentences of rationale.
 
 ---
 
-## 2026-05-09: Project scaffolded
+## 09-05-2026: Project scaffolded
 
 Initialised repository with `src/` layout, `uv` for environment management, `ruff` for linting, `pytest` for testing. Chose `src/` layout over flat layout to make the package installable (`pip install -e .`) so it imports cleanly from anywhere, including future NCI job scripts. Configs live in `configs/` as YAML; experiments live in `experiments/` as runnable scripts; `src/` contains library code only.
 
-## 2026-05-09: Synthetic-data-first validation strategy
+## 09-05-2026: Synthetic-data-first validation strategy
 
 Baselines (persistence, averaging, ARIMA, XGBoost, LSTM, Transformer) will be validated on synthetic data generated from known state-space models *before* being applied to real Movebank trajectories. Three synthetic datasets of escalating difficulty: pure Brownian motion (persistence is Bayes-optimal), correlated random walk with von Mises turning angles (autoregressive models should beat persistence), and state-switching CRW with hidden Markov regimes (only models with memory should detect regime switches). Our rationale for this is that ground truth lets us verify each model behaves as theory predicts before trusting any rankings on real data.
 
-## 2026-05-09: Synthetic generators implemented
+## 09-05-2026: Synthetic generators implemented
 
 Three generators in `src/animal_movement_fm/data/synthetic.py`: Brownian motion (BM), correlated random walk (CRW with Gamma step lengths and von Mises turning angles), and state-switching CRW (two-state hidden Markov chain over a CRW). Output schema made to match Movebank; [individual_id, timestamp, lon, lat], with optional ground truth state column for the switching variant. Validated by 12 pytest tests generated using GenAI (referenced) covering schema, reproducibility, and statistical properties (increment distribution for BM; circular variance of consecutive headings for CRW; state conditional step length and run length distribution for switching CRW). All 12 tests passing as of this commit.
 
-## 2026-05-09: CRW step_scale tuned for visual interpretability
+## 09-05-2026: CRW step_scale tuned for visual interpretability
 
 Increased the default `step_scale` in `generate_crw` from 0.0005 to 0.005. With the smaller value, per-step displacement was so small that the directional persistence (kappa=4) was not visually apparent in 500-step trajectories; they looked indistinguishable from Brownian motion despite having genuine autocorrelation. The new value produces trajectories with visibly persistent runs, making the BM => CRW => switching CRW difficulty progression visually clear. No statistical tests changed; tests check relative properties (circular variance) not absolute step magnitudes.
 
-## 2026-05-11: Eval harness implemented
+## 11-05-2026: Eval harness implemented
 
 Single shared evaluation pipeline in `src/animal_movement_fm/eval/`. Every model implements a `Predictor` protocol with one method (`predict(history) -> next_position`); the harness runs sliding-window single-step prediction over each individual's trajectory and returns a per prediction error DataFrame stratifiable by any column. Headline metric is haversine great circle distance, which we measure in metres (not Euclidean degrees, which mis-states distance at non-equatorial latitudes). Validated against textbook geographic constants (1° lat = 111.195 km, antipodal = πR) rather than another haversine implementation, to avoid circular validation. Single-step prediction follows the MoveFormer (Cifka et al., 2023) and deepSSF (Forrest et al., 2026) convention; `Predictor` protocol design follows sklearn API conventions (Buitinck et al., 2013).
 
-## 2026-05-11: Persistence baseline reference numbers (synthetic)
+## 11-05-2026: Persistence baseline reference numbers (synthetic)
 
 First evaluation run complete. Persistence baseline (predict next = current) evaluated on 1760 windows across all three synthetic datasets (10 individuals x 200 steps, context_length=24):
 - Brownian motion: median 1320 m, mean 1404 m, p99 717 m
@@ -34,16 +34,16 @@ First evaluation run complete. Persistence baseline (predict next = current) eva
 - Switching CRW: median 348 m, mean 1006 m, p99 1340 m
 The switching-CRW mean/median gap (~3x) reflects the bimodal step-length distribution from the latent state structure: persistence does well on foraging-state steps but poorly on transit-state steps. These numbers are the reference benchmarks against which all other models will be compared.
 
-## 2026-05-12: First two baseline models implemented (persistence, displacement averaging)
+## 12-05-2026: First two baseline models implemented (persistence, displacement averaging)
 
 Two zero-parameter baselines committed under `src/animal_movement_fm/models/`. Persistence (`next = current`) is the floor every other model must beat; it's Bayes-optimal on Brownian motion, so any model that substantially beats persistence there has a bug. Displacement averaging (`next = current + mean of last k displacement vectors`) is parameterised by `k` rather than split into separate classes (`k=1` is the constant velocity model, a strong baseline in the pedestrian-trajectory literature); this makes the k-ablation a single loop instead of multiple files. Displacements are taken in raw (lon, lat) degree space rather than on the sphere; a small-step approximation acceptable at per-step scales of ~1 km, and any bias surfaces in the haversine metric (no hidden cheat). Both models satisfy the `Predictor` protocol and have no `fit` method; 26 new tests passing, full suite at 58/58.
 
 
-## 2026-05-15: ARIMA baseline implemented
+## 15-05-2026: ARIMA baseline implemented
 
 ARIMA(p, d, q) baseline committed under `src/animal_movement_fm/models/arima.py` as the last classical step in the baseline ladder (persistence -> averaging -> ARIMA -> XGBoost -> LSTM -> transformer). The default order is (2, 0, 2) on the displacement series equivalent to ARIMA(2, 1, 2) on raw positions; the displacements are computed explicitly via `np.diff` rather than via the `d` parameter so the stationarity assumption is visible in the code. The two coordinate channels (delt lon, delt lat) are fit as independent univariate ARIMA models, which loses cross-coupling between axes (left it for now); this matches the simplicity of a reference baseline rather than aiming for the best classical model. The model fits at predict time on each sliding window rather than fit-then-store, so it sees exactly the same context length the deep learning baselines will see. Obviously this is rather wasteful but keeps the comparison honest. Fitting uses `statsmodels.tsa.arima.model.ARIMA` (state-space representation + Kalman-filter likelihood + numerical MLE); convergence failures, singular Hessians, and near-constant series fall back to persistence per channel with a logged warning. We also made 24 new tests (GenAI generated, referenced in the test file) covering construction, prediction, fallback behaviour, properties (translation invariance, determinism), and Predictor-protocol contract; full suite now at 82/82.
 
-## 2026-05-17: XGBoost baseline complete; full ladder benchmarked on synthetic data
+## 17-05-2026: XGBoost baseline complete; full ladder benchmarked on synthetic data
 
 Implemented `src/animal_movement_fm/models/xgboost.py`. Approach follows Wijeyakulasuriya et al. (2020), "Machine learning for modeling animal movement", and used GenAI to assist in building some features of this mode. Following the paper, we used per-axis regressors (one XGBRegressor for Δlon, one for Δlat), hand-engineered tabular features (lag positions, lag displacements, speeds, turning angles), and global training across all trajectories in the train split. Differences from the reference are that we omit their behavioural-state-classification stage (would give XGBoost an information advantage relative to the LSTM rung), add explicit speed and turning-angle features, and a time-of-day sin/cos encoding, disabled in synthetic runs.
 
@@ -97,7 +97,7 @@ The bimodal-error signature (mean/median ≈ 2.7 for persistence, p99/median ≈
 XGBoost trims the long tail by 22% (p99: 5032 vs 6448) and improves mean by 21%. Feature importances on switching-CRW show the displacement
 features still dominant but with notable mass on `speed_lag_*`, `turn_lag_*`, and higher-order `dlat_lag_*`,  the *correct* footprint of a model trying to detect regime through indirect signals. The CDF (`results/plots/cdf_switching_crw.png`) shows the crossover explicitly: persistence wins below ~600m error (foraging regime), XGBoost wins above (transit regime). This is exactly the headroom the LSTM rung is expected to close: explicit state representation should compress the long tail substantially below 5032m.
 
-## 2026-06-02: LSTM baseline complete; fifth rung benchmarked on synthetic data
+## 02-06-2026: LSTM baseline complete; fifth rung benchmarked on synthetic data
 
 Implemented `src/animal_movement_fm/models/lstm.py`, the first model in the ladder that learns its own representation rather than reading off hand-engineered features, and the first trained-once-then-reloaded rather than fit inline. Architecture is a standard gated LSTM (`torch.nn.LSTM`) feeding a linear head that emits a 2 element displacement (Delta lon, Delta lat) added to the last position; predicting displacements keeps the target stationary, matching ARIMA and XGBoost. Window definition is delegated to the harness's `iter_windows` so the net trains on exactly the windows it is evaluated on, and inputs are standardised using train-split statistics stored on the model and reapplied identically at predict time. Like XGBoost it trains globally across all train trajectories; unlike XGBoost it is fit-then-store *with checkpoint persistence* (`save`/`from_checkpoint` round-trip weights + scaler stats + architecture), which is where the train on NCI / evaluate elsewhere separation the foundation model relies on first enters the ladder. 18 new tests (used GenAI to generate them, (referenced)). 
 
@@ -126,7 +126,7 @@ Implemented `src/animal_movement_fm/models/lstm.py`, the first model in the ladd
 
 torch + XGBoost in one process segfaults on Apple Silicon (`xgboost/data.py::_meta_from_numpy`); separate OpenMP runtimes. `KMP_DUPLICATE_LIB_OK=TRUE` does not help (governs Intel `libiomp`, not the `libomp` here); `OMP_NUM_THREADS=1` does, set at the top of the experiment script. Cleaner fix (shared OpenMP, or separate processes) deferred.
 
-## 2026-06-28: Transformer baseline complete; sixth rung benchmarked on synthetic data
+## 28-06-2026: Transformer baseline complete; sixth rung benchmarked on synthetic data
 
 Implemented `src/animal_movement_fm/models/transformer.py`, the final rung before the foundation model and structurally the same architecture the FM will be built from. Where the LSTM compresses history into a single hidden state passed step to step, the transformer reads the whole window at once via bidirectional self-attention (`nn.TransformerEncoder`, no causal mask), so every position attends directly to every other; a regime switch early in the window reaches the prediction without being squeezed through a recurrent bottleneck. Input displacements are projected from 2D to the model width via a linear layer, then stamped with fixed sinusoidal positional encoding (Vaswani et al., 2017) before the encoder stack. The readout mirrors the LSTM exactly: `out[:, -1, :]` feeds a linear head emitting a 2-element displacement. Everything except the inner network is held identical to the LSTM rung (same differenced-displacement inputs, same train-statistic standardisation, same single-displacement target, same checkpoint persistence), so any difference in results is attributable to attention vs recurrence and nothing else. 17 new tests (GenAI generated and referenced/validated).
 
@@ -182,7 +182,7 @@ LSTM and transformer p99 ranges fully overlap (LSTM [4,421 – 5,476], transform
 
 Attention matches but does not beat recurrence on small single-distribution synthetic data, consistent with the known data-hunger of transformers: high capacity with low inductive bias needs large, diverse data to pay off. On ~7,600 training windows of one distribution, the LSTM's stronger sequence bias is equally effective. This result is itself the motivation for pretrain-then-finetune; the foundation model is where the transformer's capacity meets the data scale to exploit it.
 
-## 2026-06-29/28: Real data phase: stork resampling pipeline 
+## 29/28-06-2026: Real data phase: stork resampling pipeline 
 
 First real-data work after the synthetic ladder. Built the full pipeline from raw Movebank fixes to a benchmarked baseline ladder on real white stork, the chosen build species (just had the largest individual pool, and the switching migratory/foraging regime also mirrors that of the synthetic switching-CRW). So for now all decisions below are on stork unless noted.
 
@@ -208,7 +208,7 @@ Individual-level split (all of one bird's windows go entirely to one split) beca
 
 Our earlier implementation has our models and harness predicting absolute (lon, lat) positions in degrees (models difference internally but their interface is positions), and the harness windows and scores positions via haversine; the position-based system is kept to preserve comparability with the synthetic results. The adapter (`load_split_frame`, `evaluate_on_split`, `run_ladder`) filters segments to a split's individuals via DuckDB `SEMI JOIN` and feeds the existing harness, **grouping windows by `segment_id`** so a window can never cross a transmission gap (the >2d split is respected structurally, for free); the real `individual_id` is carried as an extra column for per-bird summaries. Neural models (`lstm.py`, `transformer.py`) gained a `group_col` parameter (default `individual_id`, preserving the synthetic scripts) so their internal `fit`-time windowing also groups by `segment_id` on real data.
 
-## 2026-07-05: Diagnostic phase — characterising why persistence is hard to beat
+## 05-07-2026: Diagnostic phase — characterising why persistence is hard to beat
 
 We spent the bulk of this portion of the project on interpreting the above results. We paused forward model development to answer "my model isn't working because ..." before building further. We set out to characterise the problem and establish whether it is learnable, rather than reaching for a solution. Six model-independent (or persistence-based) analyses on the current uncleaned stork segments (105 held-out test birds, 121,656 predictions), each a runnable script in `experiments/`. A shared enabler (`dump_predictions.py`) re-runs the harness on all five models and writes per-prediction parquets (target/pred positions, error, and the true step length as a regime tag); coherence-checked against the headline runs (persistence median 0.599 km, LSTM median 1.399 km, both exact). All error reporting switched to km with spread, not point estimates alone.
 
@@ -240,7 +240,7 @@ Decomposing error into foraging / moving / launch / settle (foraging/moving via 
 
 The answer to "my model isn't working because ...": 6h stork movement is two regimes with opposite demands. A near-stationary third of the data has "predict no movement" as its optimum, so persistence wins by construction and any learned model that predicts motion adds error; the directed remainder has a learnable part (diurnal rhythm, directed transit, seasonal-mean direction) the models do capture and an unpredictable part (launch-onset timing) that no model recovers from 6-day history and that dominates the tail. The error is the structure of the problem at this cadence, not an undertrained model. Consequences carried forward: (1) report per-regime, never the pooled median alone; (2) the aggregate-median ceiling is set by the stillness regimes, so perhaps our 'win condition' is "establish when and why the model helps" (the moving/launch tail), not "beat every baseline"; (3) motivates the cadence sweep (finer/coarser), time-of-day and seasonal features, and (for the launch residual the calendar cannot reach) environmental covariates. A raw-fix speed-cleaning pass (100 km/h, 90/108 sensitivity) is bookmarked for the next segment rebuild, verified negligible on current results.
 
-## 2026-07-07: Cadence sweep — native inter-fix cadence characterisation
+## 07-07-2026: Cadence sweep — native inter-fix cadence characterisation
 
 First step of the cadence sweep: before resampling at any new interval, we characterise the native inter-fix cadence to see how fine we can honestly resample. `experiments/interfix_cadence.py` measures the time between consecutive raw fixes within each trajectory (`individual_id, deployment_id`; never across a deployment boundary) over the full staged `stork_fixes.parquet`, reporting the pooled interval distribution, the per-trajectory native cadence (its spread is the fleet of tag-programs mixture), and a candidate cadence support table (fraction of fixes and of trajectories natively at least as fine as each C).
 
@@ -248,7 +248,7 @@ Result (full corpus, 855 trajectories, 160.3M consecutive-fix pairs): native sam
 
 Conclusion: native cadence does not constrain the modelling interval anywhere in the 30 min–24 h range, so the interval is a modelling choice the sweep resolves, not something the gap structure derives. The finer end (30 min / 1 h / 3 h) is data-honest for ~92%+ of birds and is the interesting direction, being what attacks the 6 h representation loss the diagnostics found (~99.2% raw-obs discard; stationary-labelled bins hiding within-window loops). Caveat: this is the optimistic median-based proxy; it cannot see within trajectory duty cycling (a fine median tag can still leave fine cadence bins empty between bursts), so true fillability at any C comes only from real bin occupancy in the resample-and-benchmark step.
 
-## 2026-07-08: Cadence sweep — resample and benchmark; 6h is near-optimal
+## 08-07-2026: Cadence sweep — resample and benchmark; 6h is near-optimal
 
 Having established that native cadence does not constrain the modelling interval anywhere in 30 min–24 h, we ran the actual sweep: resample the stork corpus at each of 24 h / 12 h / 6 h / 3 h / 1 h / 30 min, and benchmark. `resample.py` was parameterised for this (cadence, gap threshold and segment floor became keyword arguments defaulting to the committed 6 h constants, so existing callers and the 14 resample tests are untouched). Three design decisions, all recorded in the sweep scripts: (1) the >2 d gap threshold is held in *time*, converted to bins per cadence (`round(2 days / C)`, which is 8 at 6h;  a built in coherence check); (2) the segment floor (120 bins) and context length (24 bins) are held in *bins*, so the model's input shape is identical across cadences and only the sampling rate varies; the architecture fair choice, at the cost of coarse cadences data starving (120 bins is 120 days at 24 h); (3) cross-cadence comparison uses **skill relative to same-cadence persistence**, not absolute km, because a stork moves less in 30 min than in 6 h so persistence error shrinks at fine cadence for trivial step scaling reasons; the *improvement over persistence* factors that scaling out.
 
@@ -260,7 +260,7 @@ The sweep ran in three passes (`experiments/cadence_sweep.py`, `_averaging.py`, 
 
 **Conclusion.** 6 h is near-optimal on this evidence, it gives up nothing on the recoverable tail (~36 % everywhere) and carries the smallest stationary-regime median penalty. The scientifically-motivated 6 h choice is now sweep-backed rather than asserted. 
 
-## 2026-07-09: Added PredictionContext - models consume a context object, not a bare history
+## 09-07-2026: Added PredictionContext - models consume a context object, not a bare history
 
 We have migrated the `Predictor` contract from `predict(history)` to `predict(context)`, where `PredictionContext` (a frozen dataclass in `eval/harness.py`) bundles the `(T, 2)` history window with the target step `timestamp` and an open `extra` dict for future side information. `evaluate` now constructs one context per sliding window, carrying the **target** timestamp (the time of the step being predicted, which is known in advance and so is a proper input rather than leakage) and hands it to `predict`. All six models were migrated (each unpacks `context.history` as its first line; only XGBoost currently also reads `context.timestamp` (for now...)), the six model test suites and the harness dummy predictor updated, and a `conftest.py` added to set `OMP_NUM_THREADS=1` so the torch+XGBoost suite does not hit my macOS OpenMP segfault. Full suite green at 188.
 
@@ -276,7 +276,7 @@ The timestamp now reaches every model, but only XGBoost consumes it as of now, a
 
 Neural model internals (`_make_windows`, `fit`) and the saved checkpoints are unaffected; the change is purely at the eval-time `predisct` entry point, and the LSTM/Transformer checkpoint round-trip tests confirm existing `.pt` files still predict identically under the new contract.
 
-## 2026-07-09: Time of day feature on 6h XGBoost; UTC A/B, then local solar correction
+## 09-07-2026: Time of day feature on 6h XGBoost; UTC A/B, then local solar correction
 
 Based off our diurnal finding, and now that PredictionContext delivers the target timestamp end-to-end, we measure the time of day feature on XGBoost in isolation before propagating it anywhere. `experiments/xgboost_timefeature_6h.py` fits XGBoost twice on the same 6 h split; `use_time_features` off, then on, and evaluates both on the same 105 test birds, so the only thing that changes is the feature. The off run re-matches the sweep (median 1.007 km, p99 97.4 km) as its coherence guard.
 
@@ -286,7 +286,7 @@ Based off our diurnal finding, and now that PredictionContext delivers the targe
 
 **Interpretation.** The correction did the physically sensible thing and confirmed our hypothesis that aligning solar phase across birds extracted more signal. But the benefit appears to land on the day to day movement body, not the migration tail, which makes sense, because the p99 tail is launch onset timing (a seasonal/calendar event) that time of day cannot reach, while the body carries the daily thermal soaring on/off rhythm the feature captures. The effect is real but modest, on untuned XGBoost treating sin/cos as two columns among thirty. Verdict for the plan is therefore that time of day earns its place and the solar correction is worth keeping, so it is carried forward to the neural models at step 3 (once they converge first (we have to fix that next)), with the expectation that the benefit is a body tightening one concentrated off the tail.s
 
-## 2026-07-12: Transformer convergence resolved on real 6h stork data (Gadi V100)
+## 12-07-2026: Transformer convergence resolved on real 6h stork data (Gadi V100)
 
 Before adding the time of day feature to the neural models, we first isolated the existing Transformer training problem at 6h cadence and changed no model inputs or architectural components. Training was moved to NCI Gadi using a V100 32 GB GPU on the `gpuvolta` queue. Three enabling changes were made: PyTorch was pinned to `2.5.1+cu121`, because newer CUDA 13 wheels no longer supported the V100's compute capability 7.0 and produced `CUBLAS_STATUS_ARCH_MISMATCH`; optional gradient clipping was added to the Transformer, with a default of `None` so existing behaviour and tests remain unchanged; and the approximately 170 MB training tensor set was preloaded onto the GPU once inside `Transformer.fit()`, with batches selected using an on-device `randperm` rather than copied from host memory through a `DataLoader` each iteration. The training entry point is `experiments/train_transformer_gadi.py`, submitted through `experiments/train_transformer.pbs`.
 
@@ -346,7 +346,7 @@ Transformer convergence at 6h is therefore considered operationally resolved: wi
 
 The GPU preload produced only a modest runtime improvement, from approximately 72 minutes to 58 minutes, while GPU utilisation remained low at around 11% and reported device memory use was approximately 656 MB, including the preloaded training tensors. This indicates that host to device transfer was not the main bottleneck. The model and current batch are small enough that Python loop and kernel launch overhead likely dominate device computation. A substantially larger batch could improve utilisation now that the complete training set resides on the GPU, but batch size also changes the optimisation regime and is therefore deferred rather than altered solely for throughput.
 
-## 2026-07-13: Raw sequence Transformer vs LSTM head to head (regime decomposed)
+## 13-07-2026: Raw sequence Transformer vs LSTM head to head (regime decomposed)
 
 We now have both neural rungs converged at 6h under a matched budget, we ran the comparison the Transformer rung exists to make: does attention beat recurrence on this data? Because aggregate error is floored by the stationary body, the comparison is decomposed by regime, with attention on the moving and launch tails. Note this version is the raw sequence one, so no time of day feature on either model (yet; that is next), and kept deliberately clean so the architecture difference is not confounded with a feature. 
 
@@ -381,7 +381,7 @@ Both learners cut launch p99 from the ~81 km baseline to ~60 km (~26%). This qua
 
 This is one training seed, and every LSTM vs Transformer gap is 1–2%, which is inside single seed variance. To state a genuine tie rather than a slight edge, both models should be retrained across a small set of training seeds (split seed 42 held fixed, training seed swept) and the moving/launch p99 reported with spread. The next increment is the local solar time of day feature on both neural rungs; and form our 07-09 XGBoost evidence that lift lands on the median/body and leaves the tail essentially unchanged, so it is expected to move the stationary and moving median numbers here rather than the moving/launch p99 the architecture question turns on.
 
-## 2026-07-14: Time of day 2x2 table; attention exploits time, recurrence does not
+## 14-07-2026: Time of day 2x2 table; attention exploits time, recurrence does not
 
 We now ropagate the local solar time of day feature to the neural rungs as its own isolated increment, giving a 2x2 (raw vs time, LSTM vs Transformer). Each time model is its raw counterpart's recipe with the feature turned on as the single change (Transformer: iter-1's lr=3e-4 / warmup / clip; LSTM: matched constant lr=1e-3), so time vs raw is a one variable ablation per architecture. Our 07-09 XGBoost A/B  test predicted the lift would land on the median/body and leave the p99 tail flat; that prediction held for the LSTM but was overturned for the Transformer.
 
@@ -427,7 +427,7 @@ This is evidence that the Transformer is the more effective covariate-conditione
 
 Single training seed. The Transformer's large effects (settle p99 -63%, aggregate median 1.25 -> 0.95 km) are big enough to be almost certainly real; the ~6% tail moves and the LSTM's small negatives sit within plausible seed noise and will need multi-seed confirmation (split seed 42 fixed, training seed swept, p99 reported with spread) before they are leaned on. It is also a single covariate; the launch residual the calendar cannot reach still motivates environmental covariates later. Immediate follow-ups: the multi-seed spread, and refactoring `xgboost.py` to call the shared `local_solar_sincos` (its inline copy is identical but not yet the single source of truth).
 
-## 2026-07-20: Movement state labelling, the migratory launch definition, and a scrapped onset probe
+## 20-07-2026: Movement state labelling, the migratory launch definition, and a scrapped onset probe
 
 Following John's advice to make the regime state a prediction target, not just a diagnostic lens, we will try to predict the state, then forecast movement, so we built the labelling infrastructure the state work needs. Four commits are in; one exploratory script is being deleted and redone. This entry records both.
 
@@ -456,7 +456,7 @@ Two findings carry forward. The dominant signal, recent movement magnitude over 
 
 Wire a day of year sin/cos covariate before building the classifier, so the movement models and the state head share one input representation. One encoding only (day of year, not month and season and day of year, which are the same signal at three resolutions and would just add redundant channels), cyclic only, no absolute year. This takes the neural input from 4 to 6 channels, standardising the displacement channels only, as before. Persistence and averaging are training free and ignore covariates; ARIMA is a trained rung but fits ARIMA(2,0,2) per channel on the displacement series inside the context window with no exogenous term, and day of year is effectively constant across a 6 day window, so a seasonal exog regressor would be a degenerate constant column. And so our rerun is therefore XGBoost, LSTM and Transformer. Prediction to record before running: unlike time of day, season barely varies within a window, so it acts as a conditioning signal rather than something attention can weight positions by, and we would not expect it to reproduce the architecture by feature interaction; and given the probe, expect a modest aggregate effect with the launch tail the place to look. These runs will be multi seed (split seed 42 fixed, training seed swept) so the result arrives with spread rather than the single seed caveat carried by the time of day 2x2.
 
-## 2026-07-22: Multi-seed covariate sweep (5 seeds x 2 architectures x 3 feature cells) on Gadi H200
+## 22-07-2026: Multi-seed covariate sweep (5 seeds x 2 architectures x 3 feature cells) on Gadi H200
 
 Every neural result up to here rested on a single training seed, so our time of day 2x2's small effects could not be separated from seed noise. We ran the full grid as one PBS array job (`experiments/training/train_multiseed.pbs` + `train_multiseed_gadi.py`): 3 feature cells (raw / +time / +time+season) x 2 architectures (LSTM, Transformer) x 5 training seeds = 30 runs, split seed fixed at 42 so every run sees identical windows and the only within-cell variation is the training seed. Ran on the `gpuhopper` queue (NVIDIA H200); ~18 min/run, ~950 SU total. Recipes are unchanged from the single seed runs (LSTM lr 1e-3 constant; Transformer lr 3e-4 with warmup+cosine+grad-clip), so the numbers are comparable to the earlier ones. Inference was written over both val and test as one predictions parquet per run; the analysis is a separate, decoupled step (`experiments/reporting/aggregate_multiseed.py`) that re-tags each prediction's regime with the canonical labeller and reports mean +/- sd across the 5 seeds. A per-run coherence check (recomputed aggregate median vs the run's own summary JSON) passed for all 30.
 
@@ -485,7 +485,7 @@ Launch p99 (km): raw 61.4 +/- 1.0 (lstm) / 60.9 +/- 0.5 (transformer); time 59.7
 This sweep supersedes the single seed time of day 2x2 as the headline DL result and upgrades its central claim from suggestive to "robust with error bars"; the Transformer is the more effective covariate conditioned architecture, the LSTM is destabilised on the body by the same covariates (its median degrades), and neither the clock nor the calendar reaches the launch onset tail. Two consequences. For the foundation model: a covariate conditioned Transformer is the right shape. For the launch residual: it needs *environmental* covariates (wind, thermals, land cover), since both within day (time) and within-year (season) signals are now shown, with spread, to leave it essentially untouched. Outputs: `results/multiseed/regime_summary.csv`, `regime_by_run.csv`, `multiseed_regime_p99.png` (all gitignored). Caveat: still a single data split (seed 42) and a single site/species; the seed sweep addresses training init variance, not split or population variance. 
 
 
-## 2026-07-25: Part B state work - next state classifier, the two factor state head, and a pre-registered null
+## 25-07-2026: Part B state work - next state classifier, the two factor state head, and a pre-registered null
 
 Two meetings ago, John suggested making movement regime an explicit prediction target rather than using it only as a diagnostic lens. The idea was to predict the state first, then forecast movement conditioned on that state (two factor, with a mixture of experts planned for later). This entry covers that full piece of work, which ultimately ended in a disconfirmed prediction.
 
@@ -530,7 +530,7 @@ We ran one PBS array (`experiments/state/eval_state_head.pbs`) with 6 subjobs. E
 
 ### The pre-registered prediction is disconfirmed
 
-Before running the experiment, we guessed that moving/launch p99 would improve while the median would barely change. Neither prediction held. The overall median gets worse in all six cells: LSTM +2.6 / +9.4 / +6.6%, and Transformer +3.9 / +0.5 / +7.2%. The tail also does not improve consistently. Overall p99 changes by between -0.2% and +0.4% for the LSTM, which is effectively no change, and by +0.5 to +4.3% for the Transformer, which is worse. Moving p99 contains the only result that could arguably be a real effect: a monotonic LSTM improvement with lambda of -0.1 / -1.3 / -1.5%. However, the largest improvement is only ~1.5%, which is about 2 sd of the seed spread measured in the 2026-07-22 sweep. The Transformer also moves in the opposite direction at +0.2 / +1.0 / +5.0%.
+Before running the experiment, we guessed that moving/launch p99 would improve while the median would barely change. Neither prediction held. The overall median gets worse in all six cells: LSTM +2.6 / +9.4 / +6.6%, and Transformer +3.9 / +0.5 / +7.2%. The tail also does not improve consistently. Overall p99 changes by between -0.2% and +0.4% for the LSTM, which is effectively no change, and by +0.5 to +4.3% for the Transformer, which is worse. Moving p99 contains the only result that could arguably be a real effect: a monotonic LSTM improvement with lambda of -0.1 / -1.3 / -1.5%. However, the largest improvement is only ~1.5%, which is about 2 sd of the seed spread measured in the 22-07-2026 sweep. The Transformer also moves in the opposite direction at +0.2 / +1.0 / +5.0%.
 
 Migratory launch p99 varies without a clear pattern: LSTM -0.4 / +7.3 / -10.3%, and Transformer -3.7 / -0.2 / +7.6%. This is not surprising. With n=2,729, the p99 is approximately the 27th largest error, so this column is badly under powered and no conclusion should be drawn from it. The state head itself is not what failed. State accuracy increases monotonically with lambda for both architectures: LSTM 0.819 -> 0.843 and Transformer 0.790 -> 0.872. This confirms that the loss weight is doing what it is meant to do. The best results are also comparable to the standalone XGBoost classifier's accuracy of 0.866. The state task is being learned; it simply does not improve the position decoder.
 
@@ -541,7 +541,7 @@ There is a structural reason this design was unlikely to help, which we under we
 This is a null result for cheap soft conditioning, NOT for the wider state programme. A mixture of experts changes the functional form rather than simply changing the input to a shared head. Separate expert parameter sets, selected by a gate, would allow a stationary expert to specialise in "predict approximately zero" while a transit expert specialises in directed displacement. A single shared linear head cannot represent these behaviours separately in the same way. Rung 3 therefore remains open on its own merits and was not tested by this experiment. The main caveat is that this used a single training seed (seed 0) and a single split (42). Most of the changes are smaller than the seed sd measured in the multi seed sweep. We therefore describe the result as a null because the effects are both very small and inconsistent in direction across architectures, which is more consistent with noise than with a real effect being suppressed. Outputs: `results/state_head/eval_state_head_{arch}_s0_lam{lambda}.{json,csv}` (gitignored).
 
 
-## 2026-07-25: A split reproducibility bug, and why the split is now a committed manifest
+## 25-07-2026: A split reproducibility bug, and why the split is now a committed manifest
 
 **Noticed.** While comparing the state-head sweep with the classifier, the per-class test supports did not match. The classifier run on the Mac reported foraging 17,335 / moving 65,305 / migratory_launch 2,781, while the sweep run on Gadi reported 17,061 / 65,770 / 2,729. Both runs contained exactly 121,656 windows, so the problem was not the total number of windows. The difference was in which windows received each label.
 
