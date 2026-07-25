@@ -136,7 +136,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arch", choices=("lstm", "transformer"), default="lstm", help="architecture to compare")
     p.add_argument("--seed", type=int, default=0, help="TRAINING seed (weight init + shuffling); split stays 42")
-    p.add_argument("--state-loss-weight", type=float, default=0.5, help="lambda on the state cross-entropy")
+    p.add_argument("--state-loss-weight", type=float, default=0.05,
+                   help="lambda on the state cross-entropy (position MSE ~0.02 vs CE ~0.7, so ~0.03 balances them)")
     p.add_argument("--epochs", type=int, default=None, help="override epochs")
     p.add_argument("--max-train-birds", type=int, default=0, help="0 = all; subsample train individuals for a smoke run")
     p.add_argument("--quick", action="store_true", help="shorthand: 60 train birds, 8 epochs")
@@ -265,9 +266,10 @@ def main() -> None:
         },
         "state_head": head_acc,
     }
-    path = RESULTS / f"eval_state_head_{args.arch}_s{args.seed}.json"
+    tag = f"{args.arch}_s{args.seed}_lam{args.state_loss_weight}"
+    path = RESULTS / f"eval_state_head_{tag}.json"
     path.write_text(json.dumps(out, indent=2, default=float))
-    pd.DataFrame(rows_out).to_csv(RESULTS / f"eval_state_head_{args.arch}_s{args.seed}.csv", index=False)
+    pd.DataFrame(rows_out).to_csv(RESULTS / f"eval_state_head_{tag}.csv", index=False)
     print(f"\nmetrics -> {path}")
 
 

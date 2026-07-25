@@ -1,19 +1,31 @@
 #!/bin/bash
-# Two-factor state-head evaluation on Gadi, as a 2-element PBS job ARRAY:
-#   index 0 -> lstm         index 1 -> transformer
-# Each subjob trains the baseline (time+season) and the treatment (+ state head) for that architecture on the
-# seed-42 split and evaluates both on test, writing results/state_head/eval_state_head_<arch>_s0.{json,csv}.
-# The resource request below is PER SUBJOB.
+# Two-factor state-head evaluation on Gadi, as a PBS job ARRAY over (architecture x state-loss weight lambda):
+#
+#   index :   0     1     2     3     4     5
+#   arch  :  lstm  lstm  lstm  trns  trns  trns
+#   lambda:  0.01  0.03  0.10  0.01  0.03  0.10
+#
+# Each subjob trains the baseline (time+season, no head) and the treatment (+ state head at that lambda) on the
+# seed-42 split and evaluates both on test, writing
+#   results/state_head/eval_state_head_<arch>_s0_lam<lambda>.{json,csv}
+#
+# Why sweep lambda: the CPU smoke showed the position MSE (~0.02 standardised) and the state cross-entropy (~0.7)
+# live on very different scales, so a fixed lambda=0.5 puts ~95% of the loss on the state task and starves the
+# position objective. This grid brackets the balance point (~0.03) from position-primary (0.01) to state-heavy
+# (0.10); the baseline in each file is the lambda=0 control, so every file traces one point on the lambda curve.
+# (The baseline is retrained per lambda cell so each subjob is self-contained and directly comparable; that is a
+# little redundant GPU time but keeps the outputs independent and the analysis trivial.)
 #
 # Submit:   qsub experiments/state/eval_state_head.pbs
-# Monitor:  qstat -u $USER            (the array shows as one job id ending in [])
-#           qstat -t <jobid>[]        (per-subjob states)
-# Logs:     eval_state_head.o<jobid>.<index>   one per subjob
+# Monitor:  qstat -u $USER                 (the array shows as one job id ending in [])
+#           qstat -t <jobid>[]             (per-subjob states)
+# Logs:     eval_state_head.o<jobid>.<index>
 #
 # QUEUE: gpuhopper (gadi-gpu-h200, 48 ncpus / 4 ngpus, 12 CPUs per GPU). Fall back to V100s with -q gpuvolta;
 # the 12:1 ratio below is valid for both. torch stays pinned at 2.5.1+cu121 (kernels for sm_70 and sm_90).
+# Queue caps ~8-10 running / 20 queued per user, so a 6-element array submits and runs comfortably in one go.
 #
-# WALLTIME: each subjob trains TWO 80-epoch models back to back, so ~2x a single multiseed cell (which used 4h);
+# WALLTIME: each subjob trains TWO 80-epoch models back to back (~2x a single multiseed cell, which used 4h);
 # 06:00:00 leaves headroom. mem: iteration-1 used ~3GB, so 32GB is ample.
 
 #PBS -P um09
@@ -27,9 +39,9 @@
 #PBS -l wd
 #PBS -N eval_state_head
 #PBS -j oe
-#PBS -J 0-1
+#PBS -J 0-5
 # PBS Pro requires array jobs to be rerunnable (Gadi's site default -r n rejects them). Safe here: each subjob
-# writes only its own arch-keyed outputs, so a requeue overwrites its own files rather than another run's.
+# writes only its own (arch, lambda)-keyed outputs, so a requeue overwrites its own files rather than another run's.
 #PBS -r y
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -37,6 +49,9 @@ export OMP_NUM_THREADS=$PBS_NCPUS
 cd /g/data/um09/$USER/animal-movement-fm
 
 ARCHS=(lstm transformer)
-ARCH=${ARCHS[$PBS_ARRAY_INDEX]}
-echo "state-head eval: arch=$ARCH  (array index $PBS_ARRAY_INDEX)"
-uv run python experiments/state/eval_state_head.py --arch "$ARCH" --seed 0
+LAMBDAS=(0.01 0.03 0.1)
+ARCH=${ARCHS[$((PBS_ARRAY_INDEX / 3))]}
+LAMBDA=${LAMBDAS[$((PBS_ARRAY_INDEX % 3))]}
+
+echo "state-head eval: arch=$ARCH lambda=$LAMBDA  (array index $PBS_ARRAY_INDEX)"
+uv run python experiments/state/eval_state_head.py --arch "$ARCH" --seed 0 --state-loss-weight "$LAMBDA"
