@@ -120,3 +120,6 @@ credentials.json
 
 # ---cant forget this -- 
 *.ipynb
+
+# --- Local random/messy notes and ideas of mine ---
+notes.md
