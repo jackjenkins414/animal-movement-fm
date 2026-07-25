@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 
 from animal_movement_fm.analysis.regime import label_regimes, REGIMES
-from animal_movement_fm.data.split import make_split, window_counts_per_individual
+from animal_movement_fm.data.split import stork_split
 
 REPO = Path(__file__).resolve().parents[2]
 SEGMENTS = REPO / "data" / "processed" / "stork_segments.parquet"
@@ -100,8 +100,7 @@ def main() -> None:
     lab = label_regimes(frame)
 
     # tag each fix with its modelling split (single labelling pass, then map by bird)
-    counts = window_counts_per_individual(SEGMENTS)
-    split = make_split(counts, strata=None, min_windows=100, seed=42)
+    split = stork_split()  # frozen manifest (see data/split.stork_split)
     id_split = split_of(split, frame["individual_id"].unique())
     lab["split"] = lab["individual_id"].map(id_split)
 

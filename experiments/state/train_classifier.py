@@ -56,7 +56,7 @@ from xgboost import XGBClassifier
 
 from animal_movement_fm.analysis.regime import REFINED_STATES
 from animal_movement_fm.data.benchmark import load_split_frame
-from animal_movement_fm.data.split import make_split, window_counts_per_individual
+from animal_movement_fm.data.split import stork_split
 from animal_movement_fm.state.dataset import IDX_TO_STATE, build_state_windows
 
 REPO = Path(__file__).resolve().parents[2]
@@ -190,8 +190,8 @@ def main() -> None:
     n_estimators = 60 if args.quick else args.n_estimators
     max_train_birds = 40 if args.quick else args.max_train_birds
 
-    counts = window_counts_per_individual(SEGMENTS)
-    split = make_split(counts, strata=None, min_windows=100, seed=SEED)
+    # frozen manifest, not a recomputed split, so these numbers sit on the same individuals as the Gadi runs
+    split = stork_split()
     train_ids = split.train
     if max_train_birds:
         rng = np.random.default_rng(SEED)

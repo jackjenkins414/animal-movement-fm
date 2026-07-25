@@ -36,7 +36,7 @@ import torch
 
 from animal_movement_fm.analysis.regime import REFINED_STATES, label_migratory_launches, label_regimes
 from animal_movement_fm.data.benchmark import load_split_frame
-from animal_movement_fm.data.split import make_split, window_counts_per_individual
+from animal_movement_fm.data.split import stork_split
 from animal_movement_fm.eval.harness import evaluate
 from animal_movement_fm.eval.metrics import summarise_errors
 from animal_movement_fm.models.lstm import LSTM
@@ -167,8 +167,8 @@ def main() -> None:
     if not SEGMENTS.exists():
         raise SystemExit(f"FAIL: data not found at {SEGMENTS}")
 
-    counts = window_counts_per_individual(SEGMENTS)
-    split = make_split(counts, strata=None, min_windows=100, seed=SPLIT_SEED)
+    # frozen manifest, not a recomputed split (see data/split.stork_split)
+    split = stork_split()
     train_ids = split.train
     if max_train_birds:
         train_ids = np.random.default_rng(SPLIT_SEED).permutation(train_ids)[:max_train_birds]
