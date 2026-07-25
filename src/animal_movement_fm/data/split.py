@@ -5,15 +5,39 @@ Splitting is at the individual level: all of one animal's windows go entirely to
 the same bird are heavily autocorrelated (adjacent windows share history), so a window-level split would 
 leak near-duplicates across train and test and measure memorisation, not generalisation.
 
-The split is stratified by a key (taxon by default) so the class balance is preserved across splits; 
-trivial within single-species stork, but load-bearing at Tier 2 where whole species are held out. 
+The split is stratified by a key (taxon by default) so the class balance is preserved across splits;
+trivial within single-species stork, but load-bearing at Tier 2 where whole species are held out.
 Reproducible via a fixed seed.
+
+Frozen manifests: how splits are actually consumed
+--------------------------------------------------
+Experiment scripts should NOT call `make_split`; they should read a committed id manifest via `load_split` (or the
+project convenience wrapper `stork_split`). `make_split` remains the generator, and is fine for exploratory work.
+
+Two reasons, one historical and one structural.
+
+Historically, `make_split` seeded its shuffle but applied it to whatever row order it was handed, and that order came
+from an unstable sort over a table with hundreds of tied window counts. Identical data and seed therefore produced
+DIFFERENT splits on different machines (Mac vs Gadi shared only 76/105 test individuals), which silently made
+cross-machine results incomparable. Ids are now sorted canonically before the permutation, so that specific defect is
+fixed.
+
+Structurally, though, determinism is not enough once the corpus grows. A computed split is a function of the whole id
+set, so adding a species for Tier 2 changes that set and reshuffles the EXISTING individuals too; Tier 1 results would
+quietly stop being comparable with no error raised. Pinning each dataset's assignment to its own manifest makes tiers
+independent, and is the same reason public benchmarks ship explicit split files rather than a seed.
+
+Convention: one manifest per dataset, `splits/<name>_split_seed<seed>.json`, generated once by
+`experiments/data/make_split_manifest.py` and committed.
 """
+
+import json
 
 import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def window_counts_per_individual(
@@ -91,7 +115,15 @@ def make_split(
 
     # split within each stratum so class balance is preserved across splits
     for _, group in eligible.groupby("stratum", sort=True):
-        ids = group["individual_id"].to_numpy()
+        # Bug catch (caught by GenAI; fixed by me)
+        # CANONICAL ORDER BEFORE THE SHUFFLE. The seed makes the permutation reproducible, but a permutation is
+        # applied to whatever order it is handed, so the split silently inherited the row order of `counts`. That
+        # order is not canonical: `window_counts_per_individual` ends with an UNSTABLE `sort_values("n_windows")`
+        # and 393 of the 840 eligible stork individuals share an n_windows value with another bird, so tied birds
+        # could come out in different orders on different platforms. The result was a split that differed by
+        # machine (Mac vs Gadi shared only 76/105 test individuals) despite an identical seed and identical data.
+        # Sorting the ids first makes the split a pure function of (individual_ids, seed) and nothing else.
+        ids = np.sort(group["individual_id"].to_numpy())
         ids = rng.permutation(ids) # seeded shuffle
         n = len(ids)
         n_test = round(n * test_frac)
@@ -105,6 +137,93 @@ def make_split(
         val=np.concatenate(val_ids),
         test=np.concatenate(test_ids),
     )
+
+def save_split(split: Split, path: str | Path, *, note: str = "") -> None:
+    """
+    Save a train, validation, and test split as a JSON file.
+
+    The IDs are sorted to keep the file readable and make changes easy to review. Parent directories are created automatically.
+
+    Parameters
+    ----------
+    split : Split
+        The split to save.
+    path : str | Path
+        Path to the output JSON file.
+    note : str
+        Optional note describing how or why the split was created.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "note": note,
+        "n_train": int(len(split.train)),
+        "n_val": int(len(split.val)),
+        "n_test": int(len(split.test)),
+        "train": sorted(int(i) for i in split.train),
+        "val": sorted(int(i) for i in split.val),
+        "test": sorted(int(i) for i in split.test),
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_split(path: str | Path) -> Split:
+    """
+    Load a train, validation, and test split from a JSON file.
+
+    The three sets are checked for overlapping IDs to prevent individuals from appearing in more than one split.
+
+    Parameters
+    ----------
+    path : str | Path
+        Path to the split JSON file.
+
+    Returns
+    -------
+    Split
+        The loaded train, validation, and test assignments.
+    """
+    payload = json.loads(Path(path).read_text())
+    train = np.asarray(payload["train"], dtype=np.int64)
+    val = np.asarray(payload["val"], dtype=np.int64)
+    test = np.asarray(payload["test"], dtype=np.int64)
+
+    overlap = (set(train) & set(val)) | (set(train) & set(test)) | (set(val) & set(test))
+    if overlap:
+        raise ValueError(f"split manifest {path} has individuals in more than one split: {sorted(overlap)[:10]}")
+
+    return Split(train=train, val=val, test=test)
+
+
+# the project's frozen stork split; committed, so every machine reads the SAME individuals
+STORK_SPLIT_FILE = "splits/stork_split_seed42.json"
+
+
+def stork_split(repo_root: str | Path | None = None) -> Split:
+    """
+    Load the project's fixed white stork split.
+
+    Experiment scripts should use this function rather than recomputing the split, ensuring that the same individuals are used on every machine.
+    
+    Parameters
+    ----------
+    repo_root : str | Path | None
+        Root directory of the repository. If omitted, it is inferred from the location of this file.
+    Returns
+    -------
+    Split
+        The fixed white-stork train, validation, and test assignments.
+
+    """
+    root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[3]
+    path = root / STORK_SPLIT_FILE
+    if not path.exists():
+        raise FileNotFoundError(
+            f"frozen split manifest not found at {path}. It is committed to the repo; if it is missing, "
+            f"regenerate it with save_split(make_split(...), '{STORK_SPLIT_FILE}') and note that a regenerated "
+            f"split will NOT match the one existing results were computed on."
+        )
+    return load_split(path)
 
 # GenAI ref: GenAI was used to help draft the summary code and the `__main__` summary printout (I had to be somewhere
 # and just wanted the rest of the file finsihed before then; I could have written it since it is straightforward, just 
