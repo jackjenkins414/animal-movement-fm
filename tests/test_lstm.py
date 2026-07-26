@@ -468,3 +468,128 @@ class TestStateHead:
         reloaded = LSTM.from_checkpoint(path, device="cpu")
         assert reloaded.use_state_head is False
         assert reloaded.net.fc.in_features == reloaded.hidden_dim
+
+
+# ----------------------------------------------------------------------
+# Mixture of experts (Rung 3)
+# ----------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def fitted_moe_model():
+    # Tiny MoE on a segment frame; exercises the gate + experts training path.
+    df = _make_seg_df()
+    return LSTM(hidden_dim=8, num_layers=1, context_length=12, epochs=3, batch_size=32,
+                use_moe=True, device="cpu").fit(df, group_col="segment_id")
+
+
+class TestMoE:
+    def test_moe_and_state_head_are_mutually_exclusive(self):
+        # The gate already predicts the state; asking for both is ambiguous, so it must raise, not silently pick one.
+        with pytest.raises(ValueError):
+            LSTM(use_moe=True, use_state_head=True)
+
+    def test_name_reflects_moe(self):
+        assert LSTM(hidden_dim=32, num_layers=2, use_moe=True).name == "lstm_h32_l2_moe5"
+        assert (
+            LSTM(hidden_dim=32, num_layers=2, use_time_features=True,
+                 use_season_features=True, use_moe=True).name
+            == "lstm_h32_l2_time_season_moe5"
+        )
+
+    def test_moe_does_not_change_input_dim(self):
+        # Gate and experts sit on the trunk summary, not the input sequence.
+        assert LSTM(use_moe=True).input_dim == 2
+        assert LSTM(use_time_features=True, use_season_features=True, use_moe=True).input_dim == 6
+
+    def test_net_has_gate_and_k_experts(self, fitted_moe_model):
+        net = fitted_moe_model.net
+        assert net.use_moe is True
+        assert net.gate.out_features == 5                      # one gate logit per expert
+        assert net.experts.out_features == 5 * 2               # K experts x (dlon, dlat)
+        assert not hasattr(net, "fc")                          # no single shared position head
+        pos, gate_logits = net(torch.zeros(1, 11, 2))
+        assert pos.shape == (1, 2)
+        assert gate_logits.shape == (1, 5)
+
+    def test_gate_weights_form_a_distribution(self, fitted_moe_model):
+        rng = np.random.default_rng(11)
+        x = torch.tensor((rng.standard_normal((4, 11, 2)) * 0.02), dtype=torch.float32)
+        _, gate_logits = fitted_moe_model.net(x)
+        g = torch.softmax(gate_logits, dim=-1)
+        assert torch.allclose(g.sum(dim=-1), torch.ones(4), atol=1e-5)
+        assert (g >= 0).all()
+
+    def test_prediction_is_the_gated_mixture_of_experts(self, fitted_moe_model):
+        # The forward pass must equal sum_k g_k * e_k computed independently from the same weights.
+        net = fitted_moe_model.net
+        rng = np.random.default_rng(12)
+        x = torch.tensor((rng.standard_normal((3, 11, 2)) * 0.02), dtype=torch.float32)
+        with torch.no_grad():
+            pos, gate_logits = net(x)
+            out, _ = net.lstm(x)
+            last = out[:, -1, :]
+            g = torch.softmax(gate_logits, dim=-1).unsqueeze(-1)          # (batch, K, 1)
+            e = net.experts(last).view(-1, net.n_experts, 2)              # (batch, K, 2)
+            expected = (g * e).sum(dim=1)
+        torch.testing.assert_close(pos, expected, rtol=1e-5, atol=1e-6)
+
+    def test_experts_are_not_all_identical(self, fitted_moe_model):
+        # If every expert learned the same map the mixture degenerates to a single head; weights must differ.
+        w = fitted_moe_model.net.experts.weight            # (K*2, hidden)
+        e0, e1 = w[0:2], w[2:4]
+        assert not torch.allclose(e0, e1, atol=1e-6)
+
+    def test_gate_does_not_collapse_to_one_expert(self, fitted_moe_model):
+        # Supervising the gate against state labels should keep more than one expert in use.
+        df = _make_seg_df()
+        X, _, _ = fitted_moe_model._make_windows(df, group_col="segment_id")
+        Xn = (X - fitted_moe_model._mean) / fitted_moe_model._std
+        with torch.no_grad():
+            _, gate_logits = fitted_moe_model.net(Xn)
+        used = torch.softmax(gate_logits, dim=-1).mean(dim=0)   # mean routing mass per expert
+        assert used.max() < 0.999                                # not everything to one expert
+
+    def test_predict_shape_with_moe(self, fitted_moe_model):
+        history = (np.random.default_rng(13).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        pred = fitted_moe_model.predict(PredictionContext(history=history))
+        assert pred.shape == (2,)
+        assert np.all(np.isfinite(pred))
+
+    def test_gate_labels_align_with_canonical_windows(self):
+        # The gate is supervised by the same labels the standalone classifier uses.
+        df = _make_seg_df()
+        cl = 12
+        model = LSTM(context_length=cl, use_moe=True, device="cpu")
+        S = model._state_labels(df, group_col="segment_id").numpy()
+        assert S.tolist() == build_state_windows(df, context_length=cl).y.tolist()
+
+    def test_checkpoint_roundtrip_with_moe(self, fitted_moe_model, tmp_path):
+        history = (np.random.default_rng(14).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        ctx = PredictionContext(history=history)
+        before = fitted_moe_model.predict(ctx)
+
+        path = tmp_path / "ckpt_moe.pt"
+        fitted_moe_model.save(path)
+        reloaded = LSTM.from_checkpoint(path, device="cpu")
+        assert reloaded.use_moe is True
+        assert reloaded.n_experts == 5
+        assert reloaded.net.gate.out_features == 5
+        np.testing.assert_allclose(before, reloaded.predict(ctx), rtol=1e-5, atol=1e-6)
+
+    def test_old_checkpoint_defaults_to_no_moe(self, small_df, tmp_path):
+        model = LSTM(hidden_dim=8, context_length=12, epochs=1, device="cpu").fit(small_df)
+        path = tmp_path / "ckpt_premoe.pt"
+        model.save(path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        del ckpt["config"]["use_moe"]
+        torch.save(ckpt, path)
+
+        reloaded = LSTM.from_checkpoint(path, device="cpu")
+        assert reloaded.use_moe is False
+        assert reloaded.net.fc.in_features == reloaded.hidden_dim
+
+    def test_expert_count_must_match_state_count(self):
+        # The gate is supervised by 5-way state labels, so K != n_states is a shape bug waiting to happen on real
+        # data (the synthetic fixtures contain a single state, so it would not surface here).
+        with pytest.raises(ValueError):
+            LSTM(use_moe=True, n_experts=3)

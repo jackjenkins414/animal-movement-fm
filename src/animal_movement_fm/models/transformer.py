@@ -99,8 +99,8 @@ class _TransformerNet(nn.Module):
     Shapes
     ------
     Input: (batch, seq_len, input_dim)
-    Output: (batch, output_dim)                       when use_state_head is False
-    Output: (batch, output_dim), (batch, n_states)    when use_state_head is True
+    Output: (batch, output_dim)                       plain net (both flags off)
+    Output: (batch, output_dim), (batch, n_states)    when use_state_head OR use_moe is on
 
     Two-factor state head (Rung 2)
     ------------------------------
@@ -108,6 +108,10 @@ class _TransformerNet(nn.Module):
     summary (the last position after attention) and emits `n_states` state logits; the softmax of those logits (soft,
     differentiable) is concatenated onto the summary before the position head, so the displacement prediction is
     conditioned on the regime attention thinks is coming. Off -> byte-for-byte our original net.
+
+    Mixture of experts (Rung 3)
+    ---------------------------
+    Also identical to the LSTM rung. So see or docstring there for it in `lstm.py`
     """
 
     def __init__(
@@ -121,6 +125,8 @@ class _TransformerNet(nn.Module):
             output_dim: int = 2,
             use_state_head: bool = False,
             n_states: int = 5,
+            use_moe: bool = False,
+            n_experts: int = 5,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -142,7 +148,15 @@ class _TransformerNet(nn.Module):
         # (d_model -> output_dim); same role as the LSTMs `fc`; turn the window summary into a 2-element displacement
         self.use_state_head = bool(use_state_head)
         self.n_states = int(n_states)
-        if self.use_state_head:
+        self.use_moe = bool(use_moe)
+        self.n_experts = int(n_experts)
+        if self.use_moe:
+            # Mixture of experts! (Rung 3), same mechanism as our LSTM rung; see notes in that file 
+            self.gate = nn.Linear(d_model, self.n_experts)
+            # K position heads held as one (K*output_dim) layer so the mixture is a single batched matmul
+            self.experts = nn.Linear(d_model, self.n_experts * output_dim)
+            self.output_dim = int(output_dim)
+        elif self.use_state_head:
             self.state_head = nn.Linear(d_model, self.n_states)
             # position head conditioned on the soft state distribution appended to the window summary
             self.head = nn.Linear(d_model + self.n_states, output_dim)
@@ -166,6 +180,14 @@ class _TransformerNet(nn.Module):
         # (batch, d_model); take the last position as the window summary, mirroring the LSTMs out[:, -1, :] so the two rungs differ only in how
         # that summary was formed
         last = out[:, -1, :]
+
+        if self.use_moe:
+            gate_logits = self.gate(last)  # (batch, K)
+            g = torch.softmax(gate_logits, dim=-1).unsqueeze(-1) # (batch, K, 1)
+            e = self.experts(last).view(-1, self.n_experts, self.output_dim) # (batch, K, output_dim)
+            pos = (g * e).sum(dim=1) # (batch, output_dim)
+            # gate logits ride in the state logits slot so the training loop, predict and the harness treat MoE and the Rung 2 head identically
+            return pos, gate_logits
 
         if self.use_state_head:
             state_logits = self.state_head(last) # (batch, n_states)
@@ -206,6 +228,8 @@ class Transformer:
         use_state_head: bool = False,
         state_loss_weight: float = 0.5,
         n_states: int = 5,
+        use_moe: bool = False,
+        n_experts: int = 5,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -247,6 +271,25 @@ class Transformer:
         self.state_loss_weight = float(state_loss_weight)
         self.n_states = int(n_states)
 
+        # MoE, the gate IS a state head, so requesting both is ambiguous rather than additive; refuse it explicitly 
+        # instead of silently picking one
+        self.use_moe = bool(use_moe)
+        self.n_experts = int(n_experts)
+        if self.use_moe and self.use_state_head:
+            raise ValueError(
+                "use_moe and use_state_head are mutually exclusive: the MoE gate already predicts the state. "
+                "Pick one."
+            )
+        # see lstm.py again for clarification
+        if self.use_moe and self.n_experts != self.n_states:
+            raise ValueError(
+                f"a supervised MoE gate needs one expert per state: got n_experts={self.n_experts} but "
+                f"n_states={self.n_states}."
+            )
+        # both paths supervise a 5 way head against the canonical state labels, so they share one weight and one
+        # label builder; `state_loss_weight` is the gate loss weight when use_moe is on.
+        self.uses_state_labels = self.use_moe or self.use_state_head
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # set by `fit` (or `from_checkpoint`); None on a fresh, unfitted model
@@ -259,6 +302,7 @@ class Transformer:
             ("_time" if self.use_time_features else "")
             + ("_season" if self.use_season_features else "")
             + ("_state" if self.use_state_head else "")
+            + (f"_moe{self.n_experts}" if self.use_moe else "")
         )
         self.name = name or f"transformer_d{self.d_model}_l{self.num_layers}{suffix}"
 
@@ -376,7 +420,7 @@ class Transformer:
             Xn = torch.cat([Xn, T], dim=-1)
 
         # per window next state labels for the state head, aligned to (Xn, Y) by construction (same window loop)
-        S = self._state_labels(train_df, group_col=group_col) if self.use_state_head else None
+        S = self._state_labels(train_df, group_col=group_col) if self.uses_state_labels else None
 
         # GPU preload: move the whole training tensor set onto the compute device once and index batches on device, rather than streaming through a
         # DataLoader that copies each batch CPU -> GPU. Our stork set is ~170 MB and so that fits easily in the V100's 32 GB, so this removes the
@@ -399,6 +443,8 @@ class Transformer:
             output_dim=2,
             use_state_head=self.use_state_head,
             n_states=self.n_states,
+            use_moe=self.use_moe,
+            n_experts=self.n_experts,
         ).to(self.device)
 
         optimiser = torch.optim.Adam(self.net.parameters(), lr=self.lr)
@@ -421,7 +467,7 @@ class Transformer:
         #################
 
         loss_fn = nn.MSELoss()
-        ce_fn = nn.CrossEntropyLoss() if self.use_state_head else None
+        ce_fn = nn.CrossEntropyLoss() if self.uses_state_labels else None
 
         self.net.train()
         for epoch in range(self.epochs):
@@ -435,7 +481,7 @@ class Transformer:
                 yb = Y[idx]
 
                 optimiser.zero_grad()
-                if self.use_state_head:
+                if self.uses_state_labels:
                     pred, state_logits = self.net(xb)
                     loss_pos = loss_fn(pred, yb)
                     loss_state = ce_fn(state_logits, S[idx])
@@ -454,7 +500,7 @@ class Transformer:
                 epoch_loss += loss.item() * xb.size(0)
 
             epoch_loss /= n_windows
-            if self.use_state_head:
+            if self.uses_state_labels:
                 epoch_state /= n_windows
                 logger.info(
                     "epoch %d/%d train_loss=%.6g state_ce=%.6g",
@@ -523,7 +569,7 @@ class Transformer:
             out = self.net(x)
             # with the state head on, the net returns (pos, state_logits); the state head conditions the position
             # internally, so predict still returns only the (lon, lat) position and the harness contract is unchanged.
-            pred_disp = out[0] if self.use_state_head else out  # (1, 2)
+            pred_disp = out[0] if self.uses_state_labels else out  # (1, 2)
 
         pred_disp = pred_disp.squeeze(0).cpu().numpy() # (2,)
         return history[-1] + pred_disp
@@ -558,6 +604,8 @@ class Transformer:
                     "use_time_features": self.use_time_features,
                     "use_season_features": self.use_season_features,
                     "use_state_head": self.use_state_head,
+                    "use_moe": self.use_moe,
+                    "n_experts": self.n_experts,
                     "state_loss_weight": self.state_loss_weight,
                     "n_states": self.n_states,
                     "name": self.name,
@@ -582,6 +630,8 @@ class Transformer:
         use_time = cfg.get("use_time_features", False)
         use_season = cfg.get("use_season_features", False)
         use_state_head = cfg.get("use_state_head", False)
+        use_moe = cfg.get("use_moe", False)
+        n_experts = cfg.get("n_experts", 5)
         n_states = cfg.get("n_states", 5)
 
         # rebuild the wrapper with the stored architecture.
@@ -595,6 +645,8 @@ class Transformer:
             use_time_features=use_time,
             use_season_features=use_season,
             use_state_head=use_state_head,
+            use_moe=use_moe,
+            n_experts=n_experts,
             state_loss_weight=cfg.get("state_loss_weight", 0.5),
             n_states=n_states,
             device=device,
@@ -612,6 +664,8 @@ class Transformer:
             output_dim=2,
             use_state_head=use_state_head,
             n_states=n_states,
+            use_moe=use_moe,
+            n_experts=n_experts,
         ).to(model.device)
         model.net.load_state_dict(ckpt["state_dict"])
         model._mean = ckpt["mean"]

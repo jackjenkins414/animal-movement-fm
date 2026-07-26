@@ -3,20 +3,38 @@
 # generated section by checking that baseline and treatment used identical seeds/configs except for use_state_head, 
 # and that the saved JSON/CSV matched the printed table; got GenAI to refine my PBS script as well. 
 """
-Does the two-factor state head improve movement forecasting? (Part B evaluation)
+Does regime conditioning improve movement forecasting? (Part B evaluation)
 
-Trains two LSTMs on the seed-42 split, identical in every way except the head:
+Trains two models on the frozen split, identical in every way except the head:
 
-    baseline    time + season covariates, no state head       (lstm_h64_l1_time_season)
-    treatment   same, plus the Rung-2 state head              (lstm_h64_l1_time_season_state)
+    baseline    time + season covariates, one plain position head
+    treatment   same trunk, plus either the Rung-2 state head or the Rung-3 mixture of experts
 
 Both are evaluated through the standard harness on the test split. The comparison is the movement metric that
 matters, reported as the FULL error distribution (n, mean, median, p90, p99, std) BOTH overall AND stratified by the
 true next state, so we can see whether the regime-conditioning helps the tail (moving / launch p99) without hurting
-the median. Persistence is evaluated too as the skill floor. The state head's own next-state accuracy is reported as
-a sanity check (it should roughly track the standalone classifier).
+the median. Persistence is evaluated too as the skill floor. The treatment head's own next-state accuracy is
+reported as a sanity check (it should roughly track the standalone classifier).
 
-Expectation/guess: the moving/launch p99 improves under the treatment; the overall median barely moves.
+Treatments
+----------
+`--treatment state_head` is Rung 2: the soft state distribution is concatenated onto the trunk summary before a
+single position head. That returned a null, for a structural reason since the head is linear, so the state enters
+ADDITIVELY and can only apply a per regime offset; it cannot change how the head reads the trunk.
+
+`--treatment moe` is Rung 3: a gate over K experts whose softmax WEIGHTS K independent position heads, so the
+effective map `sum_k g_k W_k` varies window by window. That is MULTIPLICATIVE, and is the mechanism the Rung 2 null
+did not test. For the MoE the report adds routing diagnostics (per expert usage, and mean gate mass per expert
+within each true state), because a gate that collapses onto one expert silently degenerates to the baseline and
+would otherwise look like a null for the wrong reason.
+
+Versions for running
+--------------------
+    python experiments/state/eval_state_head.py                     # LSTM, Rung-2 state head (default)
+    python experiments/state/eval_state_head.py --treatment moe     # LSTM, Rung-3 mixture of experts
+    python experiments/state/eval_state_head.py --arch transformer --treatment moe
+    python experiments/state/eval_state_head.py --quick             # Mac smoke: subsample birds, few epochs
+    python experiments/state/eval_state_head.py --seed 1            # different TRAINING seed (split stays 42)
 """
 
 from __future__ import annotations
@@ -90,13 +108,20 @@ def dist_by_state(results: pd.DataFrame) -> dict[str, dict]:
     return out
 
 
-def state_head_accuracy(model: LSTM, frame: pd.DataFrame) -> dict:
+def head_diagnostics(model, frame: pd.DataFrame) -> dict:
     """
-    Next-state accuracy of the treatment model's state head on `frame`.
+    Diagnostics for the treatment model's 5-way head (the Rung-2 state head, or the Rung-3 MoE gate).
 
     Rebuilds the net's exact input (build_state_windows gives the identical 6 channel window; the two displacement
-    channels are standardised with the modesls stored train stats), runs the state head, and compares argmax to the
+    channels are standardised with the model's stored train stats), runs the head, and compares argmax to the
     canonical labels. Reports overall accuracy plus migratory_launch recall as the headline sanity check.
+
+    For the MoE this doubles as the routing report. Two extra fields are returned, because a gate that has collapsed
+    onto one expert reduces the mixture to a single shared head and would silently reproduce the baseline:
+
+      expert_usage    mean softmax mass on each expert over all test windows (should track state prevalence)
+      expert_by_state mean gate mass per expert WITHIN each true state; the diagonal is the routing we want, so an
+                      off diagonal maximum means expert k is not specialising on state k
     """
     sw = build_state_windows(
         frame, context_length=model.context_length,
@@ -108,21 +133,34 @@ def state_head_accuracy(model: LSTM, frame: pd.DataFrame) -> dict:
     X[:, :, :2] = (X[:, :, :2] - mean) / std
 
     model.net.eval()
-    preds = []
+    preds, probs = [], []
     with torch.no_grad():
         for start in range(0, len(X), 50_000):  # chunk to keep memory modest
             xb = torch.tensor(X[start : start + 50_000], dtype=torch.float32).to(model.device)
             _, logits = model.net(xb)
             preds.append(logits.argmax(1).cpu().numpy())
+            probs.append(torch.softmax(logits, dim=-1).cpu().numpy())
     pred = np.concatenate(preds)
+    prob = np.concatenate(probs)
 
     mig = REFINED_STATES.index("migratory_launch")
     pos = sw.y == mig
-    return {
+    out = {
         "accuracy": float((pred == sw.y).mean()),
         "migratory_launch_recall": float((pred[pos] == mig).mean()) if pos.any() else float("nan"),
         "n": int(len(sw.y)),
     }
+
+    if getattr(model, "use_moe", False):
+        out["expert_usage"] = {REFINED_STATES[k]: float(prob[:, k].mean()) for k in range(prob.shape[1])}
+        out["expert_by_state"] = {
+            REFINED_STATES[s]: {
+                REFINED_STATES[k]: float(prob[sw.y == s, k].mean()) for k in range(prob.shape[1])
+            }
+            for s in range(len(REFINED_STATES))
+            if (sw.y == s).any()
+        }
+    return out
 
 
 def km(v: float) -> float:
@@ -135,6 +173,8 @@ def km(v: float) -> float:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arch", choices=("lstm", "transformer"), default="lstm", help="architecture to compare")
+    p.add_argument("--treatment", choices=("state_head", "moe"), default="state_head",
+                   help="what to compare against the baseline: the Rung-2 state head or the Rung-3 mixture of experts")
     p.add_argument("--seed", type=int, default=0, help="TRAINING seed (weight init + shuffling); split stays 42")
     p.add_argument("--state-loss-weight", type=float, default=0.05,
                    help="lambda on the state cross-entropy (position MSE ~0.02 vs CE ~0.7, so ~0.03 balances them)")
@@ -144,15 +184,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_model(arch: str, use_state_head: bool, seed: int, epochs: int, state_loss_weight: float, run_id: str):
-    torch.manual_seed(seed)  # Re-seed before each model so baseline and treatment start identically. 
+def build_model(arch: str, treatment: str | None, seed: int, epochs: int, state_loss_weight: float, run_id: str):
+    """
+    Build one model. `treatment` is None for the baseline, else "state_head" (Rung 2) or "moe" (Rung 3).
+
+    The two treatments are mutually exclusive by construction in the model classes, so they are selected here rather
+    than passed as independent flags.
+    """
+    torch.manual_seed(seed)  # Reseed before each model so baseline and treatment start identically.
     cfg = dict(BASE[arch])
     cfg["epochs"] = epochs
     return MODEL_CLS[arch](
         **cfg,
         use_time_features=True,
         use_season_features=True,
-        use_state_head=use_state_head,
+        use_state_head=(treatment == "state_head"),
+        use_moe=(treatment == "moe"),
         state_loss_weight=state_loss_weight,
         name=run_id,
     )
@@ -176,14 +223,17 @@ def main() -> None:
     train_frame = load_split_frame(SEGMENTS, train_ids)
     test_frame = load_split_frame(SEGMENTS, split.test)
     print(
-        f"arch {args.arch} | device cuda={torch.cuda.is_available()} | train {len(train_frame):,} rows / "
+        f"arch {args.arch} | treatment {args.treatment} | device cuda={torch.cuda.is_available()} | train {len(train_frame):,} rows / "
         f"{train_frame['segment_id'].nunique()} segs | test {len(test_frame):,} rows / "
         f"{test_frame['segment_id'].nunique()} segs | epochs {epochs} | lambda {args.state_loss_weight}"
     )
 
+    treat_suffix = "state" if args.treatment == "state_head" else "moe"
     models = {
-        "baseline": build_model(args.arch, False, args.seed, epochs, args.state_loss_weight, f"{args.arch}_time_season"),
-        "treatment": build_model(args.arch, True, args.seed, epochs, args.state_loss_weight, f"{args.arch}_time_season_state"),
+        "baseline": build_model(args.arch, None, args.seed, epochs, args.state_loss_weight,
+                                f"{args.arch}_time_season"),
+        "treatment": build_model(args.arch, args.treatment, args.seed, epochs, args.state_loss_weight,
+                                 f"{args.arch}_time_season_{treat_suffix}"),
     }
 
     state_tbl = label_state_by_fix(test_frame)
@@ -211,7 +261,7 @@ def main() -> None:
         )
         dists[tag] = dist_by_state(results)
         if tag == "treatment":
-            head_acc = state_head_accuracy(model, test_frame)
+            head_acc = head_diagnostics(model, test_frame)
 
     # ---- report: per-state median & p99 (km), baseline vs treatment vs persistence ----
     print("\n" + "=" * 92)
@@ -246,15 +296,33 @@ def main() -> None:
           f"treatment {1 - ov_t['median_m'] / ov_p['median_m']:+.3f}")
     print(f"overall mean km : baseline {km(ov_b['mean_m']):.3f} -> treatment {km(ov_t['mean_m']):.3f}")
     if head_acc:
-        print(f"state head (test): accuracy {head_acc['accuracy']:.3f} | "
+        label = "state head" if args.treatment == "state_head" else "moe gate"
+        print(f"{label} (test): accuracy {head_acc['accuracy']:.3f} | "
               f"migratory_launch recall {head_acc['migratory_launch_recall']:.3f} (n={head_acc['n']:,})")
+
+    # ---- MoE routing: has the gate collapsed, and does expert k specialise on state k? ----
+    if head_acc and "expert_usage" in head_acc:
+        print("\nexpert usage (mean gate mass over all test windows):")
+        for state, mass in head_acc["expert_usage"].items():
+            print(f"  expert[{state:<17}] {mass:6.3f}")
+        top = max(head_acc["expert_usage"].values())
+        print(f"  -> max {top:.3f}; a value near 1.0 means the gate collapsed and the mixture is one shared head")
+
+        print("\nmean gate mass per expert WITHIN each true state (diagonal = intended routing):")
+        hdr = "".join(f"{s[:9]:>10}" for s in REFINED_STATES)
+        print(f"{'true state':<18}{hdr}")
+        for state, row in head_acc["expert_by_state"].items():
+            cells = "".join(f"{row[k]:>10.3f}" for k in REFINED_STATES)
+            argmax_k = max(row, key=row.get)
+            flag = "" if argmax_k == state else f"  <- routed to {argmax_k}"
+            print(f"{state:<18}{cells}{flag}")
 
     # ---- persist ----
     out = {
         "config": {
-            "arch": args.arch, "seed": args.seed, "split_seed": SPLIT_SEED, "epochs": epochs,
-            "state_loss_weight": args.state_loss_weight, "n_train_birds": int(len(train_ids)),
-            "context_length": CONTEXT_LENGTH,
+            "arch": args.arch, "treatment": args.treatment, "seed": args.seed, "split_seed": SPLIT_SEED,
+            "epochs": epochs, "state_loss_weight": args.state_loss_weight,
+            "n_train_birds": int(len(train_ids)), "context_length": CONTEXT_LENGTH,
         },
         "by_state": rows_out,
         "overall": {
@@ -264,9 +332,10 @@ def main() -> None:
             "skill_median_baseline": 1 - ov_b["median_m"] / ov_p["median_m"],
             "skill_median_treatment": 1 - ov_t["median_m"] / ov_p["median_m"],
         },
-        "state_head": head_acc,
+        "head": head_acc,
     }
-    tag = f"{args.arch}_s{args.seed}_lam{args.state_loss_weight}"
+    # treatment is in the filename so Rung-2 and Rung-3 cells never overwrite each other
+    tag = f"{args.arch}_{args.treatment}_s{args.seed}_lam{args.state_loss_weight}"
     path = RESULTS / f"eval_state_head_{tag}.json"
     path.write_text(json.dumps(out, indent=2, default=float))
     pd.DataFrame(rows_out).to_csv(RESULTS / f"eval_state_head_{tag}.csv", index=False)

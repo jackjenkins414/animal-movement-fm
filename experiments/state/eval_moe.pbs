@@ -1,0 +1,44 @@
+#!/bin/bash
+# Rung 3 MOE evaluation on Gadi, as a PBS job ARRAY over (architecture x gate loss weight lambda):
+#
+#   index :   0     1     2     3     4     5
+#   arch  :  lstm  lstm  lstm  trns  trns  trns
+#   lambda:  0.01  0.03  0.10  0.01  0.03  0.10
+#
+# Each subjob trains the baseline (time+season, one plain position head) and the treatment (same trunk + a gate over
+# 5 experts, one per refined state) on the frozen split and evaluates both on test, writing
+#   results/state_head/eval_state_head_<arch>_moe_s0_lam<lambda>.{json,csv}
+#
+# Same lambda grid as our Rung 2 sweep, deliberately: the loss scales are unchanged (position MSE ~0.02 standardised
+# vs gate cross-entropy ~0.7), so the balance point is still ~0.03, and using the same grid makes the Rung 2 and
+# Rung 3 results directly comparable cell for cell. The baseline is retrained inside every subjob so each output
+# file is self contained and carries its own lambda=0 control.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=06:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N eval_moe
+#PBS -j oe
+#PBS -J 0-5
+# PBS Pro requires array jobs to be rerunnable (Gadi's site default -r n rejects them). Safe here: each subjob
+# writes only its own (arch, lambda)-keyed outputs, so a requeue overwrites its own files.
+#PBS -r y
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+cd /g/data/um09/$USER/animal-movement-fm
+
+ARCHS=(lstm transformer)
+LAMBDAS=(0.01 0.03 0.1)
+ARCH=${ARCHS[$((PBS_ARRAY_INDEX / 3))]}
+LAMBDA=${LAMBDAS[$((PBS_ARRAY_INDEX % 3))]}
+
+echo "moe eval: arch=$ARCH lambda=$LAMBDA  (array index $PBS_ARRAY_INDEX)"
+uv run python experiments/state/eval_state_head.py \
+    --arch "$ARCH" --treatment moe --seed 0 --state-loss-weight "$LAMBDA"

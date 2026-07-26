@@ -38,8 +38,8 @@ class _LSTMNet(nn.Module):
     Shapes
     ------
     input: (batch, seq_len, input_dim)
-    output: (batch, output_dim)                       when use_state_head is False
-    output: (batch, output_dim), (batch, n_states)    when use_state_head is True
+    output: (batch, output_dim)                       plain net (both flags off)
+    output: (batch, output_dim), (batch, n_states)    when use_state_head OR use_moe is on
 
     Two-factor state head (Rung 2)
     ------------------------------
@@ -48,6 +48,34 @@ class _LSTMNet(nn.Module):
     concatenated onto `last` before the position head, so the displacement prediction is explicitly conditioned on the
     regime the trunk thinks is coming. With the flag off, the module is byte-for-byte our original raw sequence net
     (position head reads `last` directly), so every existing checkpoint, prediction and test is still unchanged.
+
+    Mixture of experts (Rung 3)
+    ---------------------------
+    Rung 2 produced a null result, and there is a structural reason for that. Its position head is LINEAR over [last, p_state]:
+
+        pos = W1 . last + W2 . p_state + b
+
+    The state distribution therefore enters ADDITIVELY. It can shift the prediction by a learned regime-specific
+    offset, but it cannot change how the head reads the trunk. The mapping from `last` to displacement remains `W1`
+    regardless of which regime is predicted.
+
+    We next try a mixture of experts (MOE) which works differently given by
+
+        pos = sum_k g_k * (W_k . last + b_k),    g = softmax(gate . last)
+
+    Here, the effective weight matrix `sum_k g_k W_k` can change from one window to the next. S the mapping itself 
+    depends on the input, rather than being a fixed mapping with an added offset. So in theory (we hope), a foraging 
+    expert to learn W ~ 0 ("predict no movement", which is close to optimal for the near stationary third of steps 
+    where persistence beats us), while a transit expert learns a larger directed mapping. One shared linear head cannot
+    specialise in both behaviours at once, but K separate heads can.
+
+    Routing is SOFT, meaning the final prediction is a weighted sum of all experts rather than the top 1 choice. With
+    K ~ 5 there is little reason to use sparse routing, and hard routing would introduce straight through estimators
+    and load balancing machinery without offering a clear benefit here.
+
+    The gate already acts as a state head, so `use_moe` and `use_state_head` are mutually exclusive and the wrapper
+    raises an error if both are requested. The experts are kept linear to match the baseline position head exactly,
+    so the comparison is simply 1 linear head versus K linear heads plus a gate, with everything else unchanged.
     """
 
     def __init__(
@@ -58,6 +86,8 @@ class _LSTMNet(nn.Module):
             output_dim: int = 2,
             use_state_head: bool = False,
             n_states: int = 5,
+            use_moe: bool = False,
+            n_experts: int = 5,
     ) -> None:
         super().__init__()
         self.lstm = nn.LSTM(
@@ -68,7 +98,17 @@ class _LSTMNet(nn.Module):
         )
         self.use_state_head = bool(use_state_head)
         self.n_states = int(n_states)
-        if self.use_state_head:
+        self.use_moe = bool(use_moe)
+        self.n_experts = int(n_experts)
+
+        if self.use_moe:
+            # gate over experts; supervised against the canonical state labels, so expert k aligns with state k
+            self.gate = nn.Linear(hidden_dim, self.n_experts)
+            # K independent position heads; held as one (K*output_dim) layer rather than a ModuleList so the mixture
+            # is a single batched matmul; sliced to (batch, K, output_dim) below
+            self.experts = nn.Linear(hidden_dim, self.n_experts * output_dim)
+            self.output_dim = int(output_dim)
+        elif self.use_state_head:
             self.state_head = nn.Linear(hidden_dim, self.n_states)
             # position head conditioned on the soft state distribution appended to the trunk summary
             self.fc = nn.Linear(hidden_dim + self.n_states, output_dim)
@@ -83,6 +123,15 @@ class _LSTMNet(nn.Module):
 
         # (batch, hidden_dim); summary of the window
         last = out[:, -1, :]
+
+        if self.use_moe:
+            gate_logits = self.gate(last)  # (batch, K)
+            g = torch.softmax(gate_logits, dim=-1).unsqueeze(-1) # (batch, K, 1)
+            e = self.experts(last).view(-1, self.n_experts, self.output_dim)  # (batch, K, output_dim)
+            pos = (g * e).sum(dim=1)  # (batch, output_dim)
+            # gate logits are returned in the state logits slot, so the training loop, predict and the eval
+            # harness treat MoE and the Rung-2 head identically.
+            return pos, gate_logits
 
         if self.use_state_head:
             state_logits = self.state_head(last)   # (batch, n_states)
@@ -114,6 +163,8 @@ class LSTM:
         use_state_head: bool = False,
         state_loss_weight: float = 0.5,
         n_states: int = 5,
+        use_moe: bool = False,
+        n_experts: int = 5,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
@@ -146,6 +197,27 @@ class LSTM:
         self.state_loss_weight = float(state_loss_weight)
         self.n_states = int(n_states)
 
+        # Mixture of experts! (Rung 3): the gate IS a state head, so requesting both is ambiguous rather than
+        # additive; refuse it explicitly instead of silently picking one
+        self.use_moe = bool(use_moe)
+        self.n_experts = int(n_experts)
+        if self.use_moe and self.use_state_head:
+            raise ValueError(
+                "use_moe and use_state_head are mutually exclusive; the MoE gate already predicts the state. "
+                "Sooo pick one."
+            )
+        # the gate is supervised by the 5 way canonical state labels, so there must be one expert per state;
+        # checked here rather than left to blow up inside CrossEntropyLoss on the first real batch (the synthetic
+        # test fixtures happen to contain a single state, so a mismatch would survive the unit tests) 
+        if self.use_moe and self.n_experts != self.n_states:
+            raise ValueError(
+                f"a supervised MoE gate needs one expert per state: got n_experts={self.n_experts} but "
+                f"n_states={self.n_states}."
+            )
+        # both paths supervise a 5 way head against the canonical state labels, so they share one weight and one
+        # label builder; `state_loss_weight` is the gate loss weight when use_moe is on
+        self.uses_state_labels = self.use_moe or self.use_state_head
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # set by `fit` (or `from_checkpoint`); none on a fresh, unfitted model
@@ -159,6 +231,7 @@ class LSTM:
             ("_time" if self.use_time_features else "")
             + ("_season" if self.use_season_features else "")
             + ("_state" if self.use_state_head else "")
+            + (f"_moe{self.n_experts}" if self.use_moe else "")
         )
         self.name = name or f"lstm_h{self.hidden_dim}_l{self.num_layers}{suffix}"
 
@@ -288,7 +361,7 @@ class LSTM:
             Xn = torch.cat([Xn, T], dim=-1)
 
         # per-window next state labels for the state head, aligned to (Xn, Y) by construction (same window loop)
-        S = self._state_labels(train_df, group_col=group_col) if self.use_state_head else None
+        S = self._state_labels(train_df, group_col=group_col) if self.uses_state_labels else None
 
         # preload the full training tensors onto the GPU once so batches are indexed on device, eliminating per batch CPU -> GPU
         # transfers while still preserving deterministic shuffling
@@ -305,11 +378,13 @@ class LSTM:
             output_dim=2,
             use_state_head=self.use_state_head,
             n_states=self.n_states,
+            use_moe=self.use_moe,
+            n_experts=self.n_experts,
         ).to(self.device)
 
         optimiser = torch.optim.Adam(self.net.parameters(), lr=self.lr)
         loss_fn = nn.MSELoss()
-        ce_fn = nn.CrossEntropyLoss() if self.use_state_head else None
+        ce_fn = nn.CrossEntropyLoss() if self.uses_state_labels else None
 
         self.net.train()
         for epoch in range(self.epochs):
@@ -323,7 +398,7 @@ class LSTM:
                 yb = Y[idx]
 
                 optimiser.zero_grad()
-                if self.use_state_head:
+                if self.uses_state_labels:
                     pred, state_logits = self.net(xb)
                     loss_pos = loss_fn(pred, yb)
                     loss_state = ce_fn(state_logits, S[idx])
@@ -339,7 +414,7 @@ class LSTM:
                 epoch_loss += loss.item() * xb.size(0)
 
             epoch_loss /= n_windows
-            if self.use_state_head:
+            if self.uses_state_labels:
                 epoch_state /= n_windows
                 logger.info(
                     "epoch %d/%d train_loss=%.6g state_ce=%.6g",
@@ -409,7 +484,7 @@ class LSTM:
             out = self.net(x)
             # with the state head on, the net returns (pos, state_logits); the state head conditions the position
             # internally, so predict still returns only the (lon, lat) position and the harness contract is unchanged
-            pred_disp = out[0] if self.use_state_head else out  # (1,2)
+            pred_disp = out[0] if self.uses_state_labels else out  # (1,2)
 
         pred_disp = pred_disp.squeeze(0).cpu().numpy() # (2,)
         return history[-1] + pred_disp
@@ -447,6 +522,8 @@ class LSTM:
                     "use_time_features": self.use_time_features,
                     "use_season_features": self.use_season_features,
                     "use_state_head": self.use_state_head,
+                    "use_moe": self.use_moe,
+                    "n_experts": self.n_experts,
                     "state_loss_weight": self.state_loss_weight,
                     "n_states": self.n_states,
                     "name": self.name,
@@ -471,6 +548,8 @@ class LSTM:
         use_time = cfg.get("use_time_features", False)
         use_season = cfg.get("use_season_features", False)
         use_state_head = cfg.get("use_state_head", False)
+        use_moe = cfg.get("use_moe", False)
+        n_experts = cfg.get("n_experts", 5)
         n_states = cfg.get("n_states", 5)
 
         # Rebuild the wrapper with the stored architecture.
@@ -481,6 +560,8 @@ class LSTM:
             use_time_features=use_time,
             use_season_features=use_season,
             use_state_head=use_state_head,
+            use_moe=use_moe,
+            n_experts=n_experts,
             state_loss_weight=cfg.get("state_loss_weight", 0.5),
             n_states=n_states,
             device=device,
@@ -495,6 +576,8 @@ class LSTM:
             output_dim=2,
             use_state_head=use_state_head,
             n_states=n_states,
+            use_moe=use_moe,
+            n_experts=n_experts,
         ).to(model.device)
         model.net.load_state_dict(ckpt["state_dict"])
         model._mean = ckpt["mean"]

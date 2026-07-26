@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -471,4 +473,117 @@ class TestStateHead:
 
         reloaded = Transformer.from_checkpoint(path, device="cpu")
         assert reloaded.use_state_head is False
+        assert reloaded.net.head.in_features == reloaded.d_model
+
+
+# ----------------------------------------------------------------------
+# Mixture of experts (Rung 3)
+# ----------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def fitted_moe_model():
+    # Tiny MoE transformer on a segment frame; exercises the gate + experts training path.
+    df = _make_seg_df()
+    return Transformer(d_model=16, nhead=2, num_layers=1, dim_feedforward=32, context_length=12,
+                       epochs=3, batch_size=32, use_moe=True, device="cpu").fit(df, group_col="segment_id")
+
+
+class TestMoE:
+    def test_moe_and_state_head_are_mutually_exclusive(self):
+        # The gate already predicts the state; asking for both is ambiguous, so it must raise.
+        with pytest.raises(ValueError):
+            Transformer(use_moe=True, use_state_head=True)
+
+    def test_expert_count_must_match_state_count(self):
+        # Supervised gate needs one expert per state; a mismatch would only surface on real multi-state data.
+        with pytest.raises(ValueError):
+            Transformer(use_moe=True, n_experts=3)
+
+    def test_name_reflects_moe(self):
+        assert Transformer(d_model=32, num_layers=2, use_moe=True).name == "transformer_d32_l2_moe5"
+        assert (
+            Transformer(d_model=32, num_layers=2, use_time_features=True,
+                        use_season_features=True, use_moe=True).name
+            == "transformer_d32_l2_time_season_moe5"
+        )
+
+    def test_moe_does_not_change_input_dim(self):
+        assert Transformer(use_moe=True).input_dim == 2
+        assert Transformer(use_time_features=True, use_season_features=True, use_moe=True).input_dim == 6
+
+    def test_net_has_gate_and_k_experts(self, fitted_moe_model):
+        net = fitted_moe_model.net
+        assert net.use_moe is True
+        assert net.gate.out_features == 5
+        assert net.experts.out_features == 5 * 2
+        assert not hasattr(net, "head")          # no single shared position head
+        pos, gate_logits = net(torch.zeros(1, 11, 2))
+        assert pos.shape == (1, 2)
+        assert gate_logits.shape == (1, 5)
+
+    def test_gate_weights_form_a_distribution(self, fitted_moe_model):
+        rng = np.random.default_rng(21)
+        x = torch.tensor((rng.standard_normal((4, 11, 2)) * 0.02), dtype=torch.float32)
+        fitted_moe_model.net.eval()
+        with torch.no_grad():
+            _, gate_logits = fitted_moe_model.net(x)
+        g = torch.softmax(gate_logits, dim=-1)
+        assert torch.allclose(g.sum(dim=-1), torch.ones(4), atol=1e-5)
+        assert (g >= 0).all()
+
+    def test_prediction_is_the_gated_mixture_of_experts(self, fitted_moe_model):
+        # forward must equal sum_k g_k * e_k recomputed from the same weights (eval mode: dropout off).
+        net = fitted_moe_model.net
+        net.eval()
+        rng = np.random.default_rng(22)
+        x = torch.tensor((rng.standard_normal((3, 11, 2)) * 0.02), dtype=torch.float32)
+        with torch.no_grad():
+            pos, gate_logits = net(x)
+            h = net.pos_encoder(net.input_proj(x) * math.sqrt(net.d_model))
+            last = net.encoder(h)[:, -1, :]
+            g = torch.softmax(gate_logits, dim=-1).unsqueeze(-1)
+            e = net.experts(last).view(-1, net.n_experts, 2)
+            expected = (g * e).sum(dim=1)
+        torch.testing.assert_close(pos, expected, rtol=1e-4, atol=1e-6)
+
+    def test_experts_are_not_all_identical(self, fitted_moe_model):
+        w = fitted_moe_model.net.experts.weight
+        assert not torch.allclose(w[0:2], w[2:4], atol=1e-6)
+
+    def test_predict_shape_with_moe(self, fitted_moe_model):
+        history = (np.random.default_rng(23).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        pred = fitted_moe_model.predict(PredictionContext(history=history))
+        assert pred.shape == (2,)
+        assert np.all(np.isfinite(pred))
+
+    def test_gate_labels_align_with_canonical_windows(self):
+        df = _make_seg_df()
+        cl = 12
+        model = Transformer(d_model=16, nhead=2, context_length=cl, use_moe=True, device="cpu")
+        S = model._state_labels(df, group_col="segment_id").numpy()
+        assert S.tolist() == build_state_windows(df, context_length=cl).y.tolist()
+
+    def test_checkpoint_roundtrip_with_moe(self, fitted_moe_model, tmp_path):
+        history = (np.random.default_rng(24).standard_normal((12, 2)) * 0.02).cumsum(axis=0)
+        ctx = PredictionContext(history=history)
+        before = fitted_moe_model.predict(ctx)
+
+        path = tmp_path / "ckpt_moe.pt"
+        fitted_moe_model.save(path)
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_moe is True
+        assert reloaded.n_experts == 5
+        assert reloaded.net.gate.out_features == 5
+        np.testing.assert_allclose(before, reloaded.predict(ctx), rtol=1e-5, atol=1e-6)
+
+    def test_old_checkpoint_defaults_to_no_moe(self, small_df, tmp_path):
+        model = Transformer(d_model=16, nhead=2, context_length=12, epochs=1, device="cpu").fit(small_df)
+        path = tmp_path / "ckpt_premoe.pt"
+        model.save(path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        del ckpt["config"]["use_moe"]
+        torch.save(ckpt, path)
+
+        reloaded = Transformer.from_checkpoint(path, device="cpu")
+        assert reloaded.use_moe is False
         assert reloaded.net.head.in_features == reloaded.d_model
