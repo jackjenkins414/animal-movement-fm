@@ -499,13 +499,13 @@ We used one lean XGBoost multiclass model; a flattened 24x6 window, plus momentu
 
 | class | precision | recall | F1 | support | prevalence | PR-AUC | lift |
 | ---------------- | --------: | -----: | ----: | ------: | ---------: | -----: | ---: |
-| foraging | 0.850 | 0.854 | 0.852 | 17,335 | 0.142 | 0.936 | 6.6x |
-| moving | 0.961 | 0.901 | 0.930 | 65,305 | 0.537 | 0.981 | 1.8x |
-| local_launch | 0.810 | 0.740 | 0.773 | 16,749 | 0.138 | 0.863 | 6.3x |
-| migratory_launch | 0.520 | 0.811 | 0.634 | 2,781 | 0.023 | 0.754 | 33.0x |
-| settle | 0.731 | 0.878 | 0.798 | 19,486 | 0.160 | 0.852 | 5.3x |
+| foraging | 0.846 | 0.855 | 0.850 | 17,061 | 0.140 | 0.935 | 6.7x |
+| moving | 0.962 | 0.902 | 0.931 | 65,770 | 0.541 | 0.981 | 1.8x |
+| local_launch | 0.812 | 0.739 | 0.774 | 16,709 | 0.137 | 0.866 | 6.3x |
+| migratory_launch | 0.522 | 0.805 | 0.633 | 2,729 | 0.022 | 0.744 | 33.2x |
+| settle | 0.730 | 0.878 | 0.798 | 19,387 | 0.159 | 0.852 | 5.3x |
 
-The main result is that migratory launch onset is forecastable one step ahead, with PR-AUC 0.754 against a 2.29% base rate, or a 33x lift. Importantly, this result also holds on the harder subset. When restricted to the 36,865 windows ending in foraging, where prevalence is 7.54%, PR-AUC is 0.756 and therefore essentially unchanged. This suggests the result is not caused by filling the negative class with cases where a launch is mechanically impossible. Most of the gain comes from recent movement momentum (`mag_last`, `mag_last3`) and the time of day of the most recent fixes. No day of year feature appears in the top 15, which is consistent with season only mattering for the initial cold season departure. Precision is 0.52, with most of the limitation coming from ambiguity between local and migratory launch. Some of this is unavoidable because the distinction depends on how far the bout travels, which has not yet been observed at prediction time.
+The main result is that migratory launch onset is forecastable one step ahead, with PR-AUC 0.744 against a 2.24% base rate, or a 33x lift. Importantly, this result also holds on the harder subset. When restricted to the 36,499 windows ending in foraging, where prevalence is 7.48%, PR-AUC is 0.746 and therefore essentially unchanged. This suggests the result is not caused by filling the negative class with cases where a launch is mechanically impossible. Most of the gain comes from recent movement momentum (`mag_last`, `mag_last3`) and the time of day of the most recent fixes. No day of year feature appears in the top 15, which is consistent with season only mattering for the initial cold season departure. Precision is 0.52, with most of the limitation coming from ambiguity between local and migratory launch. Some of this is unavoidable because the distinction depends on how far the bout travels, which has not yet been observed at prediction time.
 
 ### The two factor state head (Rung 2), on both architectures
 
@@ -552,3 +552,60 @@ Hashing the split revealed the actual issue: the two machines shared only 76 of 
 **Fixed.** `make_split` now sorts IDs canonically before applying the seeded permutation, making the split a pure function of (individual_ids, seed). On the real corpus, the assignment is now stable at 105/105 test individuals under arbitrary input reordering. More importantly, experiment scripts no longer recompute the split. The assignment is now frozen in a committed ID manifest, `splits/stork_split_seed42.json`, containing 630/105/105 individuals and loaded through `data.split.stork_split()`. A manifest for any dataset can be generated with `experiments/data/make_split_manifest.py`, and `tests/test_split.py` contains 11 tests covering order invariance, disjointness, the min_windows filter and the manifest round trip.
 
 We deliberately froze the GADI assignment rather than replacing it with the newly canonical split. No split is more correct than another as long as it is performed by individual, fixed and reproducible, and the Gadi assignment is also the one used for all GPU results, including the 30 run multi-seed sweep and the six cell state head sweep. A split regenerated using the corrected code shares only 17/105 test birds with the Gadi split, so freezing the existing assignment was the only way to retain those results without recomputing all of them. Every within machine comparison was still valid, including the multi-seed findings and the state head null, because each baseline and treatment was trained in the same subjob using the same individuals. The invalid comparison was placing Mac and Gadi results side by side, which is what exposed the bug. Freezing a separate split for each dataset will also matter as the corpus grows. A recomputed split depends on the full ID set, so adding species at Tier 2 would reshuffle existing individuals and silently invalidate Tier 1 results.
+
+## 26-07-2026: Rung 3, the mixture of experts. The mechanism is confirmed, but only in the stationary regime
+
+Rung 2, which conditioned the position head on the predicted state distribution, returned a null. The reason (we think at least) to be structural rather than empirical. Its head is LINEAR over `[last, p_state]`, so the state enters ADDITIVELY and can only add a regime specific offset; it cannot change how the head reads the trunk.
+
+A mixture of experts is different:
+
+    pos = sum_k g_k * (W_k . last + b_k),   g = softmax(gate . last)
+
+So the effective mapping `sum_k g_k W_k` changes from one window to the next. This is a obviously a different mechanism, not simply a stronger version of Rung 2, and that is why our results from Rung 2 null did not rule it out; and so to ensure we stay rigourous, we thought we should implement and test this approach. We used K=5 experts, one for each refined state, with the gate supervised using the canonical labels so that expert k aligned with state k. Routing was soft, and the experts were kept linear, and so the comparison is exactly one linear head versus five linear heads plus a gate.
+
+We ran a PBS array (`experiments/state/eval_moe.pbs`): 2 architectures x lambda in {0.01, 0.03, 0.10}, 80 epochs, frozen split, seed 0. Each subjob also retrained its own lambda=0 baseline as an internal control. Runtime was ~47 min per LSTM cell and ~2 h 05 per Transformer cell.
+
+### The routing worked; this is not a degenerate result
+
+The baseline was byte identical across all three lambda cells within each architecture; LSTM median 1.706404 km and Transformer median 1.008140 km. This confirms that the runs were deterministic. Gate usage also tracked the true state prevalence closely, with foraging 0.14 vs 14.0% actual, moving 0.53 vs 54.1%, and `migratory_launch` 0.022 vs 2.2%. So the gate did not appear to collapse onto a single expert.
+
+Diagonal routing mass increased steadily with lambda. For LSTM foraging it rose from 0.631 -> 0.728 -> 0.754, while for Transformer foraging it rose from 0.589 -> 0.774 -> 0.780. At lambda >= 0.03, every state routed mainly to its matching expert. But at lambda = 0.01, `migratory_launch` was the only exception bc it routed mainly to `local_launch` on the LSTM and to `moving` on the Transformer. Gate accuracy reached 0.85-0.87, which is comparable to the standalone XGBoost classifier.
+
+### Result: the pre-registered prediction is disconfirmed, but the mechanism is confirmed
+
+We guessed that moving/launch p99 would improve while the median stayed roughly unchanged. Almost the opposite happened. Moving p99 was essentially flat across all six cells, ranging from -1.2% to +1.5%. Migratory launch p99 was inconsistent: LSTM -11.5 / -14.1 / -0.7%, and Transformer +5.9 / +3.1 / +2.8%. With n = 2,729, that p99 is based on roughly the 27th largest error, so it is under powered and no conclusion should depend on it.
+
+The clear result is in the STATIONARY regime, which improves substantially in every cell and on both architectures!
+
+| median error change | foraging | settle | local_launch | moving | migratory_launch |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| LSTM lam 0.01 / 0.03 / 0.10 | -33 / -24 / -49% | -34 / -9 / -18% | -9 / -8 / -10% | -1.5 / +12.6 / +15.6% | -0.5 / -7.3 / -4.5% |
+| Transformer lam 0.01 / 0.03 / 0.10 | -39 / -63 / -60% | -20 / +46 / -7% | -2 / -12 / -7% | -2.0 / -6.1 / -4.3% | +0.7 / +0.8 / +3.6% |
+
+Foraging p99 also improves in all six cells, by between -9% and -52%. This matches the mechanism we had in mind; a stationary expert can specialise in predicting approximately no movement, while a transit expert handles directed steps. One shared linear head cannot specialise in both behaviours at the same time.
+
+The pooled metrics barely change because `moving` makes up 54% of the windows and dominates the pooled tail, yet it does not improve. The best cell is LSTM lambda = 0.01, with overall median -13.8%, p90 -1.9%, mean -2.6%, and p99 +1.4%. This is the only lambda where the stationary gains are not clearly paid for elsewhere. Obvioously this is still a single seed result, roughly 2-3 sd of the multi-seed spread, and the Transformer at the same lambda moves in the opposite direction on median (+6.1%). The overall effect is therefore not consistent across architectures.
+
+### Lambda trades one regime against the other
+
+On the LSTM, increasing lambda makes the gate specialise more strongly and continues to improve foraging, but moving median gets steadily worse:
+
+    -1.5% -> +12.6% -> +15.6%
+
+So clearly we face a trade of with lambda here, where it doesn't have 'one best value', but rather it controls how much travel accuracy is traded for stationary specialisation, which is a useful result in its own right.
+
+### The number that reframes the whole state programme
+
+Persistence, which predicts exactly zero displacement, gets a median error of 0.008 km on foraging fixes. The baseline gets 0.961 km and the MoE gets 0.639 km. So our MoE therefore closes about a third of the gap to persistence on the stationary states; 34% foraging, 34% settle, and 38% local_launch. However, it is still roughly 80x worse than simply predicting no movement.
+
+The learned models are still badly overpredicting movement when the animal is stationary. A soft mixture of LINEAR heads recovers only part of the available gain because it can move towards zero, but it cannot commit to zero as a discrete outcome.
+
+### Consequences
+
+The three experiments now form a fairly clear argument. State is highly predictable from the standard window, with PR-AUC 0.754 and a 33x lift. Conditioning a shared linear head on that state additively does nothing, for a structural reason. Gating separate experts multiplicatively confirms that regime specific specialisation is real, but the benefit appears almost entirely in the stationary regime and only closes about a third of the gap to persistence.
+
+The main conclusion is that the regime split probably belongs in the OUTPUT DISTRIBUTION rather than in the architecture. A more suitable design perhaps would be(we will explore this later) a Bernoulli "will it move" gate multiplied by a heavy tailed displacement density, such as a bivariate Student-t. This would allow the model to emit no movement as a discrete decision rather than only approaching zero continuously.
+
+That design would also be label free and therefore more species general. By contrast, our supervised 5 expert gate depends on `analysis/regime.py`, whose 60 m hysteresis cut and 37 km migratory threshold are white stork constants and do not transfer across species. For that reason, the MoE architecture will be reported as a Tier 1 result but will NOT be carried into the multi species tiers. The finding will be carried forward instead.
+
+
