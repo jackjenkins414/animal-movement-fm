@@ -32,6 +32,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from animal_movement_fm.eval.harness import contiguous_run_slices
 from animal_movement_fm.eval.metrics import haversine_distance
 
 REGIME_CUT_KM = 0.06  # foraging/moving trough 
@@ -284,3 +285,57 @@ def label_migratory_launches(
     state[migratory] = "migratory_launch"
     lab["state"] = state
     return lab
+
+
+def label_contiguous_regimes(
+    frame: pd.DataFrame,
+    *,
+    group_col: str = "segment_id",
+    bin_col: str = "bin_index",
+    refined: bool = False,
+    min_run_length: int = 1,
+) -> pd.DataFrame:
+    """Label regimes independently inside every one-bin contiguous run.
+
+    Unlike :func:`label_regimes`, this is the production entry point for the resampled real-data product. It requires
+    ``bin_col`` rather than silently treating a frame with missing cadence information as contiguous. The original 
+    coarse segment remains in ``group_col``; ``contiguous_run_id`` is added so downstream bout calculations can preserve 
+    the finer boundary.
+    """
+    required = {group_col, bin_col, "timestamp", "lon", "lat"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(
+            "contiguous regime labelling requires cadence metadata; "
+            f"missing columns: {sorted(missing)}"
+        )
+    if min_run_length < 1:
+        raise ValueError("min_run_length must be >= 1")
+
+    parts: list[pd.DataFrame] = []
+    run_id = 0
+    ordered = frame.sort_values([group_col, bin_col]).reset_index(drop=True)
+    for _, coarse_seg in ordered.groupby(group_col, sort=False):
+        coarse_seg = coarse_seg.reset_index(drop=True)
+        for run_start, run_stop in contiguous_run_slices(coarse_seg):
+            if run_stop - run_start < min_run_length:
+                continue
+            raw_run = coarse_seg.iloc[run_start:run_stop].copy()
+            raw_run["contiguous_run_id"] = run_id
+            labelled = label_regimes(raw_run, group_col="contiguous_run_id")
+            if refined:
+                labelled = label_migratory_launches(
+                    labelled, group_col="contiguous_run_id"
+                )
+            parts.append(labelled)
+            run_id += 1
+    # GenAI reference: GenAI added the typed empty DataFrame return for the case where no contiguous runs satisfy `min_run_length`; 
+    # verified against the function's normal output schema; and this was a subtly I missed in my implementation
+    if not parts:
+        return ordered.iloc[:0].assign(
+            contiguous_run_id=pd.Series(dtype="int64"),
+            step_km=pd.Series(dtype="float64"),
+            base_regime=pd.Series(dtype="object"),
+            regime=pd.Series(dtype="object"),
+        )
+    return pd.concat(parts, ignore_index=True)

@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from animal_movement_fm.analysis.regime import label_regimes
+from animal_movement_fm.analysis.regime import label_contiguous_regimes
 from animal_movement_fm.eval.metrics import haversine_distance
 
 REPO = Path(__file__).resolve().parents[2]
@@ -48,14 +48,15 @@ def moving_bouts(lab: pd.DataFrame) -> pd.DataFrame:
     segment/timestamp, reset index), so positional index == row order.
     """
     seg = lab["segment_id"].to_numpy()
+    run = lab["contiguous_run_id"].to_numpy()
     lon = lab["lon"].to_numpy()
     lat = lab["lat"].to_numpy()
     step_km = lab["step_km"].to_numpy()
     is_mov = (lab["base_regime"] == "moving").to_numpy()
 
-    # a bout starts at a moving fix whose predecessor (same segment) is not moving
+    # a bout starts at a moving fix whose predecessor in the same contiguous run is not moving
     prev_mov = np.zeros(len(lab), dtype=bool)
-    prev_mov[1:] = is_mov[:-1] & (seg[1:] == seg[:-1])
+    prev_mov[1:] = is_mov[:-1] & (run[1:] == run[:-1])
     new_bout = is_mov & ~prev_mov
     bout_id = np.cumsum(new_bout) # constant within a bout; only read on moving fixes
 
@@ -70,10 +71,12 @@ def moving_bouts(lab: pd.DataFrame) -> pd.DataFrame:
     path_km = g["step_km"].sum().to_numpy()
     bout_seg = g["seg"].first().to_numpy()
 
-    # anchor = the fix just before the bout (pre-launch position), if it exists in the same segment
+    # anchor = the fix just before the bout, if it exists in the same run
     prev_idx = first_idx - 1
-    same_seg = (first_idx > 0) & (seg[np.maximum(prev_idx, 0)] == bout_seg)
-    anchor_idx = np.where(same_seg, prev_idx, first_idx)
+    same_run = (first_idx > 0) & (
+        run[np.maximum(prev_idx, 0)] == run[first_idx]
+    )
+    anchor_idx = np.where(same_run, prev_idx, first_idx)
 
     net_km = haversine_distance(
         lon[anchor_idx], lat[anchor_idx], lon[last_idx], lat[last_idx]
@@ -103,9 +106,10 @@ def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
 
     frame = pd.read_parquet(
-        SEGMENTS, columns=["segment_id", "individual_id", "timestamp", "lat", "lon"]
+        SEGMENTS,
+        columns=["segment_id", "individual_id", "bin_index", "timestamp", "lat", "lon"],
     )
-    lab = label_regimes(frame)
+    lab = label_contiguous_regimes(frame)
     bouts = moving_bouts(lab)
     print(f"{len(bouts):,} moving bouts over {bouts['segment_id'].nunique():,} segments")
 

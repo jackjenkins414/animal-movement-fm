@@ -11,6 +11,7 @@ from animal_movement_fm.analysis.regime import (
     REFINED_STATES,
     REGIMES,
     add_step_length_km,
+    label_contiguous_regimes,
     label_migratory_launches,
     label_regimes,
     moving_bouts,
@@ -150,6 +151,32 @@ class TestLabelRegimes:
         a = label_regimes(df).reset_index(drop=True)
         b = label_regimes(shuffled).reset_index(drop=True)
         pd.testing.assert_frame_equal(a, b)
+
+
+class TestLabelContiguousRegimes:
+    def test_requires_bin_index(self):
+        with pytest.raises(ValueError, match="cadence metadata"):
+            label_contiguous_regimes(_segment("a", [0.01, 0.20]))
+
+    def test_internal_gap_resets_state_and_adds_run_id(self):
+        df = _segment("a", [0.01, 0.20, 0.20, 0.01])
+        df["bin_index"] = [0, 1, 3, 4, 5]
+
+        out = label_contiguous_regimes(df)
+
+        assert list(out["contiguous_run_id"]) == [0, 0, 1, 1, 1]
+        # The first fix after the gap has no incoming step and cannot inherit
+        # a regime or transition from the earlier run.
+        assert out.loc[2, "regime"] == "unknown"
+
+    def test_sorts_on_bin_index(self):
+        df = _segment("a", [0.01, 0.20, 0.20])
+        df["bin_index"] = [10, 11, 12, 13]
+        shuffled = df.sample(frac=1.0, random_state=2)
+
+        out = label_contiguous_regimes(shuffled)
+
+        assert list(out["bin_index"]) == [10, 11, 12, 13]
 
 
 # One track with a long straight-north migratory bout (4 x 10 km = 40 km net) and a short local

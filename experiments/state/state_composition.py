@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from animal_movement_fm.analysis.regime import label_regimes, REGIMES
+from animal_movement_fm.analysis.regime import label_contiguous_regimes, REGIMES
 from animal_movement_fm.data.split import stork_split
 
 REPO = Path(__file__).resolve().parents[2]
@@ -92,12 +92,13 @@ def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
 
     frame = pd.read_parquet(
-        SEGMENTS, columns=["segment_id", "individual_id", "timestamp", "lat", "lon"]
+        SEGMENTS,
+        columns=["segment_id", "individual_id", "bin_index", "timestamp", "lat", "lon"],
     )
     print(f"loaded {len(frame):,} fixes / {frame['segment_id'].nunique():,} segments / "
           f"{frame['individual_id'].nunique():,} individuals")
 
-    lab = label_regimes(frame)
+    lab = label_contiguous_regimes(frame)
 
     # tag each fix with its modelling split (single labelling pass, then map by bird)
     split = stork_split()  # frozen manifest (see data/split.stork_split)
