@@ -94,11 +94,31 @@ class PredictionContext:
     history_timestamps: "np.ndarray | None" = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+def contiguous_run_slices(
+        trajectory: pd.DataFrame,
+        *,
+        bin_col: str = "bin_index",
+) -> "list[tuple[int, int]]":
+    """
+    Return positional ``[start, stop)`` slices of one-bin contiguous runs.
 
+    Coarse segments deliberately tolerate short transmission gaps. Fixed cadence models must not: a missing bin ends one modelling run and starts another.
+    Frames without ``bin_col`` (notably the regular synthetic datasets) form one run, preserving their existing behaviour.
+    """
+    n = len(trajectory)
+    if n == 0:
+        return []
+    if bin_col not in trajectory.columns:
+        return [(0, n)]
 
-# ------------------------------
-# Sliding window iteration 
-# ------------------------------
+    bins = pd.to_numeric(trajectory[bin_col], errors="coerce").to_numpy()
+    if np.isnan(bins).any():
+        raise ValueError(f"{bin_col!r} contains missing or non-numeric values")
+
+    breaks = np.flatnonzero(np.diff(bins) != 1) + 1
+    bounds = np.concatenate(([0], breaks, [n]))
+    return [(int(start), int(stop)) for start, stop in zip(bounds[:-1], bounds[1:])]
+
 
 def iter_windows(
         trajectory: pd.DataFrame, 
@@ -123,12 +143,12 @@ def iter_windows(
     if T <= context_length: 
         return out
     
-    # Window at pos t uses observations [t - W, t] as history and observation t as 
-    # the target. So t ranges from W (first valid target) to T-1 inclusive
-    for t in range(context_length, T): 
-        history = coords[t - context_length : t] # (W, 2)
-        target = coords[t] # (2,)
-        out.append((history, target, timestamps[t], t))
+    # window only within structurally contiguous runs; run needs W history ixes plus its target, hence t starts at run_start + W.
+    for run_start, run_stop in contiguous_run_slices(trajectory):
+        for t in range(run_start + context_length, run_stop):
+            history = coords[t - context_length : t] # (W, 2)
+            target = coords[t] # (2,)
+            out.append((history, target, timestamps[t], t))
     return out 
 
 # ------------------------------

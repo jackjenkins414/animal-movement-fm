@@ -26,7 +26,9 @@ import pytest
 from animal_movement_fm.data.synthetic import generate_brownian_motion
 from animal_movement_fm.eval.harness import (
     Predictor,
+    contiguous_run_slices,
     evaluate,
+    iter_windows,
     stratified_summary,
 )
 from animal_movement_fm.eval.metrics import (
@@ -143,6 +145,38 @@ class _ConstantOffsetPredictor:
 
 
 class TestHarness:
+
+    def test_contiguous_runs_split_at_missing_bin(self):
+        trajectory = pd.DataFrame(
+            {
+                "bin_index": [10, 11, 12, 14, 15, 16],
+                "timestamp": pd.date_range("2020-01-01", periods=6, freq="6h"),
+                "lon": np.arange(6, dtype=float),
+                "lat": 0.0,
+            }
+        )
+
+        assert contiguous_run_slices(trajectory) == [(0, 3), (3, 6)]
+
+        windows = iter_windows(trajectory, context_length=2)
+        assert [target_idx for *_rest, target_idx in windows] == [2, 5]
+
+    def test_window_never_uses_gap_as_history_or_target(self):
+        trajectory = pd.DataFrame(
+            {
+                "bin_index": [0, 1, 2, 4, 5, 6],
+                "timestamp": pd.date_range("2020-01-01", periods=6, freq="6h"),
+                "lon": np.arange(6, dtype=float),
+                "lat": 0.0,
+            }
+        )
+
+        windows = iter_windows(trajectory, context_length=2)
+        histories = [history[:, 0].tolist() for history, *_rest in windows]
+        targets = [float(target[0]) for _history, target, *_rest in windows]
+
+        assert histories == [[0.0, 1.0], [3.0, 4.0]]
+        assert targets == [2.0, 5.0]
 
     def test_predictor_protocol(self):
         """A class with a `predict` method satisfies the Predictor protocol."""
