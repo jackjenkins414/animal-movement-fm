@@ -34,6 +34,7 @@ def _segment(seg_id, individual_id, step_km_list, *, start_lat=0.0, lon=0.0):
         {
             "segment_id": seg_id,
             "individual_id": individual_id,
+            "bin_index": np.arange(len(lats)),
             "timestamp": ts,
             "lat": lats,
             "lon": lon,
@@ -125,6 +126,20 @@ def test_short_segment_skipped_and_no_cross_segment_windows():
     # Only the long segment contributes; the short one is dropped, and nothing spans the boundary.
     assert set(sw.meta["segment_id"]) == {"segA"}
     assert len(sw.y) == 4
+
+
+def test_internal_gap_starts_a_new_labelling_and_windowing_run():
+    frame = _fixture()
+    # One missing bin between fixes 2 and 3. With CL=3 the first run is too
+    # short; the second run produces only the target at coarse-segment index 6.
+    frame["bin_index"] = [0, 1, 2, 4, 5, 6, 7]
+
+    sw = build_state_windows(frame, context_length=CL)
+
+    assert len(sw.y) == 1
+    assert list(sw.meta["target_idx"]) == [6]
+    assert list(sw.meta["target_timestamp"]) == [frame["timestamp"].iloc[6]]
+    assert list(sw.y) == [STATE_TO_IDX["settle"]]
 
 
 def test_matches_canonical_labeller():

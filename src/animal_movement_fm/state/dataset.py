@@ -39,6 +39,7 @@ from animal_movement_fm.analysis.regime import (
     label_migratory_launches,
     label_regimes,
 )
+from animal_movement_fm.eval.harness import contiguous_run_slices
 from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
 
 # int. coding of our five refined states; fixed by REFINED_STATES order so it is stable across runs/splits
@@ -145,10 +146,12 @@ def build_state_windows(
     """
     Build the window -> next state dataset from a raw segment frame.
 
-    `frame` is a long segment product with columns [segment_id, individual_id, timestamp, lon, lat] (as
-    `data.benchmark.load_split_frame` returns). It is labelled once with the canonical labeller
-    (`label_regimes` -> `label_migratory_launches`), then windowed per segment so windows never cross a
-    transmission gap, matching the movement harness.
+    `frame` is a long segment product with columns [segment_id, individual_id,
+    bin_index, timestamp, lon, lat] (as `data.benchmark.load_split_frame`
+    returns). Each coarse segment is split into one-bin contiguous runs before
+    labelling and windowing, matching the movement harness. Frames without
+    `bin_index` retain the legacy one-run-per-segment behaviour for synthetic
+    and hand-built tests.
 
     Parameters
     ----------
@@ -165,56 +168,71 @@ def build_state_windows(
         X, integer labels y, a per-window meta frame, the channel names, and the context length.
     """
 
-    # label each fix 
-    labelled = label_migratory_launches(
-        label_regimes(frame, group_col=group_col), group_col=group_col
-    )
     channels = _channel_names(use_time_features, use_season_features)
+    if "bin_index" not in frame.columns:
+        raise ValueError(
+            "build_state_windows requires 'bin_index' so internal cadence gaps "
+            "cannot be treated as contiguous"
+        )
 
     # temp collection lists 
     X_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
     meta_parts: list[pd.DataFrame] = []
 
-    has_individual = "individual_id" in labelled.columns
+    has_individual = "individual_id" in frame.columns
 
-    for seg_id, seg in labelled.groupby(group_col, sort=False):
-        coords = seg[["lon", "lat"]].to_numpy()
-        timestamps = seg["timestamp"].to_numpy()
-        block = _segment_windows(
-            coords, timestamps, context_length, use_time_features, use_season_features
-        )
-        if block is None:
-            continue
-
-        T = len(seg)
-        target_idx = np.arange(context_length, T)  # positional index of the target fix within the segment
-        state = seg["state"].to_numpy()
-        base_regime = seg["base_regime"].to_numpy()
-        bout_net_km = seg["bout_net_km"].to_numpy()
-
-        y_seg = np.array([STATE_TO_IDX[state[t]] for t in target_idx], dtype=np.int64)
-        prev_base = base_regime[target_idx - 1]
-
-        X_parts.append(block)
-        y_parts.append(y_seg)
-        meta_parts.append(
-            pd.DataFrame(
-                {
-                    "segment_id": seg_id,
-                    "individual_id": (
-                        seg["individual_id"].to_numpy()[target_idx]
-                        if has_individual
-                        else np.nan
-                    ),
-                    "target_timestamp": timestamps[target_idx],
-                    "target_idx": target_idx,
-                    "prev_base_regime": prev_base,
-                    "can_launch": prev_base == "foraging",
-                    "bout_net_km": bout_net_km[target_idx],
-                }
+    ordered = frame.sort_values([group_col, "bin_index"]).reset_index(drop=True)
+    for seg_id, coarse_seg in ordered.groupby(group_col, sort=False):
+        coarse_seg = coarse_seg.reset_index(drop=True)
+        for run_start, run_stop in contiguous_run_slices(coarse_seg):
+            if run_stop - run_start <= context_length:
+                continue
+            raw_run = coarse_seg.iloc[run_start:run_stop].copy()
+            labelled = label_migratory_launches(
+                label_regimes(raw_run, group_col=group_col), group_col=group_col
             )
-        )
+            coords = labelled[["lon", "lat"]].to_numpy()
+            timestamps = labelled["timestamp"].to_numpy()
+            block = _segment_windows(
+                coords, timestamps, context_length, use_time_features, use_season_features
+            )
+            # The length guard above guarantees at least one window.
+            assert block is not None
+
+            T = len(labelled)
+            run_target_idx = np.arange(context_length, T)
+            # Keep target_idx in its historical meaning: position inside the
+            # coarse segment, not inside the derived contiguous run.
+            target_idx = run_start + run_target_idx
+            state = labelled["state"].to_numpy()
+            base_regime = labelled["base_regime"].to_numpy()
+            bout_net_km = labelled["bout_net_km"].to_numpy()
+
+            y_seg = np.array(
+                [STATE_TO_IDX[state[t]] for t in run_target_idx], dtype=np.int64
+            )
+            prev_base = base_regime[run_target_idx - 1]
+
+            X_parts.append(block)
+            y_parts.append(y_seg)
+            meta_parts.append(
+                pd.DataFrame(
+                    {
+                        "segment_id": seg_id,
+                        "individual_id": (
+                            labelled["individual_id"].to_numpy()[run_target_idx]
+                            if has_individual
+                            else np.nan
+                        ),
+                        "target_timestamp": timestamps[run_target_idx],
+                        "target_idx": target_idx,
+                        "prev_base_regime": prev_base,
+                        "can_launch": prev_base == "foraging",
+                        "bout_net_km": bout_net_km[run_target_idx],
+                    }
+                )
+            )
 
     if not X_parts:
         empty = np.empty((0, context_length - 1, len(channels)), dtype=float)
