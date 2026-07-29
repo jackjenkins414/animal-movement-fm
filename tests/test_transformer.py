@@ -93,6 +93,7 @@ def _make_seg_df(n_segments=3, n_steps=40, noise=0.02, seed=0):
         frames.append(pd.DataFrame({
             "segment_id": f"s{i}",
             "individual_id": i,
+            "bin_index": np.arange(n_steps),
             "timestamp": pd.date_range("2024-03-01", periods=n_steps, freq="6h"),
             "lon": coords[:, 0],
             "lat": coords[:, 1],

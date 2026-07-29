@@ -24,7 +24,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from animal_movement_fm.analysis.regime import label_migratory_launches, label_regimes
+from animal_movement_fm.analysis.regime import label_contiguous_regimes
 from animal_movement_fm.eval.harness import iter_windows
 from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
 from animal_movement_fm.state.dataset import STATE_TO_IDX
@@ -321,7 +321,7 @@ class LSTM:
                 "use_state_head=True requires a 'segment_id' column to derive next-state labels; "
                 "the segment product provides it."
             )
-        labelled = label_migratory_launches(label_regimes(df))
+        labelled = label_contiguous_regimes(df, refined=True, min_run_length=self.context_length + 1)
         state_by_fix = labelled.set_index(["segment_id", "timestamp"])["state"].map(STATE_TO_IDX)
 
         ss: list[int] = []
