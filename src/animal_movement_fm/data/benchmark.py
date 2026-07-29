@@ -25,8 +25,8 @@ def load_split_frame(
     """
     Load segment rows for a given set of individuals, shaped for the harness.
 
-    Returns a long frame with columns [segment_id, individual_id, timestamp, lon, lat], filtered to `individual_ids` 
-    and sorted so the harness windows each segment in order.
+    Returns a long frame with columns [segment_id, individual_id, bin_index, timestamp, lon, lat], filtered to `individual_ids` 
+    and sorted so the harness can derive one bin contiguous runs within each segment.
     """
 
     con = duckdb.connect()
@@ -35,7 +35,7 @@ def load_split_frame(
     con.register("split_ids", id_df)
 
     frame = con.execute(f"""
-        SELECT s.segment_id, s.individual_id, s.timestamp, s.lon, s.lat
+        SELECT s.segment_id, s.individual_id, s.bin_index, s.timestamp, s.lon, s.lat
         FROM '{segments_parquet}' s
         SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id
         ORDER BY s.segment_id, s.timestamp
