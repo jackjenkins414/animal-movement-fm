@@ -36,6 +36,7 @@ import pandas as pd
 
 from xgboost import XGBRegressor
 
+from animal_movement_fm.eval.harness import iter_windows
 from animal_movement_fm.features.time import day_of_year_sincos, local_solar_sincos
 
 logger = logging.getLogger(__name__)
@@ -415,39 +416,30 @@ class XGBoost:
         y_dlon: list[float] = []
         y_dlat: list[float] = []
 
-        # Group by individual so each trajectory is processed contiguously. sort=False preserves input order; 
+        # group by individual so each trajectory is processed contiguously. sort=False preserves input order; 
         # we don't care about group order here but it makes debugging easier (the first group out is the
         # first individual_id in the input)
         for ind_id, group in df_train.groupby(individual_col, sort=False):
+            if "timestamp" in group.columns:
+                group = group.sort_values("timestamp").reset_index(drop=True)
+                window_group = group
+            else:
+                group = group.reset_index(drop=True)
+                # XGBoost deliberately supports timestamp free synthetic frames; t he shared iterator needs an aligned target token,
+                # so use row position internally; it is never exposed as a time feature because has_timestamps is false
+                window_group = group.assign(timestamp=np.arange(len(group)))
             # Trajectories shorter than n_lags + 1 yield zero windows (n_lags rows for history + 1 row for 
             # target). Skip silently; this is common with irregular real-world data.
             if len(group) < self.n_lags + 1:
                 continue
 
-            # Extract the position array once per group. Doing this inside the loop (not vectorising across
-            # all individuals) is the right trade-off here: it makes per-individual error messages possible
-            # and keeps memory bounded for large datasets
-            positions = group[["lon", "lat"]].to_numpy(dtype=float)
-
-            # Timestamps, if we're using them. Indexed alongside positions
-            timestamps = (
-                group["timestamp"].to_numpy()
-                if has_timestamps
-                else None
-            )
-
-            # Slide windows with stride 1. For a trajectory of length T, this gives T - n_lags target 
-            # steps. Each window's history is positions[i - n_lags : i] and target is positions[i]
-            n = len(positions)
-            for i in range(self.n_lags, n):
-                history = positions[i - self.n_lags : i]
-                target = positions[i]
-
+            # delegate to the same contiguous run iterator as evaluation and the neural rungs. With bin_index present, no feature or target
+            # can cross an internal missing bin
+            for history, target, ts, i in iter_windows(window_group, self.n_lags):
                 # Build features. The timestamp passed in is the target timestamp (the step being predicted), 
                 # matching how _build_features documents it
-                target_ts = (
-                    pd.Timestamp(timestamps[i])
-                    if timestamps is not None
+                target_ts = (pd.Timestamp(ts)
+                    if has_timestamps
                     else None
                 )
                 try:

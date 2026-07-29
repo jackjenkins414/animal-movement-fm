@@ -329,6 +329,27 @@ class TestXGBoostFit:
         # Some INFO log about training size should have been emitted.
         assert any("training on" in rec.message for rec in caplog.records)
 
+    def test_fit_windows_do_not_cross_internal_bin_gap(self, caplog):
+        df = pd.DataFrame(
+            {
+                "individual_id": "one",
+                "bin_index": [0, 1, 2, 4, 5, 6],
+                "timestamp": pd.date_range("2024-01-01", periods=6, freq="6h"),
+                "lon": np.arange(6, dtype=float),
+                "lat": 0.0,
+            }
+        )
+        model = XGBoost(
+            n_lags=2, n_estimators=1, max_depth=1, use_time_features=False
+        )
+
+        with caplog.at_level(logging.INFO, logger="animal_movement_fm.models.xgboost"):
+            model.fit(df)
+
+        # Two three-fix runs each produce one window. The four windows from a
+        # naive six-row slide would include the missing-bin boundary.
+        assert any("training on 2 windows" in rec.message for rec in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Predict
