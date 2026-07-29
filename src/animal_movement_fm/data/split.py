@@ -44,12 +44,10 @@ def window_counts_per_individual(
     segments_parquet,
     context_length: int = 24,
 ) -> pd.DataFrame:
-    """Per-individual window counts, to set the minimum-track threshold before splitting.
+    """Per individual window counts, to set the minimum track threshold before splitting.
 
-    Counts windows exactly as the benchmark will: the harness windower runs per
-    segment (so windows never cross a transmission gap), and counts are summed per
-    individual across its segments. Returns one row per individual_id, sorted ascending
-    so the short-track tail is visible.
+    Counts windows exactly as the benchmark will: the harness windower derives one bin contiguous runs within each 
+    coarse segment, and counts are summed per individual. 
     """
     import duckdb
 
@@ -57,9 +55,9 @@ def window_counts_per_individual(
 
     con = duckdb.connect()
     seg_df = con.execute(f"""
-        SELECT segment_id, individual_id, timestamp, lat, lon
+        SELECT segment_id, individual_id, bin_index, timestamp, lat, lon
         FROM '{segments_parquet}'
-        ORDER BY segment_id, timestamp
+        ORDER BY segment_id, bin_index
     """).df()
 
     counts: dict[int, int] = {}
@@ -86,6 +84,105 @@ class Split:
     train: np.ndarray
     val: np.ndarray
     test: np.ndarray
+
+# GenAI reference: I designed the eligibility policy and began this function; GenAI completed most of the table building implementation.  
+# It was verified with tests covering eligible and excluded individuals, missing count rows, preserved split order, and no reassignment 
+# between frozen splits.
+def split_eligibility_table(
+    split: Split,
+    counts: pd.DataFrame,
+    *,
+    train_min_windows: int = 1,
+    eval_min_windows: int = 100,
+) -> pd.DataFrame:
+    """
+    Audit eligibility without changing a frozen split assignment.
+
+    Training individuals need at least one valid contiguous window because every such window supplies legitimate supervision. Validation and 
+    test individuals need ``eval_min_windows`` because they support per individual estimates and individual level bootstrap inference.
+
+    Individuals are never reassigned or replaced. Missing count rows are treated as zero windows and surfaced in the returned table.
+    """
+    if train_min_windows < 1:
+        raise ValueError("train_min_windows must be >= 1")
+    if eval_min_windows < 1:
+        raise ValueError("eval_min_windows must be >= 1")
+    required = {"individual_id", "n_windows"}
+    missing = required - set(counts.columns)
+    if missing:
+        raise ValueError(f"counts is missing required columns: {sorted(missing)}")
+    if counts["individual_id"].duplicated().any():
+        raise ValueError("counts must contain at most one row per individual_id")
+
+    count_by_id = counts.set_index("individual_id")["n_windows"]
+    rows = []
+    for split_name, ids, minimum in (
+        ("train", split.train, train_min_windows),
+        ("val", split.val, eval_min_windows),
+        ("test", split.test, eval_min_windows),
+    ):
+        for individual_id in ids:
+            iid = int(individual_id)
+            n_windows = int(count_by_id.get(iid, 0))
+            rows.append(
+                {
+                    "individual_id": iid,
+                    "split": split_name,
+                    "n_windows": n_windows,
+                    "min_windows": minimum,
+                    "eligible": n_windows >= minimum,
+                    "reason": (
+                        "eligible"
+                        if n_windows >= minimum
+                        else f"fewer_than_{minimum}_valid_windows"
+                    ),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def apply_window_eligibility(
+    split: Split,
+    counts: pd.DataFrame,
+    *,
+    train_min_windows: int = 1,
+    eval_min_windows: int = 100,
+) -> Split:
+    """
+    Return the eligible subset of a frozen assignment, without reshuffling.
+
+    Array order is preserved. The input ``split`` and its manifest are not modified; excluded individuals simply contribute no training 
+    or evaluation windows and are documented by :func:`split_eligibility_table`.
+    """
+    table = split_eligibility_table(
+        split,
+        counts,
+        train_min_windows=train_min_windows,
+        eval_min_windows=eval_min_windows,
+    )
+
+    eligible_by_split = {
+        name: set(
+            table.loc[
+                (table["split"] == name) & table["eligible"], "individual_id"
+            ].astype(int)
+        )
+        for name in ("train", "val", "test")
+    }
+    return Split(
+        train=np.asarray(
+            [i for i in split.train if int(i) in eligible_by_split["train"]],
+            dtype=np.int64,
+        ),
+        val=np.asarray(
+            [i for i in split.val if int(i) in eligible_by_split["val"]],
+            dtype=np.int64,
+        ),
+        test=np.asarray(
+            [i for i in split.test if int(i) in eligible_by_split["test"]],
+            dtype=np.int64,
+        ),
+    )
 
 
 def make_split(

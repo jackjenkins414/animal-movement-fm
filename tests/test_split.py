@@ -8,7 +8,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from animal_movement_fm.data.split import Split, load_split, make_split, save_split
+from animal_movement_fm.data.split import (
+    Split,
+    apply_window_eligibility,
+    load_split,
+    make_split,
+    save_split,
+    split_eligibility_table,
+    window_counts_per_individual,
+)
 
 
 def _counts(n=200, seed=0, tie_every=3):
@@ -109,3 +117,87 @@ class TestFreeze:
         path.write_text(json.dumps({"train": [1, 2, 3], "val": [3, 4], "test": [5]}))
         with pytest.raises(ValueError):
             load_split(path)
+
+
+class TestContiguousWindowEligibility:
+    def test_window_counts_split_at_internal_gap(self, tmp_path):
+        # Two three-fix runs, context=2: one target from each run. A naive
+        # six-row slide would incorrectly report four windows.
+        frame = pd.DataFrame(
+            {
+                "segment_id": "s1",
+                "individual_id": 7,
+                "bin_index": [0, 1, 2, 4, 5, 6],
+                "timestamp": pd.date_range("2024-01-01", periods=6, freq="6h"),
+                "lat": 0.0,
+                "lon": np.arange(6, dtype=float),
+            }
+        )
+        path = tmp_path / "segments.parquet"
+        frame.to_parquet(path)
+
+        counts = window_counts_per_individual(path, context_length=2)
+
+        assert counts.to_dict("records") == [
+            {"individual_id": 7, "n_windows": 2}
+        ]
+
+    def test_training_and_evaluation_use_different_floors(self):
+        split = Split(
+            train=np.array([1, 2, 3]),
+            val=np.array([4, 5]),
+            test=np.array([6, 7]),
+        )
+        counts = pd.DataFrame(
+            {
+                "individual_id": [1, 2, 3, 4, 5, 6, 7],
+                "n_windows": [0, 1, 99, 99, 100, 100, 101],
+            }
+        )
+
+        eligible = apply_window_eligibility(split, counts)
+
+        assert eligible.train.tolist() == [2, 3]
+        assert eligible.val.tolist() == [5]
+        assert eligible.test.tolist() == [6, 7]
+
+    def test_missing_count_is_zero_and_no_id_is_reassigned(self):
+        split = Split(
+            train=np.array([10, 11]),
+            val=np.array([20]),
+            test=np.array([30]),
+        )
+        counts = pd.DataFrame(
+            {"individual_id": [11, 20, 30], "n_windows": [1, 100, 99]}
+        )
+
+        table = split_eligibility_table(split, counts)
+        eligible = apply_window_eligibility(split, counts)
+
+        missing = table.loc[table["individual_id"] == 10].iloc[0]
+        assert missing["n_windows"] == 0
+        assert not missing["eligible"]
+        assert eligible.train.tolist() == [11]
+        assert eligible.val.tolist() == [20]
+        assert eligible.test.tolist() == []
+        assert set(eligible.train) <= set(split.train)
+        assert set(eligible.val) <= set(split.val)
+        assert set(eligible.test) <= set(split.test)
+
+    def test_eligibility_does_not_mutate_frozen_assignment(self):
+        split = Split(
+            train=np.array([1, 2]),
+            val=np.array([3]),
+            test=np.array([4]),
+        )
+        before = tuple(a.copy() for a in (split.train, split.val, split.test))
+        counts = pd.DataFrame(
+            {"individual_id": [1, 2, 3, 4], "n_windows": [0, 1, 99, 100]}
+        )
+
+        _ = apply_window_eligibility(split, counts)
+
+        for original, current in zip(
+            before, (split.train, split.val, split.test)
+        ):
+            np.testing.assert_array_equal(original, current)
