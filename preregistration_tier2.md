@@ -205,7 +205,7 @@ The previous figure we quoted of 62.6 m corresponded to the reading we are *not*
 
 ### A2; 29-07-2026: modelling windows made fully contiguous; split eligibility clarified
 
-**Status when made:** no Tier 2 model had been trained and no sealed Tier 2 evaluation had been run. The defect was found while auditing the data pipeline before Tier 2. Existing Tier 1 real data results had already been produced, so those results are treated as provisional as of now and will be recomputed; the synthetic ladder is unaffected obviously. 
+**Status when made:** no Tier 2 model had been trained and no sealed Tier 2 evaluation had been run. The defect was found while auditing the data pipeline before Tier 2. Existing Tier 1 real data results had already been produced, so those results are treated as provisional as of now and will be recomputed; the synthetic ladder is unaffected obviously.
 
 **Reason.** The resampler deliberately preserves internal gaps of up to 8 bins inside a coarse `segment_id`. Window construction grouped only by that identifier, so a 24-fix context and its target could silently cross a missing 6-hour bin. The model therefore treated some 12–48-hour displacements as if they were single steps at the shared cadence. On the frozen stork test split, 3,997 of 121,656 targets (3.29%) were not one bin targets and 14,922 windows (12.27%) contained a gap in their history or target.
 
