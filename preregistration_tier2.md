@@ -18,20 +18,20 @@ Thus it is simply a dataset property exploration under that distinction.
 
 We also follow the Adaptive Preregistration approach proposed for ecological model based research by Gould et al. (2026) (DOI: 10.1111/2041-210x.70311), which targets the failure modes most relevant here: *model fishing* (trialling multiple model structures and reporting only the best fitting of those models), *s-hacking* (testing several performance metrics and selectively reporting the favourable ones), and *sample curation* (dropping inconvenient sites or periods). Decisions that can be fixed now are done so here; anything genuinely data dependent is documented in a dated amendment rather than introduced silently after seeing the result.
 
-**Amendment policy.** Adjustments are permitted; silent adjustments however, are not. This follows Hofman et al.'s phase (B) design, whose stated objective is to avoid over constraining the researcher by allowing changes to phase (A), while requiring that those changes be explicitly stated so a reader can judge their impact. Accordingly: any change to this document after it is committed will be recorded in an **Amendments** section appended at the end of this file, with the date, the reason, and the original text quoted verbatim. The first such amendment starts that section; until that point, this document is v1 fully. A change made *after* a sealed test result has been seen must additionally say so explicitly. Changing the success criteria after seeing results, without recording it, would invalidate the the whole purpose of our work here (obviously).
+**Amendment policy.** Adjustments are permitted; silent adjustments are not. Every post commit change is recorded in **Amendments** with its date, reason and status relative to test access. Superseded wording is either quoted there or identified by the exact pre-change commit, whose diff preserves it. And obviously a change made after seeing a sealed result must say so explicitly. Unrecorded changes to success criteria would invalidate the whole purpose of us doing this.
 
 **Correction rule.** If a defect is discovered during or after a sealed evaluation (such as a data bug, a broken metric, a mis-specified split) a correction is permitted **only if it is independent of the direction of the result**, (it would have been made identically had the numbers come out the other way). Such corrections are logged as amendments, with the defect, the fix, and the affected numbers before and after. Changes motivated by the result itself are not corrections and we will not employ them. 
 
 ## 1. The claim under test
 
-A movement forecasting model pretrained on multiple species generalises to a species held out entirely from training, i.e, it beats trivial baselines on that species without ever having seen it.
+A movement forecasting model pretrained on multiple source species generalises zero-shot to a new species: Z beats persistence on that species' sealed test partition without using any of that species' data for Z pretraining or model selection.
 
 **Tier 2 pool: six species, in two fixed and disjoint roles.**
 
 | role | count | composition |
 | --- | --- | --- |
 | **source** | 3 | one per domain: flying, terrestrial, marine. White stork is the flying source (our existing corpus). |
-| **held out** | 3 | one per domain: flying, terrestrial, marine. Never trained on, never tuned on, never inspected until the sealed evaluation. |
+| **held out** | 3 | one per domain: flying, terrestrial, marine. Excluded from Z pretraining and model selection; test targets remain sealed until final evaluation. |
 
 No species does double duty; a source species is never held out, and a held out species is never a source.
 
@@ -41,8 +41,8 @@ No species does double duty; a source species is never held out, and a held out 
 
 Our selection of which species fill which role proceeds through two separate gates, in this order, and they must not be blended:
 
-1. **Eligibility: a data quality filter.** Can the species produce well populated windows at our modelling cadence, at usable individual counts? Applied mechanically to every candidate, before any regime descriptor is inspected.
-2. **Selection: the scientific criterion.** Among eligible species, choose for movement regime coverage as measured by `experiments/data/regime_profile.py`, not by taxonomic convenience. Our reasoning here is that this makes the Tier 2 test a harder and more meaningful question; does the pretrained model transfer across genuinely different forms of movement? 
+1. **Eligibility: a data quality filter.** Applied before regime profiling. A species must retain at least 20 training, 10 validation and 10 test individuals after continuity filtering; training individuals need at least one valid window and validation/test individuals at least 100. Roles are frozen after this filter; a selected species that later becomes unusable is not replaced.
+2. **Selection: the scientific criterion.** Among eligible species, choose one source and one held-out species per domain to maximise movement regime coverage using the fixed descriptors from `experiments/data/regime_profile.py`. Before modelling, commit the candidate table, pairwise descriptor distances, chosen roles and reasons. Ties are resolved by better device/region matching within domain, then larger eligible test count; model performance is never used.
 
 An important note on keeping these separate matters: selecting on cadence feasibility alone would be exactly the convenience driven choice this document is meant to rule out, whereas excluding a species that cannot form windows at all is a precondition, not a preference.
 
@@ -52,15 +52,17 @@ An important note on keeping these separate matters: selecting on cadence feasib
 
 ## 2. Protocol (fixed in advance)
 
-**Outer loop: sealed evaluation on the held out species.** The model is pretrained once on the three source species, then evaluated on each of the three held out species in turn. Each held out species is used for NOTHING except that final evaluation, not model selection, not early stopping, not threshold tuning, not feature decisions.
+**Outer loop: sealed evaluation.** Z is pretrained and selected using source species only, then evaluated on each held-out test partition. Before sealing, test data may undergo only registered model independent ingest, QC and continuity/window count checks. After the manifests and preprocessed data are frozen, test targets and model performance remain unseen until final evaluation. Held-out training/validation data may be used for descriptive selection, the preregistered regime threshold, S and F; they cannot influence Z.
 
-**Domain ablation arm.** To ask separately whether *domain* coverage in the source pool matters, we re-pretrain three further models. Each drops the one source species sharing a domain with a given held out species, and is then evaluated on that held out species only. Comparing Z against Za on the same held out species, with everything else identical, measures what having any data at all from that domain was worth. This is the within versus across domain question asked directly, rather than inferred from a leave one out design that cannot separate it from taxonomic distance.
+**Domain ablation arm.** For each held-out species, Za is Z retrained without the source species from the matching domain and evaluated on that held-out species only. For example, marine Za is trained on the flying and terrestrial sources. Z versus Za tests the value of adding the matching-domain source, although it cannot separate domain coverage from the accompanying increase from two to three source species.
 
-**Inner loop: pseudo targets.** Hyperparameters are selected by holding out one of the three *source* species as a pseudo target, so tuning is against genuine unseen species performance rather than random validation error. The configuration selected this way is then frozen and used for the final pretraining on all three sources, and for every comparator below. **The inner loop is budgeted**: the number of configurations evaluated is bounded in advance and recorded in the pre-test freeze. An unbounded inner loop would let our (researcher) degrees of freedom back in through the side door, since enough pseudo target attempts will eventually select a configuration that happens to suit the outer fold.
+**Inner loop: pseudo targets.** Hyperparameters are selected by holding out each source species in turn as a pseudo target. Before the first tuning run, a committed `preregistration_tier2_tuning.md` will fix the configuration budget, selection metric, rule for combining pseudo target results and tie break. The selected FM configuration is then frozen for Z, Za, S and F; B's conventional architecture and training specification are fixed in the same record. No unregistered configuration may enter the sealed evaluation.
 
 **Leakage controls.**
 
 - Split individuals FIRST, then window. Windowing before splitting leaks near identical 24 fix contexts across train and test. We do already do this, but its stated here because it is the primary leakage mode in this literature.
+- After resampling, construct modelling windows only within runs of occupied bins whose `bin_index` increases by exactly one. The complete context plus target window must therefore be contiguous at the shared modelling cadence; a window cannot cross even a tolerated internal gap within a coarse segment (this was a previous bug we had).
+- Apply the continuity rule to both model training and evaluation. A training individual remains eligible if it contributes at least one valid contiguous window. Validation and test individuals must contribute at least 100 valid contiguous windows because their per individual estimates would otherwise be too noisy. These filters are applied to the already frozen manifest: individuals are never reassigned, replaced or drawn from another split to restore its size.
 - Group by individual, which subsumes deployment, since an individual's deployments cannot be separated by an individual level split.
 - Splits are read from committed manifests (`splits/*.json`), never recomputed.
 - Any QC threshold derived from data (speed quantiles, error calibration) is computed on **train only** or strictly per track. Corpus wide thresholds leak test information into preprocessing.
@@ -69,7 +71,7 @@ An important note on keeping these separate matters: selecting on cadence feasib
 
 ### Final pre-test freeze
 
-After source species training and pseudo target model selection are complete, but before any sealed held out species test result is examined, a second dated record will freeze the final model specification. This is our phase (B) in the sense of Hofman et al. (2023), which separates problem definition from the model specification made immediately before testing.
+After source species training and pseudo target selection, but before any sealed test result is examined, a final dated record will freeze the model specification. This is our phase (B) in the sense of Hofman et al. (2023).
 
 **The freeze is another committed file, `preregistration_tier2_freeze.md`,** which we will commit before the first sealed evaluation is run. It will record:
 
@@ -77,32 +79,32 @@ After source species training and pseudo target model selection are complete, bu
 - selected hyperparameters and the number of inner loop configurations actually evaluated, against the declared budget
 - random seeds and the checkpoint selection rule
 - computational budget consumed
-- **an explicit, dated attestation that the held out species' test partition has not been accessed in any way**: not for exploratory plotting, not for sanity checks, not for
-  debugging. Stated as a claim rather than left implicit, so it is something a reader can hold us to.
+- **an explicit, dated attestation that after the registered mechanical preprocessing and sealing, no held-out test target, plot, prediction or performance result was accessed**
 - any difference from this document, listed item by item
 
 ## 3. Metrics (fixed in advance)
 
 Our primary error is **great circle (geodesic) error in metres** on the held out species' test windows, reported as **median, p90, p99**; recall we found heavy right skew makes the mean uninformative.
 
-Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, on tracks resampled to the common modelling cadence. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 62.6 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 30.8% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If the implementation and this text ever disagree, this text governs (if we encounter a bug for example).
+Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, over steps spanning **exactly one bin** of our common modelling cadence after resampling. Requiring exactly one bin matters since segments tolerate internal gaps of up to 8 bins, and those longer steps are systematically larger, so admitting them inflates the median and loosens the threshold. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 60.9 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 31.1% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If our implementation and this text ever disagree, this text governs (if we encounter a bug for example).
 
 We will also report:
 
 - **persistence skill** = 1 − model_error / persistence_error, per regime and per species
-- **ADE / FDE** for comparability with the trajectory forecasting literature
-- **paired bootstrap confidence intervals over individuals**, not over windows (windows within an individual are strongly correlated, so window level intervals are far too narrow)
+- **paired 95% percentile bootstrap intervals**, using 2,000 resamples of test individuals with replacement and seed 42; paired models use the same resamples
+
+The forecast is one step, so ADE and FDE both equal the geodesic error and are not reported as separate metrics. For trained models, the headline metric is the median across the fixed training seeds. "Beats" means a strictly lower headline point estimate; confidence intervals and seed spread are reported but do not create a second pass/fail rule.
 
 **Comparators.**
 
 | Symbol | Model |
 | --- | --- |
 | P | persistence: predict no movement |
-| Z | zero-shot: pretrained on all **three source species**, never saw the held out species |
-| Za | zero-shot, domain ablated: pretrained on only **two** source species, dropping the one that shares a domain with this held out species. Everything else identical to Z. Z versus Za isolates the value of domain coverage in the source pool. |
-| B | pooled source baseline: the same architecture trained on the pooled source species with **no** metadata/trait conditioning and no cross-species machinery, i.e, Z stripped of everything the FM framing claims to contribute. Isolates whether any transfer is attributable to the FM design rather than to simply having seen more movement data. |
-| S | specialist: the same architecture and frozen configuration as Z, but trained only on the held out species' own training individuals. An oracle upper bound, not a target to beat. Defined precisely below. |
-| F | fine-tuned: Z, further trained on a fixed fraction of the held out species' training individuals. Reported as a curve over fractions rather than as a single number. Defined precisely below. |
+| Z | zero-shot: the full FM, pretrained on all three source species and evaluated unchanged on a species completely unseen by Z. Tests whether knowledge transfers across species. |
+| Za | domain-ablated zero-shot: Z retrained without the source species matching the held-out species' domain. Tests the value of adding matched-domain source data. |
+| B | pooled-source baseline: trained on the same source pool as Z but stripped of the FM-specific package (like pretraining objective, species conditioning and specialised architecture)|
+| S | specialist: the same architecture and frozen configuration as Z, trained only on the held-out species' own training individuals. An oracle target species benchmark. Defined precisely below. |
+| F | fine-tuned: Z further trained on 1%, 10% or 100% of the held-out species' training individuals. Measures how target data changes the value of pretraining. Defined precisely below. |
 
 ### On the specialist (S)
 
@@ -111,7 +113,7 @@ The 25% threshold in Section 4 is defined against S, so leaving S vague would le
 - **Architecture and configuration.** S uses the same architecture and the same frozen configuration as Z, taken from the pre-test freeze. The only thing that differs between Z and S is the data each was trained on, so any gap between them is attributable to training data rather than to model capacity or tuning effort.
 - **Training data.** Only the held out species' own training individuals, read from that species' frozen split manifest. Never the test partition.
 - **Seeds.** The same number of training seeds as Z, so the comparison does not inherit some variance asymmetry.
-- **Tuning privilege, stated openly.** S is allowed to early stop and select checkpoints on a validation split of the held out species' *training* individuals. Z structurally cannot do this, because for Z that species does not exist during training. The asymmetry is deliberate and is exactly what makes S an oracle: the Z versus S number is an upper bound on what having the target species' data buys us, not a like for like contest. We are not tuning per species hyperparameters for S, because the configuration is frozen in the inner loop against pseudo targets, and giving S its own tuning budget would stack an architecture and tuning confound on top of the data difference we actually want to measure.
+- **Tuning privilege, stated openly.** S may early stop and select checkpoints on the held-out species' validation individuals. Z cannot. This deliberate advantage makes S an oracle style target species benchmark, although not a guaranteed mathematical upper bound. S receives no species specific hyperparameter search; its configuration was frozen in the source-only inner loop.
 
 ### Fine-tuning (F), and why it is here
 
@@ -122,7 +124,7 @@ Tier 2 as originally written tested zero-shot only, but one of the things we are
 - **Repeat draws at the low end.** At small k the subset is tiny in absolute terms (1% of the stork's 630 training individuals is 6 birds, and fewer on the other two species), so *which* animals are drawn will move the result more than the fine-tuning does. We therefore run **three independent draws at k = 1% and three at k = 10%**, and a single run at k = 100% since there is nothing left to vary. That totals to 7 fine-tuning runs per held out species.
 - **Floor on subset size.** A fraction must yield at least **5 individuals**; where it does not, we use 5. Otherwise "1%" on a species with few training individuals is two or three animals and the label claims more than the data supports. The realised individual count and window count are reported alongside every k, since the same fraction means different absolute amounts of data on each species.
 - **Sampling and nesting.** Sampling is by *individual*, never by window, drawn from that species' frozen split manifest with a fixed seed per draw. Each draw is nested: its 1% subset sits inside its 10% subset, which sits inside the full training set. This makes the comparison across k *within* a draw paired rather than independent, so the curve is not confounded by subset composition changing between points.
-- **Configuration.** The same architecture and frozen configuration as Z and S; the fine-tuning budget (epochs, learning rate schedule etc) is declared in our pre-test freeze. F may early stop on a validation split of the held out species' training individuals, on the same terms as S, so that F and S remain directly comparable.
+- **Configuration.** The same architecture and frozen configuration as Z and S; the fine-tuning budget (epochs, learning rate schedule etc) is declared in our pre-test freeze. F may early stop on the held-out species' validation individuals, on the same terms as S, so that F and S remain directly comparable.
 - **Sealing is unaffected.** F touches training individuals only. The held out species' test partition stays sealed for every model in this document.
 - **Reporting.** A curve of travel regime p90 against k, per held out species, with Z as the k = 0 point and S as the asymptote. At k = 1% and k = 10% we report the **spread across the three draws** (median and range) rather than a single number, because a point estimate at those subset sizes would not be interpretable. This spread is a different quantity from the paired bootstrap intervals in Section 3: those resample *test* individuals, whereas the draw spread measures sensitivity to which *training* animals happened to be selected.
 
@@ -132,16 +134,15 @@ The comparison doing the most work here is **F_100 against S**: both see all of 
 
 ## 4. Success bands
 
-We also declare these in advance. "Travel regime" means steps at or above the stationary threshold defined above; the regime where forecasting is scientifically interesting and where persistence is not optimal by construction.
+We apply these bands in order: Strong first, then Acceptable; every remaining result is Weak/Null. "Travel regime" means steps at or above the stationary threshold defined above. Pooled performance cannot elevate a result that fails the species-specific travel criteria.
 
 **STRONG.** For **every** held out species: Z beats P on travel regime p90 **and** p99 (persistence skill > 0 on both), and Z is within 25% of the specialist on travel regime p90; which we can state as follows to remove ambiguity:
 
     p90_travel(Z)  <=  1.25 x p90_travel(S)
 
-**ACCEPTABLE.** Z beats P on travel regime p90 for **all three** held out species with a consistent sign, and `p90_travel(Z) < p90_travel(B)` for all three; Z may trail S by more
-than 25%.
+**ACCEPTABLE.** If Strong is not met, Z beats P and B on travel regime p90 for **all three** held-out species. Z may fail on p99 or trail S by more than 25%.
 
-**WEAK / NULL.** Z beats P only on pooled metrics but not on travel regime metrics, **or** the sign of the effect is inconsistent across held out species.
+**WEAK / NULL.** Every other result, including improvement only on pooled metrics or inconsistent travel effects across species.
 
 A WEAK outcome will be reported as a null result with its mechanism, in the same form as our Rung 2 state head null. A null here is informative because it would say that movement primitives do not transfer across taxa at this cadence and data scale...
 
@@ -161,21 +162,72 @@ A WEAK outcome will be reported as a null result with its mechanism, in the same
 2. **Transfer will be uneven across the three held out species**, tracking regime distance from the source pool as measured by `regime_profile.py`, rather than being uniform.
 3. **Persistence remains hard to beat on stationary steps** for every species. Zero-shot gains, if any, will be concentrated in the travel regime.
 4. **Pretraining helps even when the held out species' full training data is available.** F_100 beats S on travel regime p90 for at least two of the three held out species. If instead F_100 is indistinguishable from S everywhere, then pretraining contributes nothing beyond initialisation once target data exists and its value is confined to the low data regime, which is a reportable result rather than a failure. If F_100 is consistently *worse* than S, that is negative transfer, which the literature reports is common, and we will report it as such rather than bury it.
-5. **Domain coverage in the source pool matters more than source pool size.** Z beats Za on travel regime p90 for at least two of the three held out species, i.e, dropping the same domain hurts more than dropping one species' worth of data would on its own. If Z and Za are indistinguishable, then what transfers is generic movement structure rather than anything domain specific, which would be a genuinely interesting null and would also predict that Tier 3's gains come from sheer species count rather than from stratified domain coverage.
+5. **Adding a matching domain source helps.** Z beats Za on travel p90 for at least two of the three held-out species. Because Z also has one more source species, this supports the value of the matched domain addition but does not isolate domain coverage from source-pool size.
 
 ## 6. Declared limitations (stated before results, not after)
 
 - **n = 3 held out species.** Six species are involved but only three are ever evaluated, so this remains an existence proof rather than a transfer study. It is too few for the transfer matrix and negative transfer auditing the literature recommends; those need Tier 3 scale. So no claim of general cross-taxa transfer will be made from three held out species.
 - **Source and held out roles are disjoint, which is deliberate but costly.** Six species of ingest and QC buy three sealed results, where leave one out would have bought three from three. We accept that cost for the domain coverage and the fixed held out set. The consequence is that there is no rotation available: if a held out species turns out to be unusable after ingest, that result is lost rather than recoverable by reassignment, so the better quality data should sit on the held out side.
 - **The fixed held out set propagates.** Because the same three species are carried into Tier 3, any way in which they are unrepresentative is inherited by both tiers rather than averaged out across them. The scaling comparison is clean precisely because the test set does not change, and that is the same reason a poor choice of test species cannot be corrected later without breaking the comparison.
-- **The domain ablation is n = 1 per domain.** Z versus Za is a single paired comparison for each of the three domains, so it can indicate a direction but cannot resolve a small effect. It is registered as a secondary prediction, not a success criterion.
+- **The domain ablation is n = 1 per domain and changes pool size.** Z versus Za gives one comparison per domain and changes the source pool from two species to three. It tests the value of adding the matched domain source, not a pure domain effect, and remains a secondary prediction.
 - **Single data split** per species (frozen manifests) and a small number of training seeds; effects smaller than our seed spread measured in the 22-07-2026 multi-seed sweep will not be treated as resolved.
 - **Confounded taxon and technology.** The marine species are Argos while the others are GPS, so "marine" and "different error model" cannot be fully separated. With two marine species this confound now sits on both sides of the marine pair, which is why the pairing rule in Section 1 asks for the difference to be recorded per pair.
 - Tier 1 results were computed in degree space; Tier 2 will use local ENU metres (currently in progress right now). The two are bridged by an explicit representation ablation rather than assumed comparable.
 
 ### Versioning and reporting
 
-This document and the pre-test freeze are version controlled in the thesis repository, so each revision carries a commit timestamp independent of any date written inside the file. As we stated, amendments are appended to this file rather than overwriting the text they revise, so the superseded wording stays readable and our git history shows when each change was made. Our final thesis report will state which analyses were preregistered, identify any deviations, and give the reason for each one (which is the point of our exercise here), since a preregistration that is never compared against the realised path does no work.
+This document and the pre-test freeze are version controlled. Operative sections are kept current, while each amendment preserves the superseded wording and records the date and reason. The final report will identify preregistered analyses and every deviation.
+
+## Amendments
+
+Appended in order. Each entry gives the date, reason, test-access status and either the superseded wording or its exact commit.
+
+### A1; 28-07-2026: stationary threshold definition disambiguated, stork figures corrected
+
+**Status when made:** no Tier 2 model had been trained and no sealed evaluation had been run, so this is a correction under our outlined rules above rather than a change of criteria. It is independent of the direction of any result, because no result exists.
+
+**Reason.** We previously worded that the median step is computed "on tracks resampled to the common modelling cadence", which is somewhat ambiguous. Resampled segments tolerate internal gaps of up to 8 bins, so "a step in a resampled track" could mean any consecutive pair within a segment, or only pairs spanning exactly one bin. The two readings give different answers, and the multi bin steps are systematically longer, so admitting them inflates the median and loosens the threshold:
+
+| reading | steps used | median step | 10% threshold | stationary fraction |
+| --- | ---: | ---: | ---: | ---: |
+| any consecutive pair in a segment | 916,002 | 625.9 m | 62.6 m | 30.8% |
+| exactly one bin apart | 879,559 | 609.5 m | 60.9 m | 31.1% |
+
+(white stork, training individuals only, frozen manifest `splits/stork_split_seed42.json`)
+
+The previous figure we quoted of 62.6 m corresponded to the reading we are *not* implementing. Left uncorrected, `regime_profile.py` would have produced 60.9 m against a document asserting 62.6 m, and since this text governs the implementation, the implementation would have been deemed wrong for computing the intended quantity. The exactly one-bin reading is also the correct one on its merits, since a step spanning three bins is not a step at the modelling cadence.
+
+**Superseded text:**
+
+> Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, on tracks resampled to the common modelling cadence. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 62.6 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 30.8% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If the implementation and this text ever disagree, this text governs (if we encounter a bug for example).
+
+**What changed.** The definition now specifies steps spanning exactly one bin, with a sentence explaining why that matters; the stork figures are updated from 62.6 m / 30.8% to 60.9 m / 31.1%. Nothing else in Section 3 changed, and no metric, comparator, success band or secondary prediction was altered.
+
+### A2; 29-07-2026: modelling windows made fully contiguous; split eligibility clarified
+
+**Status when made:** no Tier 2 model had been trained and no sealed Tier 2 evaluation had been run. The defect was found while auditing the data pipeline before Tier 2. Existing Tier 1 real data results had already been produced, so those results are treated as provisional as of now and will be recomputed; the synthetic ladder is unaffected obviously. 
+
+**Reason.** The resampler deliberately preserves internal gaps of up to 8 bins inside a coarse `segment_id`. Window construction grouped only by that identifier, so a 24-fix context and its target could silently cross a missing 6-hour bin. The model therefore treated some 12–48-hour displacements as if they were single steps at the shared cadence. On the frozen stork test split, 3,997 of 121,656 targets (3.29%) were not one bin targets and 14,922 windows (12.27%) contained a gap in their history or target.
+
+The correction preserves each coarse segment but derives contiguous runs within it, splitting whenever `diff(bin_index) != 1`, and constructs windows only inside those runs. This is applied structurally to training, evaluation and state datasets. The frozen manifest remains authoritative: it is not regenerated or refilled after corrected counts are known. Training requires at least one valid contiguous window because any such window supplies valid supervision; validation and test retain the 100 window floor because it protects the stability of per-individual evaluation estimates.
+
+Under the corrected rule, the frozen stork manifest contains 625 of 630 eligible training individuals, 100 of 105 eligible validation individuals, and 91 of 105 eligible test individuals, contributing 774,627, 139,714 and 105,862 windows respectively.
+
+**Superseded text:**
+
+> - Split individuals FIRST, then window. Windowing before splitting leaks near identical 24 fix contexts across train and test. We do already do this, but its stated here because it is the primary leakage mode in this literature.
+> - Group by individual, which subsumes deployment, since an individual's deployments cannot be separated by an individual level split.
+> - Splits are read from committed manifests (`splits/*.json`), never recomputed.
+
+**What changed.** The leakage controls now require complete one bin continuity across every context + target window, apply the rule to both training and evaluation, distinguish training inclusion from evaluation eligibility, and state explicitly that the frozen split is filtered rather than recomputed or replenished. This correction does not alter the Tier 2 species roles, models, metrics, comparators, success bands or regime-threshold rule.
+
+### A3; 03-08-2026: Tier 2 decision rules completed
+
+**Status when made:** no Tier 2 model had been trained and no sealed test result had been accessed.
+
+**Reason.** Our original protocol left several choices open: it conflated a held-out species with its sealed test partition, did not fix species level eligibility or the pre-tuning decision record, left B ambiguous, left some outcomes outside the success bands, did not state how seeds determined "beats", and overstated what Z versus Za isolates. These are now fixed.
+
+**Superseded wording:** the affected certain parts of of Sections 1–6 and the amendment policy are preserved in the previous commit to this file (add that later). A1 and A2 above separately govern the regime threshold and continuity corrections.
 
 ## GenAI Reference 
 
