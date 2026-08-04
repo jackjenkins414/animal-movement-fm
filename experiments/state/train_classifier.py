@@ -1,8 +1,8 @@
-# GenAI reference: I specified the whole design (window->next-state target, XGBoost on the flattened 6-channel window
-# plus momentum summaries derived from the same window, balanced weights, and the exact metric set: per-class
-# precision/recall + one-vs-rest PR-AUC with migratory_launch as headline, and the can_launch foraging-ending hard
-# slice). GenAI helped write the featurisation vectorisation, the metric printing and the JSON dump. Verified by a
-# smoke run whose window counts / class prevalences match state_composition.py and the dataset builder's own numbers.
+# GenAI reference: I specified the full design, from predicting the next state from each window using XGBoost with 
+# the flattened 6 channel input and momentum summaries, balanced class weights, per class precision and recall, one 
+# vs rest PR-AUC with migratory_launch as the headline metric, and the can_launch subset of foraging ending windows. 
+# GenAI helped vectorise the features, format the metrics, and write the JSON output. I verified the implementation 
+# with a smoke run whose window counts and class prevalences matched state_composition.py and the dataset builder.
 """
 State classifier: forecast the next movement state from a 24-fix window (Part B).
 
