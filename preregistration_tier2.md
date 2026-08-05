@@ -86,7 +86,11 @@ After source species training and pseudo target selection, but before any sealed
 
 Our primary error is **great circle (geodesic) error in metres** on the held out species' test windows, reported as **median, p90, p99**; recall we found heavy right skew makes the mean uninformative.
 
-Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, over steps spanning **exactly one bin** of our common modelling cadence after resampling. Requiring exactly one bin matters since segments tolerate internal gaps of up to 8 bins, and those longer steps are systematically larger, so admitting them inflates the median and loosens the threshold. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 60.9 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 31.1% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If our implementation and this text ever disagree, this text governs (if we encounter a bug for example).
+Reported **stratified by regime**, where the regime boundary is scale free and species specific. The two strata are called **low displacement** and **travel**; they are a measurement boundary on step length, not a claim about biological stationarity or behavioural state.
+
+The boundary is a **single universal formula** applied identically to every species, with the anchoring quantile selected mechanically by the decision tree registered in **Amendment A4**. The default rule is `0.10 × p50`, where p50 is the median step of that species' training individuals over steps spanning **exactly one bin** of our common modelling cadence after resampling. Requiring exactly one bin matters since segments tolerate internal gaps of up to 8 bins, and those longer steps are systematically larger, so admitting them inflates the median and loosens the threshold. If the registered guards fire, the anchor moves to p75 and then p90 **for every species at once**; the data may select the anchor, but it may never select a different formula per species. On white stork's training individuals the default rule gives a boundary of 60.9 m against the 60 m hysteresis cut we used in Tier 1, and a low displacement fraction of 31.1% against the ~33% derived independently there. `regime_profile.py` implements this and will give the production figure. If our implementation and this text ever disagree, this text governs (if we encounter a bug for example).
+
+For Argos derived species the low displacement class may quite possibly reflect the observation error floor rather than genuine near immobility. Because this result may arise almost automatically from Argos measurement error in the marine data, Secondary Prediction 3 will be treated as a methodological limitation rather than evidence of genuine biological behaviour.
 
 We will also report:
 
@@ -228,6 +232,31 @@ Under the corrected rule, the frozen stork manifest contains 625 of 630 eligible
 **Reason.** Our original protocol left several choices open: it conflated a held-out species with its sealed test partition, did not fix species level eligibility or the pre-tuning decision record, left B ambiguous, left some outcomes outside the success bands, did not state how seeds determined "beats", and overstated what Z versus Za isolates. These are now fixed.
 
 **Superseded wording:** the affected certain parts of of Sections 1–6 and the amendment policy are preserved in the previous commit to this file (add that later). A1 and A2 above separately govern the regime threshold and continuity corrections.
+
+### A4; 03-08-2026: the low displacement boundary is made robust to its anchor
+
+**Status when made:** no Tier 2 model has been trained, no sealed test partition has been accessed, and **no candidate species has been profiled**. No per-species segments file exists other than white stork's, and `results/regime_profiles.csv` holds no candidate row. The procedure below is therefore registered before any distribution that could influence its outcome has been seen.
+
+**Reason.** The registered `0.10 × p50` rule is reproducible, but it is anchored on the median and the anchor is what fails. Where a species spends most of its time below the cadence's detection scale, the median itself falls inside the low displacement mode and the rule *inverts*: a species that is genuinely ~80% low displacement scores ~5.6%. The defect is in the anchor, not the constant, so a 5/10/20% sensitivity band does **not** detect it; all three multipliers return the same broken answer. A fallback must therefore move the **quantile**. It is registered now because once candidate distributions are visible, choosing an anchor is choosing a result.
+
+**The registered procedure.**
+
+1. Profile every mechanically eligible candidate on **training individuals only**, over steps spanning **exactly one bin**: p50, p75, p90; the `0.10 × p50` boundary and the fraction below it; and, where supported, a two component lognormal mixture crossing and the fraction below it.
+2. A mixture is **supported** only with all of: at least 100 one bin steps; a converged fit; at least 5% weight in each component; a density crossing strictly between the component means; and BIC at least 10 lower than a one component lognormal. Otherwise it is reported unavailable and its guard is not applied; an unsupported mixture is not evidence either way.
+3. **Retain `0.10 × p50` for every species** if every candidate has **< 45.0%** of steps below its own boundary, **and** no supported mixture places its p50 inside the low component (`p50 <= crossing`).
+4. **Otherwise move every species to a p75 anchor**, with the multiplier fixed from the stork training distribution so the stork boundary is unchanged at 60.9 m: `c75 = 60.9 m / p75_stork`, shared rule `c75 × p75_species`. Calibrating on stork keeps Tier 1 and Tier 2 numerically comparable and leaves no freedom in the constant.
+5. **If any supported mixture still places p75 inside the low component, move every species to p90** the same way: `c90 = 60.9 m / p90_stork`, shared rule `c90 × p90_species`.
+6. **If a supported mixture places even p90 inside the low component for a species**, we do not invent a higher quantile and do not give that species its own rule. It is reported **pooled only**, recorded as having no defensible registered split.
+
+Whichever branch fires applies **once, across all species**. The data select the anchoring quantile; they cannot select a per species formula, and no species is dropped for being inconvenient. The mixture crossing stays a diagnostic and is never the evaluation boundary, since a per species fitted boundary would make the reported strata depend on a fit whose quality varies between species.
+
+**Terminology.** The strata are renamed "stationary" and "travelling" to **low displacement** and **travel**. The old names asserted a behavioural interpretation a step length threshold cannot carry, especially on Argos data where short steps are substantially observation error. The boundary is computed identically; only the name changes.
+
+**Superseded text (Section 3, as committed at `0bcce60`):**
+
+> Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, over steps spanning **exactly one bin** of our common modelling cadence after resampling. Requiring exactly one bin matters since segments tolerate internal gaps of up to 8 bins, and those longer steps are systematically larger, so admitting them inflates the median and loosens the threshold. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 60.9 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 31.1% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If our implementation and this text ever disagree, this text governs (if we encounter a bug for example).
+
+**What changed.** Section 3 now states the boundary as one universal formula whose anchoring quantile is chosen by the procedure above, uses the new stratum names, and carries the Argos limitation. The stork figures (60.9 m, 31.1%) are unchanged and the default branch is the rule already registered, so if no guard fires the evaluation is unaffected. No metric, comparator, success band, species role or secondary prediction is altered.
 
 ## GenAI Reference 
 
