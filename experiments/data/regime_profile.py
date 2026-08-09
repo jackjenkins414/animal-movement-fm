@@ -5,24 +5,24 @@
 """
 Create a movement regime profile for one species.
 
-Our profile summarises movement characteristics used to compare candidate species and support selection for cross-domain 
-pretraining. All calculations, including the low displacement boundary, are implemented in 
+Our profile summarises movement characteristics used to compare candidate species and support selection for cross-domain
+pretraining. All calculations, including the low displacement boundary, are implemented in
 `animal_movement_fm.analysis.regime_profile`.
 
 Why this exists
 ---------------
-Cross-domain pretraining benefits come from covering distinct MOVEMENT REGIMES, not from taxonomic count: adding a second 
-soaring migrant  teaches a model much less than adding a benthic diver or a resident grazer. Without measurement, "we 
+Cross-domain pretraining benefits come from covering distinct MOVEMENT REGIMES, not from taxonomic count: adding a second
+soaring migrant  teaches a model much less than adding a benthic diver or a resident grazer. Without measurement, "we
 chose species that span the movement  space" is an assertion. This script turns it into a table.
 
 What it does NOT do
 -------------------
-It never fits a forecasting model or touches a prediction target. The two component lognormal fit is only a distributional 
-diagnostic on training individual step lengths. Under the exploration/modelling line drawn by Hofman et al. (2023), this is 
+It never fits a forecasting model or touches a prediction target. The two component lognormal fit is only a distributional
+diagnostic on training individual step lengths. Under the exploration/modelling line drawn by Hofman et al. (2023), this is
 dataset property exploration.
 
-It also does not decide eligibility: that mechanical gate is applied first, and only survivors are profiled. And it does not 
-choose a boundary formula opportunistically. With `--decide-threshold` it applies the decision tree registered in our 
+It also does not decide eligibility: that mechanical gate is applied first, and only survivors are profiled. And it does not
+choose a boundary formula opportunistically. With `--decide-threshold` it applies the decision tree registered in our
 preregistration amendment A4.
 
 Usage
@@ -38,8 +38,8 @@ Usage
         --segments data/raw/elephant_seal_sample.parquet --name southern_elephant_seal \\
         --domain marine
 
-Appends to `results/regime_profiles.csv` and prints the accumulated comparison. Once every eligible candidate has a training only 
-row, pass `--decide-threshold` to apply the registered tree and write `results/regime_threshold_decision.json` plus the frozen 
+Appends to `results/regime_profiles.csv` and prints the accumulated comparison. Once every eligible candidate has a training only
+row, pass `--decide-threshold` to apply the registered tree and write `results/regime_threshold_decision.json` plus the frozen
 descriptor standardisation.
 """
 
