@@ -12,7 +12,7 @@ pretraining. All calculations, including the low displacement boundary, are impl
 Why this exists
 ---------------
 Cross-domain pretraining benefits come from covering distinct MOVEMENT REGIMES, not from taxonomic count: adding a second
-soaring migrant  teaches a model much less than adding a benthic diver or a resident grazer. Without measurement, "we
+soaring migrant teaches a model much less than adding a benthic diver or a resident grazer. Without measurement, "we
 chose species that span the movement  space" is an assertion. This script turns it into a table.
 
 What it does NOT do
