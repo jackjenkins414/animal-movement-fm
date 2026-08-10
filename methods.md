@@ -619,3 +619,35 @@ The three experiments now form a fairly clear argument. State is highly predicta
 The main conclusion is that the regime split probably belongs in the OUTPUT DISTRIBUTION rather than in the architecture. A more suitable design perhaps would be(we will explore this later) a Bernoulli "will it move" gate multiplied by a heavy tailed displacement density, such as a bivariate Student-t. This would allow the model to emit no movement as a discrete decision rather than only approaching zero continuously.
 
 That design would also be label free and therefore more species general. By contrast, our supervised 5 expert gate depends on `analysis/regime.py`, whose 60 m hysteresis cut and 37 km migratory threshold are white stork constants and do not transfer across species. For that reason, the MoE architecture will be reported as a Tier 1 result but will NOT be carried into the multi species tiers. The finding will be carried forward instead.
+
+## 10-08-2026: Context length 24 vs 12, and why a 1% tail cost buys the marine leg
+
+Our preregistration amendment A6 shortens the context from 24 history bins to 12. Here records the ablation behind it.
+
+**Why the question arose.** Windows per individual are sum over maximal contiguous runs of $max(0, L − C)$, so the context length is subtracted **once per contiguous run** rather than once per individual. That distinction is invisible on white stork, whose tracks are long and near continuous at 6h. But on our fragmented marine tracks, this was a big issue. Halving C multiplies usable windows by 1.04x for stork but 1.70x for SOES, 1.57x for NES, 1.80x for Adelie penguin and 2.62x for Weddell seal. It is the largest data lever available without changing the 6h cadence or moving to some form of $Delta$ taware model; both of which are beyond our timeframe as of now. 
+
+That framing is also exactly why the ablation needed a rule fixed in advance. "Shorten the context until the marine species become eligible" is a convenience driven choice dressed as a methods decision, and it is indistinguishable from the honest version after the fact. So the decision metric, the tolerance and the action under each outcome were written into `experiments/reporting/context_ablation.py` and committed at `491320d` before the C=12 runs were read. The script records the rule as `rule_set_before_reading` and writes the verdict, the per architecture pass flags and the consequent action to `results/context_ablation/decision.json` mechanically, so the verdict is not something we decide after results are viewed. 
+
+**Design.** The C=12 cells were run as indices 30–39 of the existing multiseed PBS array, on the `time_season` covariate cell, both architectures, 5 seeds each, against the frozen manifest `splits/stork_split_seed42.json`. Every C=24 target is also a C=12 target, because shortening the context can only add eligible windows at the start of a run and never remove one. The comparison is therefore **paired**; `c12_paired` scores the C=12 model on the C=24 target set and inherits the C=24 regime labels, and that arm is the decision number. Inheriting the labels matters because `tag_regime` is hysteretic, so relabelling on the C=12 frame would let the regime assignment itself shift and confound the comparison. `c12_native` is reported alongside as the arm on its own larger eligible set, and the script hard fails if any C=24 target is absent from the C=12 run, which is the coherence guard that the two arms really did read the same manifest.
+
+**Registered rule.** Preserved if and only if `|p99(c12_paired) − p99(c24)| $\leq$ 2 x pooled seed sd` on the moving regime, for **both** architectures.
+
+**Result.** Moving regime, test split, mean across 5 seeds with seed sd in parentheses:
+
+| arch | metric | C=24 | C=12 paired | change |
+| --- | --- | ---: | ---: | ---: |
+| LSTM | mean | 10.303 (0.098) km | 10.245 (0.048) km | −0.56% |
+| | median | 2.465 (0.116) km | 2.246 (0.041) km | −8.89% |
+| | p90 | 26.705 (0.344) km | 26.795 (0.318) km | +0.34% |
+| | p99 | 121.839 (0.791) km | 123.299 (0.569) km | +1.20% |
+| Transformer | mean | 9.495 (0.013) km | 9.483 (0.029) km | −0.13% |
+| | median | 1.924 (0.012) km | 1.922 (0.014) km | −0.09% |
+| | p90 | 25.658 (0.201) km | 25.612 (0.161) km | −0.18% |
+| | p99 | 114.875 (0.667) km | 115.770 (0.781) km | +0.78% |
+
+LSTM p99 rose 1.46 km against a 1.9 km tolerance; Transformer p99 rose 0.90 km against 2.1 km. Both pass, so our verdict was PRESERVED and the registered action fires; register C=12 as an amendment, and rebuild Tier 2 eligibility at C=12.
+
+**What the numbers actually say, which is less than "C=12 is better".** Both p99 deltas are positive. The registered rule asks only that the tail be preserved within tolerance, and it is, so the correct phrasing is then *statistically indistinguishable*, not *improved*. The cost is roughly a 1% increase confined to the extreme tail; the LSTM median improves 8.89%, which is a larger proportional move but lands in a different part of the distribution, and the two do not net against one another. What we bought is not skill, it is windows...
+
+**The assumption this leaves open.** The ablation is white stork only. The species that stand to gain most from a shorter context, like SOES, NES, Adelie penguin, Weddell seal, are precisely the ones not in it, and their tracks differ from stork in the exact property the context length interacts with. A model with 12 bins of history on a fragmented run has both less history and, relatively, more of its windows near a run boundary. That C=12 preserves tail skill on stork is a result; that it does so on fragmented marine tracks is an assumption, and A6 declares it as one rather than reporting it as established.
+
