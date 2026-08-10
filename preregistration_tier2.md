@@ -41,7 +41,7 @@ No species does double duty; a source species is never held out, and a held out 
 
 Our selection of which species fill which role proceeds through two separate gates, in this order, and they must not be blended:
 
-1. **Eligibility: a data quality filter.** Applied before regime profiling. A species must retain at least 20 training, 10 validation and 10 test individuals after continuity filtering; training individuals need at least one valid window and validation/test individuals at least F, the evaluation window floor fixed at 25 by Amendment A5 as of right now. Roles are frozen after this filter; a selected species that later becomes unusable is not replaced.
+1. **Eligibility: a data quality filter.** Applied before regime profiling. Splitting is **split-specific**, fixed by Amendment A7: validation and test individuals are drawn from the pool clearing the evaluation window floor F, set to 25 by Amendment A5, and every remaining individual holding at least one valid window goes to training. A species is eligible if that pool holds at least 20 individuals and at least 40 hold at least one valid window, which yields the required 20 training, 10 validation and 10 test individuals. Roles are frozen after this filter; a selected species that later becomes unusable is not replaced.
 2. **Selection: the scientific criterion.** Among eligible species, choose one source and one held-out species per domain to maximise movement regime coverage using the fixed descriptors from `experiments/data/regime_profile.py`. Before modelling, commit the candidate table, pairwise descriptor distances, chosen roles and reasons. Ties are resolved by better device/region matching within domain, then larger eligible test count; model performance is never used.
 
 An important note on keeping these separate matters: selecting on cadence feasibility alone would be exactly the convenience driven choice this document is meant to rule out, whereas excluding a species that cannot form windows at all is a precondition, not a preference.
@@ -344,6 +344,25 @@ On the decision metric LSTM p99 rose 1.46 km against a 1.9 km tolerance and Tran
 **Superseded text.** No operative sentence stated the context length before this amendment, which is the defect it corrects; the only numeric trace was "near identical 24 fix contexts" in the first leakage control bullet, now reworded to be context length independent. Amendments A1–A5 are dated records of decisions taken under C=24 and are **not** retrospectively edited.
 
 **What changed.** Context length 24 -> 12, window 25 -> 13 bins, Section 2 gains an explicit modelling window statement. No metric, comparator, success band, species role, secondary prediction or evaluation floor is altered. The eligibility rebuild is a consequence, not a change of criteria.
+
+### A7; 10-08-2026: splitting fixed to split-specific
+
+**Status when made:** no Tier 2 model has been trained, no species roles have been frozen, and no eligibility count has yet been rebuilt at C=12. The policy is therefore registered before the counts it governs exist.
+
+**Reason.** Section 1 fixed how many individuals each split needs but we never said where they are drawn from, and two policies satisfied it equally:
+
+- **filter then split**; discard everyone below F, divide the survivors 75/12.5/12.5; entry gate $n(\geq F) \geq 80$.
+- **split specific**: draw validation and test from the $\geq$ F pool, then send every other individual holding at least one valid window to training; entry gate $n(\geq F) \geq 20$ and $n(\geq 1) \geq 40$.
+
+We choose **split specific**, because the two roles ask different things of an individual and should not share one threshold. An individual too short to support a stable per individual evaluation estimate can still supply valid supervision, so discarding it costs training data and buys no evaluation precision. On SOES that is roughly 366 training individuals against 247. The entry gate is the larger effect, 20 above the floor rather than 80, and most of our marine candidates sit in the 20-80 band, so the two policies disagree about which species are eligible at all; that is a declared consequence, not the justification.
+
+**Superseded text (Section 1, gate 1, as amended by A5):**
+
+> A species must retain at least 20 training, 10 validation and 10 test individuals after continuity filtering; training individuals need at least one valid window and validation/test individuals at least F, the evaluation window floor fixed at 25 by Amendment A5 as of right now.
+
+**What changed.** Gate 1 now states the split policy and its entry gate. No metric, comparator, success band, species role, secondary prediction, window floor or context length is altered.
+
+**Note on fixed versus proportional evaluation size.** At the time of this amendment we also considered whether validation and test size should scale with the number of eligible individuals, rather than remain fixed at 10 each. We retain the fixed 10/10 rule here because a percentage split would permit very small species to enter evaluation with only one or two test individuals, undermining the individual level species estimates and bootstrap uncertainty. However, the converse issue also remains; for species with many eligible individuals, restricting evaluation to only 10 test animals may discard useful independent replication. We therefore leave open a future preregistered amendment, made before the per species split manifests are committed (not merely before sealed evaluation, since our A2 outline forbids regenerating a frozen manifest) to increase the test count under a fixed mechanical rule or cap if justified by an individual count sensitivity analysis. Any such change would alter evaluation precision only and would not be introduced to make a particular species eligible.
 
 ## GenAI Reference 
 
