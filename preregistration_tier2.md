@@ -295,8 +295,55 @@ Raising the floor from 10 to 100 changes stork width by nothing at n = 30, and t
 
 **What changed.** The evaluation floor moves from 100 to 25; median and p90 become individual weighted; p99 becomes species level. The training floor of at least one valid window is unchanged, as is the rule that frozen manifests are filtered rather than replenished. No comparator, species role, success band or secondary prediction is altered.
 
-### Note: 
-I wrote A5 and A6 contiguously, but have quickly cut it out for the A5 commit; the A6 commit will paste it back in and be in the repo right after...
+### A6; 10-08-2026: context length reduced from 24 to 12
+
+**Status when made:** no Tier 2 model has been trained, no species roles have been frozen, and no held-out species has been evaluated. The evidence comes entirely from the Tier 1 white stork corpus on its frozen split `splits/stork_split_seed42.json`, which contains no Tier 2 held-out species. Our decision metric, the tolerance and the action under each outcome were written into `experiments/reporting/context_ablation.py` and committed at `491320d` **before** the C=12 runs were read; the script records this as `rule_set_before_reading` and writes the verdict mechanically to `results/context_ablation/decision.json`.
+
+**Reason.** We inherited C=24 from Tier 1, chosen against stork tracks that are long and near-continuous at 6h. Windows per individual are sum over maximal contiguous runs of $max(0, L − C)$, so the context is subtracted **once per contiguous run**, not once per individual, and a species whose tracks fragment into many short runs (like all of our marine ones) pay that cost repeatedly. Measured window multipliers from C=24 to C=12 are now
+
+| species | window multiplier, C=24 -> C=12 |
+| --- | ---: |
+| white stork | 1.04x |
+| southern elephant seal (SOES) | 1.70x |
+| northern elephant seal (NES) | 1.57x |
+| Adélie penguin | 1.80x |
+| Weddell seal | 2.62x |
+
+This is the largest data lever available to our marine leg without changing the cadence or going $\Delta$ t aware, both ruled out elsewhere. It is therefore worth testing, but only against a rule fixed in advance, because "shorten the context until the marine species become eligible" is exactly the choice that this document was created to prevent. 
+
+**The registered rule, committed before the numbers were read.** Every C=24 target is also a C=12 target, so the comparison is paired: C=12 is scored on the C=24 targets and inherits the C=24 regime labels, and that arm is the decision number. Our chosen metric is **moving regime p99 on the paired targets**, test split, mean over 5 seeds, `time_season` cell. Judged **preserved** if and only if
+
+    |p99(C=12 paired) − p99(C=24)| $\leq$ 2 x pooled seed sd,   for BOTH architectures
+
+with the actions fixed in advance: *preserved* -> register C=12 and rebuild Tier 2 eligibility at C=12; *degraded* -> retain C=24 and report a null.
+
+**Result.** Moving regime, mean across 5 seeds, seed sd in parentheses:
+
+| arch | metric | C=24 | C=12 paired | change |
+| --- | --- | ---: | ---: | ---: |
+| LSTM | mean | 10.303 (0.098) km | 10.245 (0.048) km | −0.56% |
+| | median | 2.465 (0.116) km | 2.246 (0.041) km | **−8.89%** |
+| | p90 | 26.705 (0.344) km | 26.795 (0.318) km | +0.34% |
+| | p99 | 121.839 (0.791) km | 123.299 (0.569) km | +1.20% |
+| Transformer | mean | 9.495 (0.013) km | 9.483 (0.029) km | −0.13% |
+| | median | 1.924 (0.012) km | 1.922 (0.014) km | −0.09% |
+| | p90 | 25.658 (0.201) km | 25.612 (0.161) km | −0.18% |
+| | p99 | 114.875 (0.667) km | 115.770 (0.781) km | +0.78% |
+
+On the decision metric LSTM p99 rose 1.46 km against a 1.9 km tolerance and Transformer p99 rose 0.90 km against 2.1 km. Both pass, and so our verdict is **preserved**, and the registered action follows.
+
+**What changes.** The context length now becomes **C = 12**, so a valid window is **13 consecutive 6h bins** in place of 25. Section 2 now states the modelling window explicitly, which it previously did not. 
+
+**Caveats.**
+
+1. **"Indistinguishable", not "improved".** Both p99 deltas are positive: this is a ~1% cost in the extreme tail, bought in exchange for windows. The LSTM's 8.89% median gain lands elsewhere in the distribution and does not net against the tail.
+2. **Pooled sd is the less powerful test.** The arms share seeds and score identical targets, so a paired by seed test might resolve the LSTM's +1.20% as real. We ran the test we registered; a stronger one could plausibly have failed this arm. A limitation of the rule, not grounds for re testing after the fact.
+3. **Stork only.** The fragmented marine tracks that stand to gain most were not in the ablation. That C=12 holds on SOES, NES, Adele penguin or Weddell seal is an **assumption**, declared as one rather than reported as a result.
+4. **A5 was reasoned under C=24.** Its overlap argument holds at any C; at 12 of 13 rather than 24 of 25 each window is marginally more informative than A5 assumed, which strengthens the floor of 25 rather than weakening it. A5's consequence table stays at the counts at which it was measured.
+
+**Superseded text.** No operative sentence stated the context length before this amendment, which is the defect it corrects; the only numeric trace was "near identical 24 fix contexts" in the first leakage control bullet, now reworded to be context length independent. Amendments A1–A5 are dated records of decisions taken under C=24 and are **not** retrospectively edited.
+
+**What changed.** Context length 24 -> 12, window 25 -> 13 bins, Section 2 gains an explicit modelling window statement. No metric, comparator, success band, species role, secondary prediction or evaluation floor is altered. The eligibility rebuild is a consequence, not a change of criteria.
 
 ## GenAI Reference 
 
