@@ -41,7 +41,7 @@ No species does double duty; a source species is never held out, and a held out 
 
 Our selection of which species fill which role proceeds through two separate gates, in this order, and they must not be blended:
 
-1. **Eligibility: a data quality filter.** Applied before regime profiling. A species must retain at least 20 training, 10 validation and 10 test individuals after continuity filtering; training individuals need at least one valid window and validation/test individuals at least 100. Roles are frozen after this filter; a selected species that later becomes unusable is not replaced.
+1. **Eligibility: a data quality filter.** Applied before regime profiling. A species must retain at least 20 training, 10 validation and 10 test individuals after continuity filtering; training individuals need at least one valid window and validation/test individuals at least F, the evaluation window floor fixed at 25 by Amendment A5 as of right now. Roles are frozen after this filter; a selected species that later becomes unusable is not replaced.
 2. **Selection: the scientific criterion.** Among eligible species, choose one source and one held-out species per domain to maximise movement regime coverage using the fixed descriptors from `experiments/data/regime_profile.py`. Before modelling, commit the candidate table, pairwise descriptor distances, chosen roles and reasons. Ties are resolved by better device/region matching within domain, then larger eligible test count; model performance is never used.
 
 An important note on keeping these separate matters: selecting on cadence feasibility alone would be exactly the convenience driven choice this document is meant to rule out, whereas excluding a species that cannot form windows at all is a precondition, not a preference.
@@ -58,11 +58,13 @@ An important note on keeping these separate matters: selecting on cadence feasib
 
 **Inner loop: pseudo targets.** Hyperparameters are selected by holding out each source species in turn as a pseudo target. Before the first tuning run, a committed `preregistration_tier2_tuning.md` will fix the configuration budget, selection metric, rule for combining pseudo target results and tie break. The selected FM configuration is then frozen for Z, Za, S and F; B's conventional architecture and training specification are fixed in the same record. No unregistered configuration may enter the sealed evaluation.
 
+**Modelling window.** All species share one modelling cadence of 6 hours and one window shape. The context length is now **C = 12** history bins, fixed by our Amendment A6, so a valid window spans **13 consecutive 6h bins**: 12 observed positions and the one step target. Windows per individual are therefore sum over maximal contiguous runs of $max(0, L − C)$, summed across runs, which means the context is subtracted once per run rather than once per individual. This applies identically to every species, every comparator and every tier; a change to C is an amendment, not a hyperparameter, because it changes both the eligible window population and the counts on which eligibility is judged.
+
 **Leakage controls.**
 
-- Split individuals FIRST, then window. Windowing before splitting leaks near identical 24 fix contexts across train and test. We do already do this, but its stated here because it is the primary leakage mode in this literature.
+- We split individuals FIRST, then window. Windowing before splitting leaks near identical context windows across train and test, since adjacent windows differ by only a single fix. We do already do this, but its stated here because it is somewhat the primary leakage mode. 
 - After resampling, construct modelling windows only within runs of occupied bins whose `bin_index` increases by exactly one. The complete context plus target window must therefore be contiguous at the shared modelling cadence; a window cannot cross even a tolerated internal gap within a coarse segment (this was a previous bug we had).
-- Apply the continuity rule to both model training and evaluation. A training individual remains eligible if it contributes at least one valid contiguous window. Validation and test individuals must contribute at least 100 valid contiguous windows because their per individual estimates would otherwise be too noisy. These filters are applied to the already frozen manifest: individuals are never reassigned, replaced or drawn from another split to restore its size.
+- Apply the continuity rule to both model training and evaluation. A training individual remains eligible if it contributes at least one valid contiguous window. Validation and test individuals must contribute at least **25** valid contiguous windows, the evaluation window floor F fixed by Amendment A5, because their per individual estimates would otherwise rest on a handful of forecasts. These filters are applied to the already frozen manifest; individuals are never reassigned, replaced or drawn from another split to restore its size.
 - Group by individual, which subsumes deployment, since an individual's deployments cannot be separated by an individual level split.
 - Splits are read from committed manifests (`splits/*.json`), never recomputed.
 - Any QC threshold derived from data (speed quantiles, error calibration) is computed on **train only** or strictly per track. Corpus wide thresholds leak test information into preprocessing.
@@ -85,6 +87,8 @@ After source species training and pseudo target selection, but before any sealed
 ## 3. Metrics (fixed in advance)
 
 Our primary error is **great circle (geodesic) error in metres** on the held out species' test windows, reported as **median, p90, p99**; recall we found heavy right skew makes the mean uninformative.
+
+**Weighting, fixed by Amendment A5.** Species median and p90 are computed from the **individual weighted** empirical distribution, not by pooling every window, so that the longest deployments cannot dominate a species' reported error. **p99 is reported at species level only and never per individual**, because no per individual window floor we could impose without emptying the split would support a p99. Every individual entering these statistics clears the evaluation window floor F = 25; sensitivity at F $\in$ ${10, 25, 50, 100}$ is reported too alongside.
 
 Reported **stratified by regime**, where the regime boundary is scale free and species specific. The two strata are called **low displacement** and **travel**; they are a measurement boundary on step length, not a claim about biological stationarity or behavioural state.
 
@@ -231,7 +235,7 @@ Under the corrected rule, the frozen stork manifest contains 625 of 630 eligible
 
 **Reason.** Our original protocol left several choices open: it conflated a held-out species with its sealed test partition, did not fix species level eligibility or the pre-tuning decision record, left B ambiguous, left some outcomes outside the success bands, did not state how seeds determined "beats", and overstated what Z versus Za isolates. These are now fixed.
 
-**Superseded wording:** the affected certain parts of of Sections 1–6 and the amendment policy are preserved in the previous commit to this file (add that later). A1 and A2 above separately govern the regime threshold and continuity corrections.
+**Superseded wording:** the affected parts of Sections 1–6 and the amendment policy are preserved in the pre change version of this file at commit `1e31524`. A1 and A2 above separately govern the regime threshold and continuity corrections.
 
 ### A4; 03-08-2026: the low displacement boundary is made robust to its anchor
 
@@ -252,11 +256,47 @@ Whichever branch fires applies **once, across all species**. The data select the
 
 **Terminology.** The strata are renamed "stationary" and "travelling" to **low displacement** and **travel**. The old names asserted a behavioural interpretation a step length threshold cannot carry, especially on Argos data where short steps are substantially observation error. The boundary is computed identically; only the name changes.
 
-**Superseded text (Section 3, as committed at `0bcce60`):**
+**Superseded text (Section 3, as committed at `86afad1`):**
 
 > Reported **stratified by regime**, where the regime boundary is scale free and species specific: a step is stationary if it is below 10% of that species' own median step, where the median is computed on that species' training individuals only, over steps spanning **exactly one bin** of our common modelling cadence after resampling. Requiring exactly one bin matters since segments tolerate internal gaps of up to 8 bins, and those longer steps are systematically larger, so admitting them inflates the median and loosens the threshold. `regime_profile.py` implements this definition; on white stork's training individuals it gives a threshold of 60.9 m against the 60 m hysteresis cut we used in Tier 1, and a stationary fraction of 31.1% against the ~33% derived independently there. `regime_profile.py` will give the production figure. If our implementation and this text ever disagree, this text governs (if we encounter a bug for example).
 
 **What changed.** Section 3 now states the boundary as one universal formula whose anchoring quantile is chosen by the procedure above, uses the new stratum names, and carries the Argos limitation. The stork figures (60.9 m, 31.1%) are unchanged and the default branch is the rule already registered, so if no guard fires the evaluation is unaffected. No metric, comparator, success band, species role or secondary prediction is altered.
+
+### A5; 05-08-2026: evaluation window floor corrected, and p99 moved to species level
+
+**Status when made:** no Tier 2 model has been trained and no held-out species performance exists. The evidence is persistence error on source data only, which is a property of the data and needs no model.
+
+**Reason 1, independent of species selection.** One hundred windows cannot support a p99. Under independence 36.6% of individuals hold no observation above the population p99 (`0.99^100`), so their reported p99 is really just their sample maximum, biased low with no way to detect it; a two sided distribution free interval needs roughly 368 observations. Both figures assume independence, which flatters the floor, since adjacent windows share every position but one. No per individual floor we could impose without emptying the split would support a p99, which is why the fix is change (3) below rather than a higher threshold.
+
+**Reason 2: 100 was inherited, not derived for Tier 2.** It came from our Tier 1 stork split, where it excluded 6 of 846 birds and 0.05% of windows (we had so much data there). Costless on a densely tracked migratory bird, but expensive on species with shorter deployments, and never checked against the precision it was supposed to buy. `experiments/data/window_floor_sensitivity.py` measures that on training individuals only, drawing simulated test sets of n individuals and computing the cluster bootstrap interval for the individual weighted travel p90:
+
+| species | floor | n=10 | n=20 | n=30 |
+| --- | ---: | ---: | ---: | ---: |
+| white stork | 10 | 17.9 km | 20.0 | 15.0 |
+| white stork | 100 | 20.3 km | 19.4 | 15.0 |
+| southern elephant seal | 25 | 61.4 km | 46.5 | 46.9 |
+| southern elephant seal | 100 | 50.2 km | 45.1 | 34.0 |
+
+Raising the floor from 10 to 100 changes stork width by nothing at n = 30, and the ~27% it buys on the seal costs 89 individuals. Width is governed by how many individuals are tested and how much they differ, not by how many windows each contributes.
+
+**What changes.**
+
+1. The evaluation floor becomes **25** valid one step forecast windows per individual, summed across runs satisfying the registered continuity rule and applied identically to every species. We note that is serves as a pragmatic inclusion floor, and not an optimal or literature derived precision threshold (we couldn't find one for this problem anyway). We keep a floor because every included individual must contribute more than a handful of forecasts, and choose 25 because the sensitivity analysis found no consistent p90 precision gain from raising it to 100 while 100 imposed heavy duration based exclusions. Sensitivity at floors of 10, 25, 50 and 100 will be reported.
+2. Species median and p90 are computed from the **individual weighted** empirical distribution rather than by pooling all windows, since pooling lets the longest deployments dominate (for example, Wolf A contributes 1000 forecasts to Wolf B's 25; if we pool all windows, Wolf A contributes ~97%). 
+3. **p99 is reported at species level only**, never per individual.
+
+**Declared consequences.** Individuals clearing the floor, at 100 then 25: stork 784 -> 835, southern elephant seal 240 -> 329, Adelie penguin 5 -> 64, Weddell seal 11 -> 50, walrus 13 -> 36, humpback 28 -> 34. This materially affects which species can be evaluated and is a consequence, not the justification. Our supposed 95% uncertainty intervals only contained the true value about 80-92.5% of the time. This appears to be a limitation of using a cluster bootstrap when there are relatively few individuals, and requiring more windows per individual does not solve it.
+
+**The boundary this does not cross.** Eligibility thresholds are properties of the data and may be corrected under the dataset exploration Hofman et al. permit. **Success criteria are not.** The bands in Section 4 will not be revised on data availability grounds, and since Section 4 compares p99 per species rather than per individual, change (3) leaves them untouched.
+
+**Superseded text (Section 2, as amended by A2):**
+
+> - Apply the continuity rule to both model training and evaluation. A training individual remains eligible if it contributes at least one valid contiguous window. Validation and test individuals must contribute at least 100 valid contiguous windows because their per individual estimates would otherwise be too noisy. These filters are applied to the already frozen manifest: individuals are never reassigned, replaced or drawn from another split to restore its size.
+
+**What changed.** The evaluation floor moves from 100 to 25; median and p90 become individual weighted; p99 becomes species level. The training floor of at least one valid window is unchanged, as is the rule that frozen manifests are filtered rather than replenished. No comparator, species role, success band or secondary prediction is altered.
+
+### Note: 
+I wrote A5 and A6 contiguously, but have quickly cut it out for the A5 commit; the A6 commit will paste it back in and be in the repo right after...
 
 ## GenAI Reference 
 
