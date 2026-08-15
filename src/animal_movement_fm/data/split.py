@@ -279,6 +279,52 @@ def make_split(
         test=np.concatenate(test_ids),
     )
 
+def make_split_specific(
+    counts: pd.DataFrame,
+    *,
+    eval_min_windows: int = 25,
+    train_min_windows: int = 1,
+    n_val: int = 10,
+    n_test: int = 10,
+    seed: int = 42,
+) -> Split:
+    """
+    Split individuals using the A7 split specific policy.
+
+    Validation and test are drawn from individuals meeting the evaluation window floor. Every remaining individual meeting the 
+    lower training floor is assigned to training, with IDs sorted before shuffling so the split is reproducible across machines
+    and we don't run into the mac vs gadi error again. 
+    """
+    if n_val < 0 or n_test < 0:
+        raise ValueError("n_val and n_test must be non-negative")
+    if train_min_windows > eval_min_windows:
+        raise ValueError(
+            "train_min_windows above eval_min_windows would make the training pool a subset "
+            "of the evaluation pool, which inverts the policy"
+        )
+
+    eval_pool = np.sort(
+        counts.loc[counts["n_windows"] >= eval_min_windows, "individual_id"].to_numpy()
+    )
+    if len(eval_pool) < n_val + n_test:
+        raise ValueError(
+            f"evaluation pool holds {len(eval_pool)} individuals at >= {eval_min_windows} "
+            f"windows, fewer than the {n_val + n_test} needed for validation and test"
+        )
+
+    shuffled = np.random.default_rng(seed).permutation(eval_pool)
+    test_ids = shuffled[:n_test]
+    val_ids = shuffled[n_test : n_test + n_val]
+
+    held_out = set(test_ids.tolist()) | set(val_ids.tolist())
+    train_pool = np.sort(
+        counts.loc[counts["n_windows"] >= train_min_windows, "individual_id"].to_numpy()
+    )
+    train_ids = np.array([i for i in train_pool if i not in held_out], dtype=train_pool.dtype)
+
+    return Split(train=train_ids, val=val_ids, test=test_ids)
+
+
 def save_split(split: Split, path: str | Path, *, note: str = "") -> None:
     """
     Save a train, validation, and test split as a JSON file.
