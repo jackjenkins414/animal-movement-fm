@@ -14,6 +14,7 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from animal_movement_fm.data.build_segments import segments_from_fixes
@@ -58,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         help="segment parquet to create",
     )
     parser.add_argument(
+        "--batch",
+        type=int,
+        default=50,
+        help="individuals resampled per batch; lower it if memory is tight to avoid the before",
+    )
+    parser.add_argument(
         "--min-segment-bins",
         required=True,
         type=positive_integer,
@@ -77,6 +84,94 @@ def to_json_value(value: object) -> object:
     return value
 
 
+def cadence_diagnostics(path: Path) -> dict:
+    """
+    Compute species wide cadence diagnostics in one DuckDB pass.
+
+    These statistics span all individuals, so they are calculated outside the batching loop to keep the reported values independent of batch size.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("PRAGMA threads=4")
+    return con.execute(
+        f"""
+        WITH d AS (
+            SELECT epoch(timestamp) - lag(epoch(timestamp))
+                     OVER (PARTITION BY individual_id ORDER BY timestamp) AS gap
+            FROM read_parquet('{path}')
+        )
+        SELECT median(gap) / 3600.0 AS median_native_gap_h,
+               avg((gap <= {BIN_SECONDS})::INT) AS share_gaps_within_bin
+        FROM d WHERE gap IS NOT NULL
+        """
+    ).df().iloc[0].to_dict()
+
+
+def build(args) -> tuple[pd.DataFrame | None, dict]:
+    """
+    Resample individuals in batches and merge their segment statistics.
+
+    Batching keeps memory use manageable for very large species while preserving the same per individual resampling behaviour as 
+    a single full-data pass.
+    """
+    import duckdb
+
+    # keys that must not be summed across batches; a setting is carried, a span is spanned
+    SETTINGS = {"min_segment_bins"}
+    SPANS = {"first_bin": min, "last_bin": max}
+
+    con = duckdb.connect()
+    con.execute("PRAGMA threads=4; PRAGMA memory_limit='4GB'")
+    ids = con.execute(
+        f"SELECT DISTINCT individual_id FROM read_parquet('{args.input}') ORDER BY 1"
+    ).df()["individual_id"].tolist()
+
+    frames, merged = [], {}
+    for start in range(0, len(ids), args.batch):
+        chunk = ids[start : start + args.batch]
+        fixes = con.execute(
+            f"SELECT * FROM read_parquet('{args.input}') "
+            "WHERE individual_id IN (SELECT unnest($ids))",
+            {"ids": chunk},
+        ).df()
+        segments, stats = segments_from_fixes(
+            fixes,
+            bin_seconds=BIN_SECONDS,
+            min_segment_bins=args.min_segment_bins,
+            carry_columns=CARRY_COLUMNS,
+        )
+        # GenAI assisted in the casing here but I implented this
+        for key, value in stats.items():
+            if key in SETTINGS:
+                # a setting, not a count. `min_segment_bins` is an int, so summing it would report 13 x the number of batches
+                merged.setdefault(key, value)
+            elif key in SPANS:
+                # batches are ordered by individual, not by time, so the first batch's range is an arbitrary subset of the species'
+                current = merged.get(key)
+                if pd.isna(value):
+                    merged.setdefault(key, value)
+                elif current is None or pd.isna(current):
+                    merged[key] = value
+                else:
+                    merged[key] = SPANS[key](current, value)
+            elif isinstance(value, (int, np.integer)):
+                merged[key] = merged.get(key, 0) + int(value)
+            else:
+                merged.setdefault(key, value)
+        if segments is not None:
+            frames.append(segments)
+        del fixes, segments
+
+    if not frames:
+        return None, merged
+    out = pd.concat(frames, ignore_index=True)
+    merged.update(cadence_diagnostics(args.input))
+    merged["segments"] = int(out["segment_id"].nunique())
+    merged["batched_individuals_per_batch"] = args.batch
+    return out, merged
+
+
 def main() -> None:
     """Build the segment parquet and summary file."""
     args = parse_args()
@@ -87,14 +182,7 @@ def main() -> None:
     if args.input.resolve() == args.output.resolve():
         raise SystemExit("Input and output paths must differ")
 
-    fixes = pd.read_parquet(args.input)
-
-    segments, stats = segments_from_fixes(
-        fixes,
-        bin_seconds=BIN_SECONDS,
-        min_segment_bins=args.min_segment_bins,
-        carry_columns=CARRY_COLUMNS,
-    )
+    segments, stats = build(args)
 
     if segments is None:
         raise SystemExit(
