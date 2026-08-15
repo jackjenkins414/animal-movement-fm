@@ -30,6 +30,7 @@ The output is then written to:
 Note; an existing manifest will not be overwritten unless ``--force`` is provided.
 """
 
+# GenAI reference: made minor modifications to this file when checking it
 from __future__ import annotations
 
 import argparse
@@ -40,8 +41,10 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import pandas as pd
 
+from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import (
     make_split,
+    make_split_specific,
     save_split,
     summarise_split,
     window_counts_per_individual,
@@ -73,15 +76,28 @@ def parse_args() -> argparse.Namespace:
         help="random seed used to generate the split",
     )
     p.add_argument(
+        "--policy",
+        choices=("split-specific", "filter-then-split"),
+        default="split-specific",
+        help="A7 fixed this at split-specific; filter-then-split is retained only so the "
+             "frozen stork manifest stays reproducible from this script",
+    )
+    p.add_argument(
+        "--eval-individuals",
+        type=int,
+        default=10,
+        help="individuals drawn into validation and into test under the A7 policy",
+    )
+    p.add_argument(
         "--min-windows",
         type=int,
-        default=100,
+        default=25,
         help="exclude individuals with fewer than this many windows",
     )
     p.add_argument(
         "--context-length",
         type=int,
-        default=24,
+        default=CONTEXT_LENGTH,
         help="context length used when counting available windows",
     )
     p.add_argument(
@@ -154,25 +170,47 @@ def main() -> None:
         f"{eligible:,} have at least {args.min_windows}"
     )
 
-    split = make_split(
-        counts,
-        strata=strata,
-        min_windows=args.min_windows,
-        val_frac=args.val_frac,
-        test_frac=args.test_frac,
-        seed=args.seed,
-    )
+    if args.policy == "split-specific":
+        # A7. Validation and test take a fixed count from the >=F pool; every remaining individual with at least one valid 
+        # window goes to training
+        split = make_split_specific(
+            counts,
+            eval_min_windows=args.min_windows,
+            train_min_windows=1,
+            n_val=args.eval_individuals,
+            n_test=args.eval_individuals,
+            seed=args.seed,
+        )
+    else:
+        # The superseded filter then split policy, retained only so the frozen stork manifest remains reproducible from this script
+        split = make_split(
+            counts,
+            strata=strata,
+            min_windows=args.min_windows,
+            val_frac=args.val_frac,
+            test_frac=args.test_frac,
+            seed=args.seed,
+        )
 
     print()
     summarise_split(split, counts)
 
-    note = (
-        f"Split for '{args.name}' generated from {segments.name}: "
-        f"seed={args.seed}, min_windows={args.min_windows}, "
-        f"context_length={args.context_length}, val_frac={args.val_frac}, "
-        f"test_frac={args.test_frac}, "
-        f"strata={'yes' if strata is not None else 'none'}."
-    )
+    if args.policy == "split-specific":
+        note = (
+            f"Split for '{args.name}' generated from {segments.name} under the A7 "
+            f"split-specific policy: seed={args.seed}, evaluation floor F={args.min_windows} "
+            f"(A5), context_length={args.context_length} (A6), "
+            f"{args.eval_individuals} validation and {args.eval_individuals} test drawn from "
+            f"the >=F pool, training taking every remaining individual with >=1 valid window."
+        )
+    else:
+        note = (
+            f"Split for '{args.name}' generated from {segments.name} under the SUPERSEDED "
+            f"filter-then-split policy: seed={args.seed}, min_windows={args.min_windows}, "
+            f"context_length={args.context_length}, val_frac={args.val_frac}, "
+            f"test_frac={args.test_frac}, "
+            f"strata={'yes' if strata is not None else 'none'}."
+        )
 
     save_split(split, out, note=note)
 
