@@ -1,18 +1,10 @@
 """
 Audit whether candidate species have enough valid windows for Tier 2.
 
-For each species, this script counts valid modelling windows per individual using the same
-contiguity rules as the benchmark. It reports the pool of individuals eligible for training
-(>= 1 window) and validation/test (>= 100 windows), and projects a 75/12.5/12.5 split over the
-validation/test pool.
-
-This is an audit only. It reports the observed eligibility pools and a filter-then-split
-projection; it does not choose a split construction policy or assign species roles.
-
-Usage
------
-uv run python experiments/data/species_eligibility.py
-uv run python experiments/data/species_eligibility.py --species soes walrus stork
+For each species, this script counts valid modelling windows per individual using the same contiguity rules as the benchmark. 
+It reports the pool of individuals eligible for training (>= 1 window) and validation/test (>= F windows), and applies the A7 
+split specific policy: validation and test take 10 individuals each from the >= F pool, training takes every remaining 
+individual with at least one valid window. Gate 1 is `n(>=F) >= 20` and `n(>=1) >= 40`.
 """
 
 from __future__ import annotations
@@ -23,14 +15,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import window_counts_per_individual
 
 REPO = Path(__file__).resolve().parents[2]
 SEGMENTS_DIR = REPO / "data" / "processed"
 RESULTS_DIR = REPO / "results"
 
-VAL_FRAC = 0.125
-TEST_FRAC = 0.125
+# A7 split-specific policy. Validation and test take EVAL_INDIVIDUALS each from >=F pool; training takes every remaining 
+# individual with at least one valid window; gate 1  needs 2*EVAL_INDIVIDUALS above the floor and GATE1_MIN_TOTAL with 
+# at least one window
+EVAL_INDIVIDUALS = 10
+GATE1_MIN_TOTAL = 40
+
+# A5 fixed the evaluation floor at 25 and requires sensitivity at these values
+FLOOR_SENSITIVITY = (10, 25, 50, 100)
 
 
 def audit(
@@ -59,10 +58,11 @@ def audit(
     n_train_pool = int((windows >= train_min_windows).sum())
     n_eval_pool = int((windows >= eval_min_windows).sum())
 
-    # project the same 75/12.5/12.5 split we used for the stork dataset (this might change later)
-    n_test = round(n_eval_pool * TEST_FRAC)
-    n_val = round(n_eval_pool * VAL_FRAC)
-    n_train = n_eval_pool - n_val - n_test
+    # A7;s splitting is split specific 
+    n_val = min(EVAL_INDIVIDUALS, max(n_eval_pool - EVAL_INDIVIDUALS, 0))
+    n_test = min(EVAL_INDIVIDUALS, max(n_eval_pool - n_val, 0))
+    n_train = max(n_train_pool - n_val - n_test, 0)
+    clears_gate1 = bool(n_eval_pool >= 2 * EVAL_INDIVIDUALS and n_train_pool >= GATE1_MIN_TOTAL)
 
     # record device types because some species contain both PTT and GPS individuals
     segments = pd.read_parquet(path)
@@ -90,9 +90,10 @@ def audit(
             float(np.median(windows)) if n_individuals else 0.0
         ),
         "windows_max": int(windows.max()) if n_individuals else 0,
-        "projected_train": n_train,
-        "projected_val": n_val,
-        "projected_test": n_test,
+        "split_train": n_train,
+        "split_val": n_val,
+        "split_test": n_test,
+        "clears_gate1": clears_gate1,
         "device_mix": ", ".join(
             f"{device}:{count}"
             for device, count in sorted(device_counts.items())
@@ -129,12 +130,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--context-length",
         type=int,
-        default=24,
+        default=CONTEXT_LENGTH,
+        help="history bins per window; A6 fixed this at 12",
     )
     parser.add_argument(
         "--eval-min-windows",
         type=int,
-        default=100,
+        default=25,
+        help="evaluation window floor F; A5 fixed this at 25",
     )
     parser.add_argument(
         "--train-min-windows",
@@ -236,9 +239,10 @@ def main() -> None:
 
     split_columns = [
         "species",
-        "projected_train",
-        "projected_val",
-        "projected_test",
+        "split_train",
+        "split_val",
+        "split_test",
+        "clears_gate1",
         "device_mix",
     ]
 
@@ -247,14 +251,15 @@ def main() -> None:
     print(table[pool_columns].to_string(index=False))
 
     print(
-        f"\nProjected filter-then-split 75/12.5/12.5 split "
+        f"\nA7 split-specific allocation "
         f"(individuals with >= {args.eval_min_windows} windows)"
     )
     print("------------------------------------------------------------")
     print(table[split_columns].to_string(index=False))
 
     print(
-        "\nThis audit reports observed pools and a filter-then-split projection. "
+        "\nSplit sizes follow the A7 split-specific policy: 10 validation and 10 test "
+        "drawn from the >=F pool, training taking every remaining individual with >=1 window. "
         "It does not choose a split construction policy or assign species roles."
     )
 
