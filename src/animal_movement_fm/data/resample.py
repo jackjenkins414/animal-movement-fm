@@ -19,9 +19,25 @@ from dataclasses import dataclass
 
 import numpy as np 
 
-BIN_SECONDS = 6 * 60 * 60 # 6h analysis cadence 
+BIN_SECONDS = 6 * 60 * 60 # 6h analysis cadence
 MAX_GAP_BINS = 8 # split when a hole exceeds 2 days (8*6h)
-MIN_SEGMENT_BINS = 120 # drop segments shorter than >=120 point floor
+
+# The context length in force. A window is CONTEXT_LENGTH history bins plus one target, so it
+# spans CONTEXT_LENGTH + 1 consecutive bins. Fixed at 12 by preregistration amendment A6.
+CONTEXT_LENGTH = 12
+
+def min_segment_bins(context_length: int = CONTEXT_LENGTH) -> int:
+    """
+    Return the minimum segment length needed to produce one window: `context_length + 1; derived from the current context length rather 
+    than hard coded so the segment floor cannot go stale when the context changes.
+    """
+    if context_length < 1:
+        raise ValueError("context_length must be at least 1")
+    return context_length + 1
+
+
+# backwards compatible module constant which is now derived rather than asserted
+MIN_SEGMENT_BINS = min_segment_bins()
 
 @dataclass(frozen=True)
 class Segment:
