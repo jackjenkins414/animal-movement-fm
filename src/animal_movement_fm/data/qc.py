@@ -14,6 +14,7 @@ import pandas as pd
 
 FLAG_COLUMNS = (
     "qc_invalid_coord",
+    "qc_invalid_time",
     "qc_duplicate",
     "qc_before_deploy_on",
     "qc_after_deploy_off",
@@ -130,6 +131,7 @@ class QCReport:
 
     rows_in: int = 0
     invalid_coord: int = 0
+    invalid_time: int = 0
     null_island: int = 0
     out_of_range: int = 0
     missing_coord: int = 0
@@ -180,6 +182,22 @@ def flag_invalid_coordinates(
     return out
 
 
+def flag_invalid_time(
+    frame: pd.DataFrame,
+    *,
+    time_col: str = "timestamp",
+    report: QCReport | None = None,
+) -> pd.DataFrame:
+    """Flag fixes with missing or unusable timestamps. These rows cannot support ordering or speed calculations, so they are 
+    explicitly flagged rather than being removed indirectly during duplicate handling."""
+    out = frame.copy()
+    times = pd.to_datetime(out[time_col], utc=True, errors="coerce")
+    out["qc_invalid_time"] = times.isna().to_numpy()
+    if report is not None:
+        report.invalid_time += int(out["qc_invalid_time"].sum())
+    return out
+
+
 def flag_outside_species_range(
     frame: pd.DataFrame,
     species: str,
@@ -213,7 +231,8 @@ def resolve_duplicates(
     lat_col: str = "lat",
     lon_col: str = "lon",
     quality_col: str | None = None,
-    quality_order: tuple[str, ...] = ("3", "2", "1", "0", "A", "B", "Z"),
+    # best first; "G" is Fastloc; tens of metres against kilometres for every Argos class, so it heads the order
+    quality_order: tuple[str, ...] = ("G", "3", "2", "1", "0", "A", "B", "Z"),
     error_col: str | None = None,
     report: QCReport | None = None,
 ) -> pd.DataFrame:
@@ -248,15 +267,25 @@ def resolve_duplicates(
             if error_col is not None and error_col in out.columns
             else np.zeros(len(out))
         )
+        # `_lat`/`_lon` are the last resort, not evidence. Where class and error radius both
+        # tie -- 72.7% of SOES conflicting groups, which carries no error column at all -- a
+        # stable sort would otherwise settle the winner by file order, and file order is not a
+        # property of the data: it is what cost us a split that differed between Mac and Gadi
+        # under an identical seed. Ordering on the coordinates themselves makes the survivor a
+        # pure function of (positions, class, error) and nothing else.
         ordering = pd.DataFrame(
             {
                 "_ind": out[individual_col].to_numpy(),
                 "_time": out[time_col].to_numpy(),
                 "_rank": rank,
                 "_tie": np.nan_to_num(tiebreak, nan=np.inf),
+                "_lat": pd.to_numeric(out[lat_col], errors="coerce").to_numpy(dtype=float),
+                "_lon": pd.to_numeric(out[lon_col], errors="coerce").to_numpy(dtype=float),
                 "_pos": np.arange(len(out)),
             }
-        ).sort_values(["_ind", "_time", "_rank", "_tie"], kind="stable")
+        ).sort_values(
+            ["_ind", "_time", "_rank", "_tie", "_lat", "_lon"], kind="stable"
+        )
         flags = np.zeros(len(out), dtype=bool)
         flags[ordering["_pos"].to_numpy()] = ordering.duplicated(
             subset=["_ind", "_time"], keep="first"
@@ -408,12 +437,19 @@ def structural_qc(
     error_col: str | None = None,
     **columns: str,
 ) -> tuple[pd.DataFrame, QCReport]:
-    """Run structural checks and return the flagged frame plus QC report."""
+    """Run structural checks and return the flagged frame plus QC report.
+
+    Nothing is removed. `qc_invalid_coord` and `qc_invalid_time` are the two flags we recommend dropping unconditionally: neither marks a 
+    low quality observation, both mark s row that is not an observation.
+    """
     report = QCReport(rows_in=len(frame))
     lat_col = columns.get("lat_col", "lat")
     lon_col = columns.get("lon_col", "lon")
 
     out = flag_invalid_coordinates(frame, lat_col=lat_col, lon_col=lon_col, report=report)
+    out = flag_invalid_time(
+        out, report=report, **{k: v for k, v in columns.items() if k == "time_col"}
+    )
     if species is not None:
         out = flag_outside_species_range(out, species, lat_col=lat_col, report=report)
 

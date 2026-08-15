@@ -16,6 +16,7 @@ from animal_movement_fm.data.qc import (
     flag_outside_deployment,
     flag_speed,
     geodesic_speed_kmh,
+    flag_invalid_time,
     resolve_duplicates,
     structural_qc,
 )
@@ -132,6 +133,97 @@ def test_unknown_quality_codes_lose_to_known_ones():
     )
     out = resolve_duplicates(frame, quality_col="location_quality")
     assert out.loc[~out["qc_duplicate"], "location_quality"].tolist() == ["B"]
+
+
+def test_missing_timestamps_are_flagged():
+    """A position with no time is not an observation. 11.1% of the NES archive is this."""
+    frame = pd.DataFrame(
+        {
+            "individual_id": [1, 1, 1],
+            "timestamp": [pd.Timestamp("2020-01-01"), pd.NaT, pd.Timestamp("2020-01-02")],
+            "lat": [52.0, 48.0, 40.0],
+            "lon": [13.0, 2.0, 1.0],
+        }
+    )
+    report = QCReport()
+    out = flag_invalid_time(frame, report=report)
+    assert out["qc_invalid_time"].tolist() == [False, True, False]
+    assert report.invalid_time == 1
+
+
+def test_null_timestamps_no_longer_depend_on_duplicate_resolution():
+    """They used to vanish only because the whole conflicting group was discarded."""
+    frame = pd.DataFrame(
+        {
+            "individual_id": [1, 1],
+            "timestamp": [pd.NaT, pd.NaT],
+            "lat": [52.0, 48.0],
+            "lon": [13.0, 2.0],
+            "location_quality": ["3", "B"],
+        }
+    )
+    out, report = structural_qc(frame, quality_col="location_quality")
+    # Ranking keeps one row of the group, so the time check is what removes them now.
+    assert out["qc_invalid_time"].all()
+    assert report.invalid_time == 2
+
+
+def test_fastloc_gps_outranks_every_argos_class():
+    """`G` is Fastloc GPS at tens of metres; class 3 is Argos at hundreds."""
+    frame = pd.DataFrame(
+        {
+            "individual_id": [1, 1, 1],
+            "timestamp": _ts("2020-01-01", "2020-01-01", "2020-01-01"),
+            "lat": [52.0, 48.0, 40.0],
+            "lon": [13.0, 2.0, 1.0],
+            "location_quality": ["3", "G", "B"],
+        }
+    )
+    out = resolve_duplicates(frame, quality_col="location_quality")
+    assert out.loc[~out["qc_duplicate"], "location_quality"].tolist() == ["G"]
+
+
+def test_a_same_class_tie_is_resolved_without_consulting_file_order():
+    """The survivor must be a function of the data, not of how the parquet was written.
+
+    72.7% of SOES conflicting groups are ties within one Argos class, and SOES carries no
+    error column, so this is the path most of its duplicates actually take.
+    """
+    frame = pd.DataFrame(
+        {
+            "individual_id": [1, 1, 1],
+            "timestamp": _ts("2020-01-01", "2020-01-01", "2020-01-01"),
+            "lat": [52.0, 48.0, 40.0],
+            "lon": [13.0, 2.0, 1.0],
+            "location_quality": ["A", "A", "A"],
+        }
+    )
+    survivors = set()
+    for order in ([0, 1, 2], [2, 0, 1], [1, 2, 0]):
+        shuffled = frame.iloc[order].reset_index(drop=True)
+        out = resolve_duplicates(shuffled, quality_col="location_quality")
+        kept = out.loc[~out["qc_duplicate"]]
+        assert len(kept) == 1
+        survivors.add((kept["lat"].item(), kept["lon"].item()))
+    assert len(survivors) == 1, f"file order changed the survivor: {survivors}"
+
+
+def test_a_rankable_conflict_keeps_one_row_rather_than_none():
+    """The bug this replaced: an unrankable conflict drops the whole group, which can empty
+    a 6h bin outright. With a quality column the bin keeps its representative."""
+    frame = pd.DataFrame(
+        {
+            "individual_id": [1, 1],
+            "timestamp": _ts("2020-01-01", "2020-01-01"),
+            "lat": [52.0, 48.0],
+            "lon": [13.0, 2.0],
+            "location_quality": ["B", "1"],
+        }
+    )
+    without = resolve_duplicates(frame)
+    with_rank = resolve_duplicates(frame, quality_col="location_quality")
+    assert (~without["qc_duplicate"]).sum() == 0
+    assert (~with_rank["qc_duplicate"]).sum() == 1
 
 
 def test_duplicates_are_scoped_to_one_individual():
