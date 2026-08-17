@@ -651,3 +651,24 @@ LSTM p99 rose 1.46 km against a 1.9 km tolerance; Transformer p99 rose 0.90 km a
 
 **The assumption this leaves open.** The ablation is white stork only. The species that stand to gain most from a shorter context, like SOES, NES, Adelie penguin, Weddell seal, are precisely the ones not in it, and their tracks differ from stork in the exact property the context length interacts with. A model with 12 bins of history on a fragmented run has both less history and, relatively, more of its windows near a run boundary. That C=12 preserves tail skill on stork is a result; that it does so on fragmented marine tracks is an assumption, and A6 declares it as one rather than reporting it as established.
 
+
+## 16-08-2026: Tier 2 pretraining composition and the sampling rule (A8)
+
+In section 2 we locked in our modelling window and split policy, but we never said how we sampled windows from the source pool. Below are the window counts from our frozen manifes:
+
+| species | domain | role | train ind. | train | val | test |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| *Ciconia ciconia* | flying | source | 630 | 806,595 | 146,603 | 110,897 |
+| *Larus fuscus* | flying | held-out | 332 | 597,407 | 10,400 | 29,817 |
+| *Cervus elaphus* | terrestrial | source | 306 | 556,579 | 18,189 | 19,106 |
+| *Canis lupus* | terrestrial | held-out | 99 | 47,136 | 7,258 | 7,619 |
+| *Mirounga leonina* | marine | source | 417 | 82,731 | 2,370 | 2,332 |
+| *M. angustirostris* | marine | held-out | 353 | 53,442 | 3,150 | 1,408 |
+
+**Our issue.** If we do a uniform draw over pooled windows (every dataloaders default currently), this would mean our marine section of the corpus is **5.7%** of the loss. So our Z model would be evaluated on NES without having barely seen a seal, and thus this likely weak marine result would be unattributable between source scarcity and taxonomic distance.
+
+**Best of a bad situation...** We draw species proportional to n^0.5, so then a window uniformly within the species we have: *C. ciconia* 46.491%, *C. elaphus* 38.619%, *M. leonina* 14.889%.
+
+## 16-08-2026: physical plausibility QC applied to the marine pair (A9)
+
+We dropped the four physical plausibility flags at extraction instead of only reporting them, which cost us 29.4% of our SOES fixes and 13.5% of NES but pulls the worst 6h step down from 12,959 km to 3,822 km. Windows take a big loss, going down by 36% and 16% against 5.7% and 3.9%, since emptying a single bin splits a contiguous run and costs up to twelve windows. We rederived Gate 2 on the refrozen standardisation and nothing important moved; A4 still returns `0.1 x p50`, the marine pair goes 1.42 -> 1.46, so no role changed, and our A8 draw probabilities become 47.911 / 39.799 / 12.290; though SOES rho flipped sign (-0.165 -> +0.041) once (what appears) the speed outliers stopped manufacturing fake reversals.
