@@ -89,7 +89,7 @@ def main() -> None:
         raise SystemExit(f"FAIL: data not found at {SEGMENTS}")
 
     # Same split as the established real runs: reproducible seed, gap-respecting segments.
-    counts = window_counts_per_individual(SEGMENTS)
+    counts = window_counts_per_individual(SEGMENTS, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
 
     print("loading train and test frames...")

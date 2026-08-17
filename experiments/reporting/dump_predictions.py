@@ -105,7 +105,7 @@ def dump_predictor(predictor, frame: pd.DataFrame, name: str) -> None:
 def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
 
-    counts = window_counts_per_individual(SEGMENTS)
+    counts = window_counts_per_individual(SEGMENTS, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
     frame = load_split_frame(SEGMENTS, split.test)
     print(f"loaded {len(frame):,} rows across {frame['segment_id'].nunique()} "

@@ -141,7 +141,7 @@ def main() -> None:
     con = duckdb.connect()
 
     # --- Canonical split, identical to every other pass ---
-    counts = window_counts_per_individual(SEGMENTS_6H)
+    counts = window_counts_per_individual(SEGMENTS_6H, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
     print(f"canonical split: {len(split.train)} train birds, "
           f"{len(split.test)} test birds (reused across cadences)\n")

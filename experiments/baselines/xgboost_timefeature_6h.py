@@ -112,7 +112,7 @@ def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
 
-    counts = window_counts_per_individual(SEGMENTS_6H)
+    counts = window_counts_per_individual(SEGMENTS_6H, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
     print(f"split: {len(split.train)} train, {len(split.test)} test birds\n")
 

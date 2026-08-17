@@ -41,7 +41,8 @@ import pandas as pd
 
 def window_counts_per_individual(
     segments_parquet,
-    context_length: int = 24,
+    *,
+    context_length: int,
 ) -> pd.DataFrame:
     """Per individual window counts, to set the minimum track threshold before splitting.
 
@@ -446,7 +447,7 @@ if __name__ == "__main__":
     from pathlib import Path
 
     SEGMENTS = Path.home() / "animal-movement-fm" / "data" / "processed" / "stork_segments.parquet"
-    counts = window_counts_per_individual(SEGMENTS)
+    counts = window_counts_per_individual(SEGMENTS, context_length=24)  # Tier 1, pre-A6
 
     n = len(counts)
     print(f"{n} individuals produced windows | {counts['n_windows'].sum():,} total windows\n")

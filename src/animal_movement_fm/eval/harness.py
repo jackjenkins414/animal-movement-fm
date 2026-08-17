@@ -161,8 +161,8 @@ def iter_windows(
 def evaluate(
         predictor: Predictor, 
         df: pd.DataFrame, 
-        context_length: int = 24, 
         *, 
+        context_length: int, 
         individual_col: str = "individual_id", 
         show_progress: bool = True, 
         extra_cols: tuple[str, ...] = (), 

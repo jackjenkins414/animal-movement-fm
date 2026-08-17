@@ -22,7 +22,7 @@ from animal_movement_fm.models.lstm import LSTM
 
 SEGMENTS = Path.home() / "animal-movement-fm" / "data" / "processed" / "stork_segments.parquet"
 
-counts = window_counts_per_individual(SEGMENTS)
+counts = window_counts_per_individual(SEGMENTS, context_length=24)  # Tier 1, pre A6
 split = make_split(counts, strata=None, min_windows=100, seed=42)
 
 print("loading train and test frames...")

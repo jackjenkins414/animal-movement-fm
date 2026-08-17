@@ -15,24 +15,45 @@ import numpy as np
 import pandas as pd
 import duckdb
 
+from animal_movement_fm.data.split import id_key
 from animal_movement_fm.eval.harness import Predictor, evaluate, stratified_summary
 
 
 def load_split_frame(
     segments_parquet,
-    individual_ids: np.ndarray,
+    individual_ids,
 ) -> pd.DataFrame:
     """
     Load segment rows for a given set of individuals, shaped for the harness.
 
-    Returns a long frame with columns [segment_id, individual_id, bin_index, timestamp, lon, lat], filtered to `individual_ids` 
+    Returns a long frame with columns [segment_id, individual_id, bin_index, timestamp, lon, lat], filtered to individual_ids
     and sorted so the harness can derive one bin contiguous runs within each segment.
+
+    Ids differ across our corpus; Movebank ones are in64 or float64 after parquet conversion; while RAATD are strings. Send Movebank 
+    and RAATD through id_key and the join then doesn't rely on how a manifest happened to write the value; filter uses files own 
+    values at its own dtype. Same fix we did in data.split.
     """
 
     con = duckdb.connect()
+
+    # the distinct id list is one row per individual
+    present = con.execute(
+        f"SELECT DISTINCT individual_id FROM '{segments_parquet}'"
+    ).df()["individual_id"]
+
+    wanted = {id_key(i) for i in individual_ids}
+    keep = present[[id_key(value) in wanted for value in present]]
+
+    # an empty intersection is not an empty split; it is the wrong segments file for this manifest,
+    # or an id type the canonical key does not reach; fail here 
+    if wanted and keep.empty:
+        raise ValueError(
+            f"none of the {len(wanted)} requested individuals appear in {segments_parquet}; "
+            "this is a manifest/segments mismatch, not an empty split"
+        )
+
     # register the id list as a table so DuckDB filters efficiently.
-    id_df = pd.DataFrame({"individual_id": individual_ids.astype("int64")})
-    con.register("split_ids", id_df)
+    con.register("split_ids", pd.DataFrame({"individual_id": keep.to_numpy()}))
 
     frame = con.execute(f"""
         SELECT s.segment_id, s.individual_id, s.bin_index, s.timestamp, s.lon, s.lat
@@ -47,7 +68,8 @@ def evaluate_on_split(
     predictor: Predictor,
     segments_parquet,
     individual_ids: np.ndarray,
-    context_length: int = 24,
+    *,
+    context_length: int,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """
@@ -70,7 +92,8 @@ def run_ladder(
     predictors: list[Predictor],
     segments_parquet,
     individual_ids,
-    context_length: int = 24,
+    *,
+    context_length: int,
 ) -> pd.DataFrame:
     """
     Evaluate each predictor on the same test individuals; return one summary per model.
@@ -114,11 +137,11 @@ if __name__ == "__main__":
 
     SEGMENTS = Path.home() / "animal-movement-fm" / "data" / "processed" / "stork_segments.parquet"
 
-    counts = window_counts_per_individual(SEGMENTS)
+    counts = window_counts_per_individual(SEGMENTS, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
 
     print(f"evaluating persistence on {len(split.test)} held-out test storks...")
-    results = evaluate_on_split(Persistence(), SEGMENTS, split.test)
+    results = evaluate_on_split(Persistence(), SEGMENTS, split.test, context_length=24)  # Tier 1, pre A6
 
     print(f"\n{len(results):,} predictions")
     print(stratified_summary(results).to_string(index=False))

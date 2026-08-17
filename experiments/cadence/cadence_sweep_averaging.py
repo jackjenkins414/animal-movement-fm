@@ -67,7 +67,7 @@ def skill(base: dict, model: dict) -> dict:
 def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
 
-    counts = window_counts_per_individual(SEGMENTS_6H)
+    counts = window_counts_per_individual(SEGMENTS_6H, context_length=24)  # Tier 1, pre A6
     split = make_split(counts, strata=None, min_windows=100, seed=42)
     test_ids = split.test
     print(f"canonical split: {len(test_ids)} test birds (reused across cadences)\n")
