@@ -30,6 +30,17 @@ from animal_movement_fm.data.qc import SPEED_CEILINGS, flag_speed, structural_qc
 REPO = Path(__file__).resolve().parents[2]
 PROCESSED = REPO / "data" / "processed"
 
+# flags that remove a fix from the extract.
+DROP_FLAGS = (
+    "qc_invalid_coord",
+    "qc_invalid_time",
+    "qc_duplicate",
+    "qc_out_of_species_range",
+    "qc_over_ceiling",
+    "qc_spike",
+    "qc_speed_outlier",
+)
+
 # Movebank Tier 2 species/candidates; marine corpora arent extracted here
 TIER2_AND_CANDIDATES = (
     "Ciconia ciconia",
@@ -123,9 +134,12 @@ def _clean_batch(
         )
         stats["speed_spikes"] = stats.get("speed_spikes", 0) + int(flagged["qc_spike"].sum())
 
-    drop = (
-        flagged["qc_invalid_coord"] | flagged["qc_invalid_time"] | flagged["qc_duplicate"]
-    )
+    present = [column for column in DROP_FLAGS if column in flagged.columns]
+    drop = flagged[present].any(axis=1)
+
+    for column in present:
+        key = f"dropped_{column}"
+        stats[key] = stats.get(key, 0) + int(flagged[column].sum())
     # Counts accumulate across batches; settings do not.
     settings = {"notes", "ceiling_multiplier"}
     for key, value in qc.as_dict().items():
