@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from animal_movement_fm.features import time
 from animal_movement_fm.features.time import (
     DAYS_PER_YEAR,
     DEG_LON_PER_HOUR,
@@ -170,3 +171,70 @@ class TestDayOfYearReferenceFormula:
         angle = 2.0 * np.pi * ((t.dayofyear - 1.0) / DAYS_PER_YEAR)
         s, c = day_of_year_sincos(t)
         np.testing.assert_allclose([s, c], [np.sin(angle), np.cos(angle)], atol=1e-12)
+
+
+# --------------------------------------------------------------------------------------------------
+# The epoch-second variants added for Tier 2 must agree with the Tier 1 definitions above, which is
+# what makes them a faster path rather than a second definition. GenAI addition; see ref above file
+# --------------------------------------------------------------------------------------------------
+
+
+def _epoch(ts):
+    """Epoch seconds, via an explicit unit conversion.
+
+    Deliberately not `astype("int64") / 1e9`: DuckDB hands back datetime64[us] while `pd.date_range`
+    hands back [ns], and that divisor is right for one and 1000x wrong for the other. Asking numpy for
+    seconds takes the divisor out of the problem.
+    """
+    return pd.DatetimeIndex(ts).to_numpy().astype("datetime64[s]").astype("int64").astype(float)
+
+
+def test_epoch_solar_matches_the_pandas_definition():
+    ts = pd.date_range("2019-03-01", periods=400, freq="97min", tz=None)
+    lon = np.linspace(-179.0, 179.0, len(ts))
+
+    want = time.local_solar_sincos(ts, lon)
+    got = time.local_solar_sincos_from_epoch(_epoch(ts), lon)
+    assert np.allclose(got[0], want[0], atol=1e-12)
+    assert np.allclose(got[1], want[1], atol=1e-12)
+
+
+def test_epoch_solar_differs_from_pandas_only_by_dropped_seconds():
+    """The Tier 1 function truncates to hour + minute/60 to stay identical to the XGBoost feature."""
+    ts = pd.date_range("2019-03-01 00:00:37", periods=50, freq="53min")
+    lon = np.zeros(len(ts))
+    want = time.local_solar_sincos(ts, lon)
+    got = time.local_solar_sincos_from_epoch(_epoch(ts), lon)
+    # 59 s of a 24 h cycle is 0.0043 rad; the encoding is bounded by that, not equal to it.
+    assert np.max(np.abs(np.array(got) - np.array(want))) < 2 * np.pi * 60 / 86400
+
+
+def test_epoch_day_of_year_matches_the_pandas_definition_including_leap_years():
+    ts = pd.DatetimeIndex(
+        ["2019-01-01", "2019-12-31", "2020-02-29", "2020-12-31", "2021-06-15", "2024-01-01"]
+    )
+    want = time.day_of_year_sincos(ts)
+    got = time.day_of_year_sincos_from_epoch(_epoch(ts))  # no lat: no hemisphere flip
+    assert np.allclose(got[0], want[0], atol=1e-12)
+    assert np.allclose(got[1], want[1], atol=1e-12)
+
+
+def test_hemisphere_flip_is_half_a_year_of_phase():
+    """Rotation by pi, i.e. a sign flip on both components. Applied per fix, never per species."""
+    ts = pd.DatetimeIndex(["2021-01-15", "2021-07-15"])
+    e = _epoch(ts)
+
+    north = time.day_of_year_sincos_from_epoch(e, lat=np.array([45.0, 45.0]))
+    south = time.day_of_year_sincos_from_epoch(e, lat=np.array([-45.0, -45.0]))
+    assert np.allclose(np.array(south), -np.array(north), atol=1e-12)
+
+    # January in the south sits where July in the north does. 15 Jan is day 15 and 15 Jul is day 196,
+    # while half a year is 182.625 days, so these two dates are 1.625 days short of exactly opposite --
+    # 0.028 rad, which is the tolerance below rather than a slack figure.
+    jan_south = np.array([south[0][0], south[1][0]])
+    jul_north = np.array([north[0][1], north[1][1]])
+    assert np.allclose(jan_south, jul_north, atol=2 * np.pi * 1.625 / DAYS_PER_YEAR)
+
+    # The equator is assigned north, and the split is strictly on the sign of the latitude.
+    at_zero = time.day_of_year_sincos_from_epoch(e, lat=np.zeros(2))
+    assert np.allclose(np.array(at_zero), np.array(north), atol=1e-12)

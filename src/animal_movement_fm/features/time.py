@@ -120,3 +120,50 @@ def day_of_year_sincos(timestamp):
 
     angle = 2.0 * np.pi * ((doy - 1.0) / DAYS_PER_YEAR)
     return np.sin(angle), np.cos(angle)
+
+# epoch second variants for our Tier 2 ingest; note hese avoid pandas datetime conversion and stay compatible with 
+# our Tier 1 definitions
+
+SECONDS_PER_DAY = 86400.0
+SECONDS_PER_HOUR = 3600.0
+
+
+def local_solar_sincos_from_epoch(epoch_s, lon):
+    """
+    Return local solar time of day `(sin, cos)` from epoch seconds and longitude.
+
+    Matches our `local_solar_sincos`, but works directly from epoch seconds and keeps full sub minute precision. Used by 
+    Tier 2 ingest to avoid repeated pandas datetime conversion across large batches
+    """
+    epoch_s = np.asarray(epoch_s, dtype=float)
+    utc_hour = np.mod(epoch_s, SECONDS_PER_DAY) / SECONDS_PER_HOUR
+    solar_hour = np.mod(
+        utc_hour + np.asarray(lon, dtype=float) / DEG_LON_PER_HOUR,
+        HOURS_PER_DAY,
+    )
+    angle = 2.0 * np.pi * (solar_hour / HOURS_PER_DAY)
+    return np.sin(angle), np.cos(angle)
+
+
+def day_of_year_sincos_from_epoch(epoch_s, lat=None):
+    """
+    Return seasonal `(sin, cos)` features from epoch seconds.
+
+    When latitude is provided, southern hemisphere fixes are shifted by half a year so austral and boreal seasons align in 
+    phase. The correction uses only the sign of latitude rather than absolute position, and is applied per fix so tracks 
+    crossing the equator are handled correctly.
+    """
+    seconds = np.asarray(epoch_s, dtype="float64").astype("int64")
+    day = seconds.astype("datetime64[s]").astype("datetime64[D]")
+    year_start = day.astype("datetime64[Y]").astype("datetime64[D]")
+    doy = (day - year_start).astype("int64") + 1.0
+
+    angle = 2.0 * np.pi * ((doy - 1.0) / DAYS_PER_YEAR)
+    sin, cos = np.sin(angle), np.cos(angle)
+
+    if lat is not None:
+        # half year phase shift south of the equator
+        sign = np.where(np.asarray(lat, dtype=float) < 0.0, -1.0, 1.0)
+        sin, cos = sin * sign, cos * sign
+
+    return sin, cos
