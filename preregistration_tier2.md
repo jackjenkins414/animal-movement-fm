@@ -60,6 +60,8 @@ An important note on keeping these separate matters: selecting on cadence feasib
 
 **Modelling window.** All species share one modelling cadence of 6 hours and one window shape. The context length is now **C = 12** history bins, fixed by our Amendment A6, so a valid window spans **13 consecutive 6h bins**: 12 observed positions and the one step target. Windows per individual are therefore sum over maximal contiguous runs of $max(0, L − C)$, summed across runs, which means the context is subtracted once per run rather than once per individual. This applies identically to every species, every comparator and every tier; a change to C is an amendment, not a hyperparameter, because it changes both the eligible window population and the counts on which eligibility is judged.
 
+**Sampling.** Pretraining windows are drawn hierarchically, **species → individual → window**: a source species is drawn with probability proportional to the square root of its training partition window count at the registered context length, and a window is then drawn uniformly from that species' training windows, so individuals are weighted by the number of windows they contribute. The weights are fixed numerically in **Amendment A8**, revised for the rebuilt marine data by **Amendment A9**, and are excluded from the configuration budget, so they are never tuned. Draws are with replacement and training length is declared in optimiser steps rather than epochs. Validation, pseudo target scoring and sealed evaluation are **not** sampled: every eligible window is scored exactly once, and the weighting in Section 3 governs what is reported.
+
 **Leakage controls.**
 
 - We split individuals FIRST, then window. Windowing before splitting leaks near identical context windows across train and test, since adjacent windows differ by only a single fix. We do already do this, but its stated here because it is somewhat the primary leakage mode. 
@@ -108,9 +110,10 @@ The forecast is one step, so ADE and FDE both equal the geodesic error and are n
 | Symbol | Model |
 | --- | --- |
 | P | persistence: predict no movement |
+| V | constant velocity: extrapolate the last observed displacement. `models/averaging.DisplacementAveraging` at k = 1, the CVM already in the Tier-1 ladder. Reported, never used for selection. |
 | Z | zero-shot: the full FM, pretrained on all three source species and evaluated unchanged on a species completely unseen by Z. Tests whether knowledge transfers across species. |
 | Za | domain-ablated zero-shot: Z retrained without the source species matching the held-out species' domain. Tests the value of adding matched-domain source data. |
-| B | pooled-source baseline: trained on the same source pool as Z but stripped of the FM-specific package (like pretraining objective, species conditioning and specialised architecture)|
+| B | pooled source baseline: trained on the same source pool as Z but stripped of the FM-specific package (the masked reconstruction objective, the context derived conditioning path and the FM specific architecture) |
 | S | specialist: the same architecture and frozen configuration as Z, trained only on the held-out species' own training individuals. An oracle target species benchmark. Defined precisely below. |
 | F | fine-tuned: Z further trained on 1%, 10% or 100% of the held-out species' training individuals. Measures how target data changes the value of pretraining. Defined precisely below. |
 
@@ -363,6 +366,80 @@ We choose **split specific**, because the two roles ask different things of an i
 **What changed.** Gate 1 now states the split policy and its entry gate. No metric, comparator, success band, species role, secondary prediction, window floor or context length is altered.
 
 **Note on fixed versus proportional evaluation size.** At the time of this amendment we also considered whether validation and test size should scale with the number of eligible individuals, rather than remain fixed at 10 each. We retain the fixed 10/10 rule here because a percentage split would permit very small species to enter evaluation with only one or two test individuals, undermining the individual level species estimates and bootstrap uncertainty. However, the converse issue also remains; for species with many eligible individuals, restricting evaluation to only 10 test animals may discard useful independent replication. We therefore leave open a future preregistered amendment, made before the per species split manifests are committed (not merely before sealed evaluation, since our A2 outline forbids regenerating a frozen manifest) to increase the test count under a fixed mechanical rule or cap if justified by an individual count sensitivity analysis. Any such change would alter evaluation precision only and would not be introduced to make a particular species eligible.
+
+### A8; 14-08-2026: the pretraining sampling rule is registered
+
+**Status.** No Tier 2 model trained, no configuration evaluated, no held-out partition read. Species roles were frozen in `tier2_species_roles.md` at commit `a947127` before this amendment.
+
+**Defect.** Recall that in 2 we fixed the modelling window, the split policy and the leakage controls, but never said how training windows are actually drawn. The default any dataloader implements; a uniform over the pooled window set, puts the marine source at **5.7%** of draws. Thus, a weak NES result would then be unattributable between either source scarcity and taxonomic distance, and Secondary Prediction 2 would not be testable.
+
+**The rule.** Species -> individual -> window. A source species is drawn with probability proportional to $n_s^{\alpha}$ at $\alpha = 0.5$, where $n_s$ is its training partition window count at C = 12; a window is then drawn **uniformly within that species**, so individuals are weighted by how many windows they contribute. That is a training weight only — A5 governs what is reported regardless. Note, that draws are with replacement, so training length is declared in optimiser steps rather than epochs. Weights are computed once from the frozen manifests and read from `results/source_pool_weights.json`, and never re derived at runtime.
+
+Registered draw probabilities: *C. ciconia* **46.491%**, *C. elaphus* **38.619%**, *M. leonina* **14.889%**, from $n_s$ = 806,595 / 556,579 / 82,731. Superseded by A9; Za and the pseudo target folds renormalise $\sqrt{n_s}$ over the two species that remain.
+
+**$\alpha$ is excluded from the configuration budget and is never searched.** $\alpha = 1$ gives the 5.7% above; $\alpha = 0$ resamples *M. leonina* 9.75 times per stork pass, converting a coverage problem into an overfitting one. 0.5 is the conventional interior value, fixed by convention rather than by search.
+
+**Scope.** S and F train on one species, where the species level is degenerate. Validation, pseudo target scoring and sealed evaluation are not sampled at all; every eligible window is scored exactly once. B inherits the rule unchanged, since a sampling difference would confound the comparison B exists to make.
+
+**Unchanged.** No metric, comparator, success band, species role, secondary prediction, evaluation floor, window floor or context length. Derivation, the resampling ratios and the §4 reconciliation are in `notes.md` (16-08-2026) and `methods.md`.
+
+### A9; 16-08-2026: physical plausibility QC applied to the extract; marine data rebuilt; A8 weights revised
+
+**Status.** No Tier 2 model trained, no configuration evaluated, no held-out partition read. We found this defect while measuring window scale statistics, not while looking at any model output.
+
+**Defect.** `data.qc` computes seven flags; but our `extract_species_fixes.py` acted on none of the four physical plausibility ones. Correct for a GPS corpus, where every species flags zero fixes; but wrong for an Argos one. The largest retained 6h step was **12,959 km** on *M. leonina*; 2,160 km/h and eleven SOES fixes sat at positive latitude against a declared bound of −90..0.
+
+**Correction.** The drop mask is now built from a declared `DROP_FLAGS` tuple covering all seven flags, applied identically to every species. No per species rule is introduced.
+
+| | *M. leonina* | *M. angustirostris* |
+| --- | ---: | ---: |
+| fixes kept | 787,410 -> **556,106** | 621,467 -> **537,698** |
+| train / val / test individuals | 417/10/10 -> **397/10/10** | 353/10/10 -> **331/10/10** |
+| windows at C = 12 | 87,433 -> **55,822** | 58,000 -> **48,587** |
+
+| species | $n_s$ (train windows) | draw probability |
+| --- | ---: | ---: |
+| *Ciconia ciconia* | 806,595 | **47.911%** |
+| *Cervus elaphus* | 556,579 | **39.799%** |
+| *Mirounga leonina* | 53,076 | **12.290%** |
+
+Subpools: without stork, *Cervus* 76.406% / SOES 23.594%; without *Cervus*, stork 79.585% / SOES 20.415%; without SOES, stork 54.624% / *Cervus* 45.376%. $\alpha$ remains 0.5 and remains excluded from the budget.
+
+**Gate 2.** Standardisation refrozen over the 21 species table and the A4 decision re run; the branch is still `0.10 × p50` and **no species role changes**. Pair distances 5.10 -> **5.08** / 2.65 / 1.42 -> **1.46**, coverage 5.62/3.42 -> **5.47/2.74**.
+
+**Split manifests regenerated, not filtered.** A2's no regeneration rule protects a manifest whose splits have been used; but these two were committed on 15-08-2026, no partition of either had been read, and the population underneath them changed. Filtering would have discarded individuals without replacing them and could have taken val or test below the fixed 10. Regenerated at seed 42 under our unchanged A7 policy with F = 25, so **which individuals sit in validation and test changes**.
+
+**Declared limitation.** The interval aware ceiling operates on raw cadence, so the largest surviving 6h step is still **3,822 km** (SOES) and **1,822 km** (NES). A plausibility guard on the resampled grid would catch what a raw cadence guard cannot; that is new QC, is not registered here, and we declare it here as a limitation of the marine data in both tiers. The marine draw share falls to 12.290%; adding a second marine source to compensate was considered and rejected, since 1 selects sources for regime coverage and Tier 3 is fixed as differing in source pool size alone.
+
+### A10; 18-08-2026: descriptor transforms made consistent by measurement scale
+
+**Change.** Each gate 2 descriptor is put on its natural measurement scale before centring and scaling; ratio scale strictly positive -> **log10** (tail ratio, step CV, diel and seasonal amplitude); already logged -> none (median and p90 step); proportion in [0,1] -> **logit** (intermittency); correlation in [−1,1] -> none (rho).
+
+**Reason.** Four descriptors of the same kind as the two logged ones were z-scored raw. `tail_ratio` runs 3.6 to 234.4 and stork *is* the 234, sitting at z = +4.35 while the other twenty compress into 1.08 SD — a near binary "is this the stork" indicator. Each pair distance was consequently dominated by one descriptor: flying 71% tail ratio, terrestrial 78% intermittency, marine 92% rho.
+
+**Effect.** Pair distances 5.08 / 2.65 / 1.46 -> **3.21 / 2.44 / 1.88**; worst single descriptor share 92% -> **59%**; source pool coverage 5.47/2.74 -> **5.03/2.94** against **4.72/3.30** reversed, so 4 reads as before. **No role changes.** The A4 branch cannot change: `select_threshold_rule` never reads these descriptors, asserted in `tests/test_regime_profile.py` rather than established by re-running.
+
+**Status.** No Tier 2 model trained, no configuration evaluated, no held-out partition read. `results/regime_descriptor_standardisation.json` is regenerated over the same 21 species and now records the transform it was taken under.
+
+### A11; 18-08-2026: constant velocity added as a reported comparator
+
+**Change.** A comparator **V** joins P in the reported tables; constant velocity, extrapolating the last observed displacement. It is `models/averaging.DisplacementAveraging` at k = 1, already in the Tier 1 ladder, so this adds a column and no new machinery.
+
+**Reason.** P predicts no movement, which is a weak floor in exactly the stratum 4's bands are defined on; travel regime is by definition the steps where the animal moved. Reporting only P leaves the headline open to the objection that the baseline was chosen to be beatable.
+
+**Unchanged.** Rcall 4 bands remain defined against P, B and S, and the inner loop selection metric remains persistence skill on travel regime p90. Adding a stronger comparator and then moving the bands onto it would be like changing the goalposts; using it to select would be changing the search. If V beats Z on any held-out species that is reported as such.
+
+**Status.** Registered before any Tier 2 model trained, configuration evaluated, or held-out test partition read.
+
+### A12; 18-08-2026: auxiliary objective named accurately, masked tokens replaced, loss made radial
+
+**Terminology.** The masked reconstruction term trains **jointly with the forecast term in the same optimiser step**. There is no preceding self-supervised phase, so it is an **auxiliary objective**, not a pretraining stage, and 3s comparator table is updated to match. 
+
+**Masked tokens.** A masked token's projected embedding is replaced by a **learned mask embedding** rather than having its movement channels zeroed. Zeroing was ambiguous — heading is already gated to zero below 10 m and roughly a third of steps are low displacement, so a hidden token and a stationary animal produced the same input. Since the objective is part of what distinguishes Z from B, an ill posed objective weakens that comparison directly. Elapsed time, window scale and the clock features stay visible, as before.
+
+**Loss form.** Now the **radial pseudo-Huber** on the error magnitude, $\delta^2\left(\sqrt{1 + \frac{\lVert e\rVert^2}{\delta^2}} - 1\right)$, replacing the component wise Huber, which was axis dependent while every number 3 reports is a geodesic distance. ** $\delta$ remains 1.0** and is better supported under the radial form: the measured median normalised errors of 0.797 / 0.982 / 0.996 are error *magnitudes*, which is what the radial loss takes. The earlier claim that this held "by construction" is withdrawn — it is the measurement, not the algebra.
+
+**Status.** No Tier 2 model trained, no configuration evaluated, no held-out partition read.
 
 ## GenAI Reference 
 
