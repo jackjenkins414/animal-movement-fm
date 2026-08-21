@@ -82,6 +82,69 @@ DESCRIPTORS = [
     "seasonal_amplitude",
 ]
 
+# transform descriptors according to their measurement scale before standardisation; positive ratio scale variables use 
+# log10, proportions use logit, and bounded correlations stay on their original scale
+DESCRIPTOR_TRANSFORMS: dict[str, str] = {
+    "log10_step_median_m": "identity",  # already logged
+    "log10_step_p90_m": "identity",
+    "tail_ratio": "log10",
+    "step_cv": "log10",
+    "intermittency": "logit",
+    "rho": "identity",
+    "diel_amplitude": "log10",
+    "seasonal_amplitude": "log10",
+}
+
+# avoid undefined logits at exactly 0 or 1
+LOGIT_EPSILON = 1e-6
+
+
+def transform_descriptors(
+    values: pd.DataFrame,
+    transforms: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """
+    Transform descriptor columns onto their registered measurement scales.
+
+    The returned frame keeps the same index and column order as `values`. Columns default to `DESCRIPTOR_TRANSFORMS`, with 
+    unspecified descriptors left unchanged.
+    """
+    transforms = dict(transforms or DESCRIPTOR_TRANSFORMS)
+    transformed = {}
+
+    for column in values.columns:
+        transform = transforms.get(column, "identity")
+        series = values[column].astype(float)
+
+        if transform == "identity":
+            transformed[column] = series
+
+        elif transform == "log10":
+            invalid = series <= 0
+            if invalid.any():
+                offenders = values.index[invalid].tolist()
+                raise ValueError(
+                    f"{column} is registered for log10 transformation, but rows "
+                    f"{offenders} contain non-positive values"
+                )
+            transformed[column] = np.log10(series)
+
+        elif transform == "logit":
+            clipped = series.clip(
+                LOGIT_EPSILON,
+                1.0 - LOGIT_EPSILON,
+            )
+            transformed[column] = np.log(clipped / (1.0 - clipped))
+
+        else:
+            raise ValueError(
+                f"unknown descriptor transform {transform!r} for {column}"
+            )
+
+    return pd.DataFrame(
+        transformed,
+        index=values.index,
+    )[list(values.columns)]
 REQUIRED_COLUMNS = {"individual_id", "timestamp", "lat", "lon"}
 
 
@@ -774,10 +837,14 @@ def descriptor_standardisation(table: pd.DataFrame, *, descriptors=None) -> dict
     """
 
     descriptors = list(descriptors or DESCRIPTORS)
-    values = table[descriptors].astype(float)
+    transforms = {d: DESCRIPTOR_TRANSFORMS.get(d, "identity") for d in descriptors}
+    values = transform_descriptors(table[descriptors].astype(float), transforms)
     scale = values.std(ddof=0).replace(0, 1.0)
     return {
         "descriptors": descriptors,
+        # Recorded in the frozen payload, not just applied, so a distance can never be reproduced
+        # against a different transform than the one it was measured under.
+        "transforms": transforms,
         "centre": values.mean().to_dict(),
         "scale": scale.to_dict(),
         "species": table["species"].astype(str).tolist(),
@@ -816,10 +883,17 @@ def coverage_distances(
 
     if standardisation is None:
         standardisation = descriptor_standardisation(table, descriptors=descriptors)
+    if "transforms" not in standardisation:
+        raise ValueError(
+            "this frozen standardisation predates the descriptor transform rule and carries no "
+            "'transforms' key. Re-freeze it rather than reading it: centres and scales taken on raw "
+            "descriptors do not describe transformed ones, and mixing the two produces a number that "
+            "looks like a distance and is not."
+        )
     centre = pd.Series(standardisation["centre"])[descriptors]
     scale = pd.Series(standardisation["scale"])[descriptors].replace(0, 1.0)
 
-    z = (values - centre) / scale
+    z = (transform_descriptors(values, standardisation["transforms"]) - centre) / scale
     names = table["species"].tolist()
     return pd.DataFrame(
         [

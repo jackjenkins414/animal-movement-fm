@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from animal_movement_fm.analysis.regime_profile import (
+    DESCRIPTOR_TRANSFORMS,
     DESCRIPTORS,
     LOW_DISPLACEMENT_FRACTION,
     LOW_FRACTION_GUARD,
@@ -18,6 +19,7 @@ from animal_movement_fm.analysis.regime_profile import (
     cadence_steps,
     coverage_distances,
     descriptor_standardisation,
+    transform_descriptors,
     directional_persistence_from_turns,
     ensure_resampled,
     fit_step_mixture,
@@ -362,10 +364,33 @@ def test_ensure_resampled_rejects_a_frame_missing_required_columns():
 # --------------------------------------------------------------------------- coverage
 
 
+def _descriptor_columns(levels):
+    """
+    Descriptor columns placed on each descriptor's own valid domain, driven by one level per species.
+
+    Fixtures used to fill every descriptor with the same arbitrary numbers, including zeros and
+    negatives. That stopped being harmless once descriptors are transformed by measurement scale: a
+    tail ratio of 0 has no log10 and an intermittency of 1.5 is not a proportion. Driving all eight
+    from a single level keeps these tests testing what they are named for -- symmetry, outlier
+    ranking, frozen stability -- while every value stays a value the descriptor could actually take.
+    """
+    levels = np.asarray(levels, dtype=float)
+    columns = {}
+    for descriptor in DESCRIPTORS:
+        kind = DESCRIPTOR_TRANSFORMS[descriptor]
+        if kind == "log10":  # ratio scale, strictly positive
+            columns[descriptor] = 1.0 + 10.0**levels
+        elif kind == "logit":  # a proportion, strictly inside (0, 1)
+            columns[descriptor] = 0.05 + 0.9 / (1.0 + np.exp(-levels))
+        else:
+            columns[descriptor] = levels
+    return columns
+
+
 def test_coverage_distances_is_symmetric_with_a_zero_diagonal():
     rng = np.random.default_rng(1)
     table = pd.DataFrame(
-        {"species": ["a", "b", "c"], **{d: rng.normal(size=3) for d in DESCRIPTORS}}
+        {"species": ["a", "b", "c"], **_descriptor_columns(rng.normal(size=3))}
     )
 
     dist = coverage_distances(table)
@@ -378,7 +403,7 @@ def test_coverage_distances_ranks_the_outlier_furthest():
     table = pd.DataFrame(
         {
             "species": ["near_a", "near_b", "outlier"],
-            **{d: [0.0, 0.1, 9.0] for d in DESCRIPTORS},
+            **_descriptor_columns([0.0, 0.1, 9.0]),
         }
     )
 
@@ -394,7 +419,7 @@ def test_coverage_distances_rejects_missing_descriptors_rather_than_imputing():
     is an eligibility failure that must be raised, not filled.
     """
     table = pd.DataFrame(
-        {"species": ["a", "b"], **{d: [0.0, 1.0] for d in DESCRIPTORS}}
+        {"species": ["a", "b"], **_descriptor_columns([0.0, 1.0])}
     )
     table.loc[1, "rho"] = np.nan
 
@@ -408,9 +433,9 @@ def test_frozen_standardisation_keeps_a_pair_distance_stable_as_species_are_adde
     Secondary prediction 2 uses regime distance as the explanatory variable for uneven transfer, so
     the same pair must not change distance when an unrelated candidate is profiled.
     """
-    first = pd.DataFrame({"species": ["a", "b"], **{d: [0.0, 1.0] for d in DESCRIPTORS}})
+    first = pd.DataFrame({"species": ["a", "b"], **_descriptor_columns([0.0, 1.0])})
     later = pd.DataFrame(
-        {"species": ["a", "b", "c"], **{d: [0.0, 1.0, 50.0] for d in DESCRIPTORS}}
+        {"species": ["a", "b", "c"], **_descriptor_columns([0.0, 1.0, 50.0])}
     )
 
     frozen = descriptor_standardisation(first)
@@ -733,3 +758,69 @@ def test_the_module_no_longer_exports_the_old_stationary_vocabulary():
     import animal_movement_fm.analysis.regime_profile as module
 
     assert [name for name in vars(module) if "stationary" in name.lower()] == []
+
+
+# ------------------------------------------------------------------ descriptor transforms
+
+
+def test_each_descriptor_is_transformed_by_what_the_quantity_is():
+    """
+    The rule is measurement scale, not outcome: ratio scale -> log10, proportion -> logit, bounded
+    correlation -> raw. Pinned as a table because choosing transforms by where they move a distance
+    would be supervised feature selection with taxon as the target.
+    """
+    assert DESCRIPTOR_TRANSFORMS == {
+        "log10_step_median_m": "identity",  # the column is already a log10
+        "log10_step_p90_m": "identity",
+        "tail_ratio": "log10",
+        "step_cv": "log10",
+        "intermittency": "logit",
+        "rho": "identity",  # log is undefined on the negatives, and rho does go negative
+        "diel_amplitude": "log10",
+        "seasonal_amplitude": "log10",
+    }
+
+    values = pd.DataFrame(
+        {"tail_ratio": [10.0], "intermittency": [0.25], "rho": [-0.3], "log10_step_p90_m": [4.0]}
+    )
+    out = transform_descriptors(values)
+    assert out.loc[0, "tail_ratio"] == pytest.approx(1.0)
+    assert out.loc[0, "intermittency"] == pytest.approx(np.log(0.25 / 0.75))
+    assert out.loc[0, "rho"] == pytest.approx(-0.3)
+    assert out.loc[0, "log10_step_p90_m"] == pytest.approx(4.0)
+
+
+def test_a_non_positive_ratio_descriptor_is_rejected_not_floored():
+    """Flooring would invent a value for a species whose profile is wrong. Fix the profile."""
+    with pytest.raises(ValueError, match="non-positive values"):
+        transform_descriptors(pd.DataFrame({"tail_ratio": [0.0]}))
+
+
+def test_a_standardisation_frozen_before_the_transform_rule_is_refused():
+    """Centres taken on raw descriptors do not describe transformed ones; mixing them is silent."""
+    table = pd.DataFrame({"species": ["a", "b"], **_descriptor_columns([0.0, 1.0])})
+    stale = descriptor_standardisation(table)
+    stale.pop("transforms")
+
+    with pytest.raises(ValueError, match="predates the descriptor transform rule"):
+        coverage_distances(table, standardisation=stale)
+
+
+def test_the_a4_branch_cannot_move_when_a_descriptor_transform_changes():
+    """
+    A4 reads step quantiles, the low fraction and the mixture columns. It never reads the eight
+    descriptors, so the transform rule cannot reach it -- asserted here rather than left to a
+    re-run, because 'we checked and it did not move' is weaker than 'it cannot'.
+    """
+    table = pd.DataFrame([STORK, decision_row("walrus", 400.0, 900.0, 2500.0, 0.30)])
+    for descriptor, column in _descriptor_columns([0.0, 1.0]).items():
+        table[descriptor] = column
+
+    scrambled = table.copy()
+    for descriptor in DESCRIPTORS:
+        scrambled[descriptor] = scrambled[descriptor] * 1000.0 + 7.0
+
+    before, after = select_threshold_rule(table), select_threshold_rule(scrambled)
+    assert before.anchor_quantile == after.anchor_quantile == 50
+    assert before.multiplier == after.multiplier
+    assert before.pooled_only_species == after.pooled_only_species
