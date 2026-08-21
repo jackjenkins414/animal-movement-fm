@@ -10,7 +10,9 @@ Each run trains on the other two source species under the registered sampling ru
 individuals. Test partitions and held-out species are never opened here; configuration selection is a separate pass over 
 completed result files.
 
-`--probe` scores one run at several step counts to determine the fixed optimiser-step budget before the full grid is evaluated.
+`--probe` compares independent, complete training budgets to determine the fixed optimiser-step budget before the full grid is
+evaluated. Each budget starts from the same seed but has its own warmup/cosine schedule and checkpoint; the probe points are not
+successive checkpoints from one model.
 """
 
 from __future__ import annotations
@@ -21,17 +23,19 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import argparse
 import json
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
+from statistics import fmean
 
-import numpy as np
 import pandas as pd
 import torch
 
+from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.multispecies import SourcePool, SpeciesWindows
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
-from animal_movement_fm.data.split import id_key, load_split
+from animal_movement_fm.data.split import load_split
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched
 from animal_movement_fm.eval.harness import evaluate
 from animal_movement_fm.eval.selection import combine_folds, score_fold, select_configuration
@@ -60,6 +64,10 @@ GRID: tuple[tuple[int, int, float], ...] = tuple(
     for lr in (3e-4, 1e-3)
 )
 N_FOLDS = len(SOURCES)
+PROBE_GRID_INDEX = 6
+PROBE_SEED = 0
+REGISTERED_PROBE_BUDGETS: tuple[int, ...] = (5_000, 10_000, 20_000, 30_000, 40_000)
+PROBE_DESIGN = "independent_complete_schedules"
 
 
 def decode_index(index: int) -> tuple[int, int]:
@@ -76,6 +84,49 @@ def decode_index(index: int) -> tuple[int, int]:
 def run_id(grid_index: int, fold_index: int, seed: int) -> str:
     d_model, layers, lr = GRID[grid_index]
     return f"fold{fold_index}_g{grid_index:02d}_d{d_model}_L{layers}_lr{lr:g}_s{seed}"
+
+
+def build_inner_loop_config(grid_index: int, steps: int, seed: int) -> TrainConfig:
+    """
+    Build the registered full FM configuration used by every probe and selection run.
+
+    The reconstruction flag is deliberately explicit. Its dataclass default is false because the same training loop also builds
+    baseline B, but the inner loop selects the full FM package that is later retrained as Z.
+    """
+    d_model, layers, lr = GRID[grid_index]
+    config = TrainConfig(
+        d_model=d_model,
+        num_layers=layers,
+        lr=lr,
+        steps=steps,
+        seed=seed,
+        use_fm_package=True,
+        use_reconstruction_head=True,
+    )
+    if not config.use_fm_package or not config.use_reconstruction_head:
+        raise RuntimeError("the Tier 2 inner loop must train the complete registered FM package")
+    return config
+
+
+def validate_probe_request(grid_index: int, steps: int, seed: int) -> None:
+    """
+    Refuse any step-budget probe outside the registered Option A design."""
+    problems = []
+    if grid_index != PROBE_GRID_INDEX:
+        problems.append(f"grid index must be {PROBE_GRID_INDEX}, got {grid_index}")
+    if steps != REGISTERED_PROBE_BUDGETS[-1]:
+        problems.append(f"STEPS must be {REGISTERED_PROBE_BUDGETS[-1]}, got {steps}")
+    if seed != PROBE_SEED:
+        problems.append(f"seed must be {PROBE_SEED}, got {seed}")
+    if problems:
+        raise SystemExit("FAIL: unregistered step-budget probe: " + "; ".join(problems))
+
+
+def checkpoint_path(identifier: str, target_steps: int, *, probe: bool) -> Path:
+    """
+    Keep corrected full FM probe, grid and invalid legacy checkpoints disjoint."""
+    mode = "probe" if probe else "grid"
+    return CHECKPOINTS / f"{identifier}_registered_fullfm_{mode}_{target_steps}.pt"
 
 
 def boundary_m(profile_key: str) -> float:
@@ -117,19 +168,11 @@ def validation_frame(fold_index: int) -> pd.DataFrame:
     """
     segments_stem, split_stem, _ = SOURCES[fold_index]
     split = load_split(SPLITS / f"{split_stem}_split_seed42.json")
-    wanted = {id_key(i) for i in split.val}
-
-    import duckdb
-
-    frame = duckdb.connect().execute(
-        f"""
-        SELECT individual_id, bin_index, timestamp, lon, lat
-        FROM '{PROCESSED / f"{segments_stem}_segments.parquet"}'
-        ORDER BY individual_id, bin_index
-        """
-    ).df()
-    keep = np.fromiter((id_key(v) in wanted for v in frame["individual_id"]), bool, len(frame))
-    return frame.loc[keep].reset_index(drop=True)
+    frame = load_split_frame(
+        PROCESSED / f"{segments_stem}_segments.parquet",
+        split.val,
+    )
+    return frame[["individual_id", "bin_index", "timestamp", "lon", "lat"]].reset_index(drop=True)
 
 
 def score(model, frame: pd.DataFrame, fold_index: int, device: torch.device) -> dict:
@@ -166,11 +209,20 @@ def main() -> None:
         action="store_true",
         help="apply §4 to the 36 result files already on disk and print the winner",
     )
+    parser.add_argument(
+        "--select-probe",
+        action="store_true",
+        help="apply amendment T2 to the three corrected probe files and fix the step budget",
+    )
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
+    if args.select and args.select_probe:
+        raise SystemExit("FAIL: --select and --select-probe are mutually exclusive")
     if args.select:
         return report_selection()
+    if args.select_probe:
+        return report_probe_selection()
 
     raw = args.index if args.index is not None else os.environ.get("PBS_ARRAY_INDEX")
     if raw is None:
@@ -182,7 +234,8 @@ def main() -> None:
         )
 
     grid_index, fold_index = decode_index(int(raw))
-    d_model, layers, lr = GRID[grid_index]
+    if args.probe:
+        validate_probe_request(grid_index, args.steps, args.seed)
     identifier = run_id(grid_index, fold_index, args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -204,24 +257,28 @@ def main() -> None:
     frame = validation_frame(fold_index)
     print(f"validation frame : {len(frame):,} fixes, {frame['individual_id'].nunique()} individuals", flush=True)
 
-    config = TrainConfig(
-        d_model=d_model, num_layers=layers, lr=lr, steps=args.steps, seed=args.seed
-    )
-    ladder = _probe_ladder(args.steps) if args.probe else []
-    scores, reached = [], 0
+    config = build_inner_loop_config(grid_index, args.steps, args.seed)
+    budgets = probe_budgets(args.steps) if args.probe else [args.steps]
+    if args.probe:
+        print(
+            "probe budgets    : "
+            + ", ".join(f"{budget:,}" for budget in budgets)
+            + " independent complete schedules",
+            flush=True,
+        )
 
-    for target in [*ladder, args.steps]:
-        if target <= reached:
-            continue
-        stage = TrainConfig(**{**asdict(config), "steps": target})
+    scores = []
+    for target in budgets:
+        # a fresh config and target specific checkpoint make each point an independent complete training budget, so requeued jobs may
+        # resume that point, but no point inherits model or optimiser state from an earlier budget.
+        stage = build_inner_loop_config(grid_index, target, args.seed)
         result = train(
             stage,
             pool,
             device=device,
-            checkpoint_path=CHECKPOINTS / f"{identifier}_{target}.pt",
+            checkpoint_path=checkpoint_path(identifier, target, probe=args.probe),
             progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
         )
-        reached = target
         entry = {"steps": target, "final_loss": result.final_loss, **score(result.model, frame, fold_index, device)}
         scores.append(entry)
         print(f"  scored at {target:,} steps: skill {entry['skill']:+.4f}", flush=True)
@@ -236,19 +293,148 @@ def main() -> None:
         "scores": scores,
         "elapsed_s": time.time() - started,
         "probe": bool(args.probe),
+        "probe_design": PROBE_DESIGN if args.probe else None,
+        "probe_budgets": budgets if args.probe else None,
     }
-    out = RESULTS / f"{identifier}{'_probe' if args.probe else ''}.json"
+    suffix = "_registered_fullfm_probe" if args.probe else ""
+    out = RESULTS / f"{identifier}{suffix}.json"
     out.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"\nwrote {out}  ({payload['elapsed_s'] / 60:.1f} min)")
 
 
-def _probe_ladder(steps: int) -> list[int]:
-    """Return the intermediate probe points used to inspect convergence over the step budget."""
-    return [int(steps * f) for f in (0.125, 0.25, 0.5, 0.75)]
+def probe_budgets(max_steps: int) -> list[int]:
+    """
+    Return the five exact independent budgets in registered amendment T2.
+    """
+    if max_steps != REGISTERED_PROBE_BUDGETS[-1]:
+        raise ValueError(
+            f"registered probe maximum is {REGISTERED_PROBE_BUDGETS[-1]}, got {max_steps}"
+        )
+    return list(REGISTERED_PROBE_BUDGETS)
+
+
+def rank_probe_budgets(skills_by_budget: dict[int, list[float]]) -> list[dict]:
+    """
+    Rank budgets by T2; highest mean, highest minimum, then fewer steps.
+    """
+    if set(skills_by_budget) != set(REGISTERED_PROBE_BUDGETS):
+        raise ValueError(
+            "probe skill table must contain exactly "
+            + ", ".join(str(budget) for budget in REGISTERED_PROBE_BUDGETS)
+        )
+
+    candidates = []
+    for budget in REGISTERED_PROBE_BUDGETS:
+        skills = skills_by_budget[budget]
+        if len(skills) != N_FOLDS:
+            raise ValueError(f"budget {budget} has {len(skills)}/{N_FOLDS} fold scores")
+        if not all(math.isfinite(skill) for skill in skills):
+            raise ValueError(f"budget {budget} contains a non-finite skill")
+        candidates.append(
+            {
+                "steps": budget,
+                "mean_skill": fmean(skills),
+                "min_skill": min(skills),
+                "fold_skills": list(skills),
+            }
+        )
+
+    candidates.sort(key=lambda row: (-row["mean_skill"], -row["min_skill"], row["steps"]))
+    return candidates
+
+
+def _validate_registered_probe_run(run: dict, fold_index: int, path: Path) -> None:
+    """
+    Fail closed if a probe file is not one of the three corrected full FM runs.
+    """
+    expected_id = run_id(PROBE_GRID_INDEX, fold_index, PROBE_SEED)
+    config = run.get("config", {})
+    expected_config = asdict(
+        build_inner_loop_config(PROBE_GRID_INDEX, REGISTERED_PROBE_BUDGETS[-1], PROBE_SEED)
+    )
+    score_steps = [score.get("steps") for score in run.get("scores", [])]
+    checks = {
+        "run_id": run.get("run_id") == expected_id,
+        "grid_index": run.get("grid_index") == PROBE_GRID_INDEX,
+        "fold_index": run.get("fold_index") == fold_index,
+        "fold": run.get("fold") == SOURCES[fold_index][0],
+        "seed": config.get("seed") == PROBE_SEED,
+        "maximum steps": config.get("steps") == REGISTERED_PROBE_BUDGETS[-1],
+        "FM package": config.get("use_fm_package") is True,
+        "reconstruction head": config.get("use_reconstruction_head") is True,
+        "complete registered configuration": config == expected_config,
+        "probe marker": run.get("probe") is True,
+        "probe design": run.get("probe_design") == PROBE_DESIGN,
+        "registered budgets": run.get("probe_budgets") == list(REGISTERED_PROBE_BUDGETS),
+        "one score per registered budget": score_steps == list(REGISTERED_PROBE_BUDGETS),
+    }
+    failed = [label for label, passed in checks.items() if not passed]
+    if failed:
+        raise SystemExit(f"FAIL: {path} is not a corrected registered probe: {', '.join(failed)}")
+
+
+def report_probe_selection() -> None:
+    """
+    Apply T2 mechanically once all three corrected probe folds are on disk.
+    """
+    runs = []
+    paths = []
+    for fold_index in range(N_FOLDS):
+        path = RESULTS / (
+            f"{run_id(PROBE_GRID_INDEX, fold_index, PROBE_SEED)}_registered_fullfm_probe.json"
+        )
+        if not path.exists():
+            raise SystemExit(f"FAIL: missing corrected probe fold {fold_index}: {path}")
+        run = json.loads(path.read_text())
+        _validate_registered_probe_run(run, fold_index, path)
+        runs.append(run)
+        paths.append(path)
+
+    skills_by_budget = {
+        budget: [run["scores"][budget_index]["skill"] for run in runs]
+        for budget_index, budget in enumerate(REGISTERED_PROBE_BUDGETS)
+    }
+    ranked = rank_probe_budgets(skills_by_budget)
+    winner = ranked[0]
+    rank_by_steps = {candidate["steps"]: rank for rank, candidate in enumerate(ranked, start=1)}
+
+    print(f"\n{'steps':>8} {'stork':>9} {'Cervus':>9} {'SOES':>9} {'mean':>9} {'min':>9} {'rank':>5}")
+    for budget in REGISTERED_PROBE_BUDGETS:
+        candidate = next(row for row in ranked if row["steps"] == budget)
+        print(
+            f"{budget:>8,} "
+            + " ".join(f"{skill:>+9.4f}" for skill in candidate["fold_skills"])
+            + f" {candidate['mean_skill']:>+9.4f} {candidate['min_skill']:>+9.4f} "
+            + f"{rank_by_steps[budget]:>5}"
+        )
+
+    decision = {
+        "decision": "tier2_optimizer_step_budget",
+        "rule": ["highest_mean_skill", "highest_minimum_skill", "fewer_steps"],
+        "grid_index": PROBE_GRID_INDEX,
+        "config": {
+            "d_model": GRID[PROBE_GRID_INDEX][0],
+            "num_layers": GRID[PROBE_GRID_INDEX][1],
+            "lr": GRID[PROBE_GRID_INDEX][2],
+            "seed": PROBE_SEED,
+        },
+        "folds": [source[0] for source in SOURCES],
+        "candidates_by_rank": ranked,
+        "selected_steps": winner["steps"],
+        "source_files": [path.name for path in paths],
+    }
+    out = RESULTS / "tier2_probe_selection.json"
+    out.write_text(json.dumps(decision, indent=2) + "\n")
+    print(
+        f"\nselected optimiser-step budget: {winner['steps']:,} "
+        f"(mean {winner['mean_skill']:+.4f}, minimum {winner['min_skill']:+.4f})"
+    )
+    print(f"wrote {out}")
 
 
 def report_selection() -> None:
-    """Apply the registered selection rule to complete result sets on disk.
+    """
+    Apply the registered selection rule to complete result sets on disk.
 
     Incomplete configurations are reported and excluded rather than filled or inferred.
     """

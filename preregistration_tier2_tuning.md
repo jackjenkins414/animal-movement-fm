@@ -47,7 +47,7 @@ Applied in order:
 
 ## 5. Constants excluded from the budget
 
-These are fixed by design or by amendment and are **never searched**. A constant that cannot be searched cannot be searched toward a result.
+These are fixed by design or by amendment and are **never searched**, except for optimiser steps under the separate five-budget procedure registered in amendment T2. That procedure fixes one common budget before any valid full-grid run; no grid configuration receives its own training-length choice.
 
 | constant | value | fixed by |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ These are fixed by design or by amendment and are **never searched**. A constant
 | feedforward width | 2 x `d_model` | this document, 6 |
 | masking ratio (auxiliary objective) | 0.15 | this document, 6 |
 | reconstruction loss weight | 0.5 | this document, 6 |
-| optimiser steps | *to be fixed before the first run, from a convergence probe* | this document, 6 |
+| optimiser steps | selected once from {5k, 10k, 20k, 30k, 40k} by amendment T2, then common to every model | this document, 6, and T2 |
 
 ## 6. Representation and loss, with the measurements behind them
 
@@ -103,7 +103,7 @@ Metric space gives the terrestrial source 0.11% of the gradient at 39.8% of draw
 
 **The training recipe is Tier 1's**, and that is the point: Adam, warmup then cosine, clip 1.0, batch 256, warmup 0.1, dropout 0.1, four heads, all as `experiments/training/train_multiseed_gadi.py`. 
 
-**Training length is in optimiser steps, not epochs**, since draws are with replacement and there is no epoch to count. **One step budget applies to all three folds** even though their pools differ (609,655 / 859,671 / 1,363,174 windows): a smaller pool is resampled more often, not trained on for less time. The number is fixed from a convergence probe on a single configuration before the first scored run and recorded here. No configuration may be given more or fewer steps than another.
+**Training length is in optimiser steps, not epochs**, since draws are with replacement and there is no epoch to count. **One step budget applies to all three folds** even though their pools differ (609,655 / 859,671 / 1,363,174 windows); a smaller pool is resampled more often, not trained on for less time. Amendment T2 fixes that number on one configuration across all three pseudo target folds before the first valid full FM grid run. No grid configuration may be given more or fewer steps than another.
 
 **The masked reconstruction objective.** A random **15%** of context tokens are masked, at least one per window, and the model reconstructs their scaled displacement at weight **0.5** alongside the forecast term. A masked token's projected embedding is replaced by a learned mask embedding (A12); elapsed time, window scale and the clock pairs stay visible, since those are known for a hidden step exactly as they are for the target step at inference. Both constants are conventional rather than tuned; 0.15 is the standard masking rate, 0.5 is the weight Tier 1 gave its auxiliary state head and **neither is in the configuration budget nor searched**. It trains **jointly with the forecast term**, so it is an auxiliary objective, not a pretraining stage; it is what §1 of `preregistration_tier2.md` means by the pretraining objective in the FM package, present in Z and absent in B. Two stage and causal next step variants are maybe something we should look at next (added in notes.md). 
 
@@ -116,3 +116,13 @@ Fixed here because 2 requires B's specification in this record. **B is the Tier 
 ## 8. What this document does not permit
 
 No unregistered configuration enters the sealed evaluation. The inner loop may not alter the sampling rule, the split manifests, the regime boundary, the evaluation window floor, the context length, the cadence, or anything at all on the three held-out species. Any change to this document after the first tuning run is a dated amendment recorded here, with its status relative to test access, under the amendment policy of `preregistration_tier2.md`.
+
+## 9. Amendments after the first probe on 21-08-2026
+
+**T1; 21-08-2026 — invalid probe.** Gadi job `176913681` ran grid index 6, seed 0, fold 0 without the registered reconstruction head. Its 5k / 10k / 20k / 30k / 40k stork skills (-0.1748 / -0.2305 / -0.3353 / -0.3813 / -0.4035) are excluded. No source test partition or held-out species was scored, and no registered grid run had begun.
+
+**Correction.** The driver now requires the complete FM, loads only the selected source partition, treats the five budgets as independent schedules, and keeps corrected artifacts separate from the invalid run. 
+
+**T2; 21-08-2026 — corrected probe.** After seeing T1 but before any corrected score, fix training length using grid index 6 and seed 0 over all three pseudo target folds. In each fold independently train 5k, 10k, 20k, 30k and 40k schedules, opening no test partition or held-out-species file.
+
+**Decision.** Choose the budget with highest mean travel-p90 persistence skill across folds; exact ties go to highest minimum skill, then fewer steps. The winner is fixed for all 36 grid runs and subsequent registered models; `--select-probe` applies and records this rule mechanically.

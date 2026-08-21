@@ -6,8 +6,10 @@
 #   qsub -v STEPS=<n> -J 0-17  experiments/training/tier2_inner_loop.pbs
 #   qsub -v STEPS=<n> -J 18-35 experiments/training/tier2_inner_loop.pbs
 #
-# Probe with:
-#   qsub -v STEPS=40000,PROBE=1 -J 6-6 experiments/training/tier2_inner_loop.pbs
+# Corrected registered probe: grid index 6, seed 0, all three folds (indices 6, 18, 30).
+#   qsub -v STEPS=40000,PROBE=1 -J 6-30:12 experiments/training/tier2_inner_loop.pbs
+# After all three subjobs finish:
+#   uv run python experiments/training/tier2_inner_loop.py --select-probe
 
 #PBS -P um09
 #PBS -q gpuhopper
@@ -22,6 +24,8 @@
 #PBS -j oe
 #PBS -r y
 
+set -euo pipefail
+
 export PATH="$HOME/.local/bin:$PATH"
 export OMP_NUM_THREADS=$PBS_NCPUS
 
@@ -30,8 +34,16 @@ export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
 
 cd /g/data/um09/$USER/animal-movement-fm
 
-if [ -z "$STEPS" ]; then
+if [ -z "${STEPS:-}" ]; then
   echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=40000 ..." >&2
+  exit 1
+fi
+
+probe_args=()
+if [ "${PROBE:-0}" = "1" ]; then
+  probe_args=(--probe)
+elif [ "${PROBE:-0}" != "0" ]; then
+  echo "FAIL: PROBE must be 1 when enabled; got '$PROBE'" >&2
   exit 1
 fi
 
@@ -42,7 +54,7 @@ echo "=== nci_account before ==="
 nci_account -P um09 || true
 
 uv run python experiments/training/tier2_inner_loop.py \
-    --steps "$STEPS" ${PROBE:+--probe}
+    --steps "$STEPS" "${probe_args[@]}"
 
 echo "=== nci_account after ==="
 nci_account -P um09 || true

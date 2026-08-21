@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from animal_movement_fm.data.enu import encode_window, enu_steps, scale_target
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
@@ -67,24 +68,29 @@ class SpeciesWindows:
         import duckdb
 
         con = duckdb.connect()
-        # Get epoch seconds in DuckDB to avoid datetime unit mismatches in pandas.
-        frame = con.execute(
-            f"""
-            SELECT segment_id, individual_id, bin_index, epoch(timestamp) AS epoch_s, lon, lat
-            FROM '{segments_parquet}'
-            ORDER BY segment_id, bin_index
-            """
-        ).df()
-
-        # Canonicalise IDs so numeric Movebank and string RAATD manifests compare safely.
+        present = con.execute(
+            f"SELECT DISTINCT individual_id FROM '{segments_parquet}'"
+        ).df()["individual_id"]
         wanted = {id_key(i) for i in individual_ids}
-        keep = np.fromiter((id_key(v) in wanted for v in frame["individual_id"]), bool, len(frame))
-        if wanted and not keep.any():
+        selected = present[[id_key(value) in wanted for value in present]]
+        if wanted and selected.empty:
             raise ValueError(
                 f"none of the {len(wanted)} requested individuals appear in {segments_parquet}; "
                 "this is a manifest/segments mismatch, not an empty split"
             )
-        frame = frame.loc[keep].reset_index(drop=True)
+
+        # register ids in the parquet columns own dtype then push the partition filter into DuckDB; coordinates belonging to
+        # validation or test individuals therefore never enter a source-training frame.
+        con.register("split_ids", pd.DataFrame({"individual_id": selected.to_numpy()}))
+        # Get epoch seconds in DuckDB to avoid datetime unit mismatches in pandas.
+        frame = con.execute(
+            f"""
+            SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat
+            FROM '{segments_parquet}' s
+            SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id
+            ORDER BY s.segment_id, s.bin_index
+            """
+        ).df()
 
         segment_id = frame["segment_id"].to_numpy()
         bin_index = frame["bin_index"].to_numpy()
