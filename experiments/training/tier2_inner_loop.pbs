@@ -1,0 +1,48 @@
+#!/bin/bash
+# Tier 2 inner loop: 12 configurations x 3 pseudo-target folds, one seed each.
+# Array indices 0-35 are fold major: 0-11 stork, 12-23 Cervus, 24-35 M. leonina.
+#
+# We're doing:
+#   qsub -v STEPS=<n> -J 0-17  experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=<n> -J 18-35 experiments/training/tier2_inner_loop.pbs
+#
+# Probe with:
+#   qsub -v STEPS=40000,PROBE=1 -J 6-6 experiments/training/tier2_inner_loop.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier2_inner
+#PBS -j oe
+#PBS -r y
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+
+# keep uvs large CUDA cache off the home quota; prev error
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+if [ -z "$STEPS" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=40000 ..." >&2
+  exit 1
+fi
+
+# GenAI reference: assisted with the PBS run scaffolding, guards and accounting output around my registered 
+# Tier 2 experiment and resource specification. And just generally used GenAI to check my work here. 
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/tier2_inner_loop.py \
+    --steps "$STEPS" ${PROBE:+--probe}
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
