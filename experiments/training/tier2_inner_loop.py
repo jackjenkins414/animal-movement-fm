@@ -142,6 +142,8 @@ def run_diagnostic(
     seed: int,
     *,
     reconstruction: bool,
+    skip_nonfinite: bool = False,
+    anomaly: bool = False,
     device: torch.device,
     pool: PreparedPool,
     identifier: str,
@@ -156,7 +158,21 @@ def run_diagnostic(
     """
     config = build_diagnostic_config(grid_index, steps, seed, reconstruction=reconstruction)
     tag = "reconON" if reconstruction else "reconOFF"
-    print(f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring", flush=True)
+    if skip_nonfinite:
+        tag += "_skipNF"
+    if anomaly:
+        tag += "_anomaly"
+    print(
+        f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring"
+        + (", skipping non-finite steps" if skip_nonfinite else "")
+        + (", autograd anomaly detection on" if anomaly else ""),
+        flush=True,
+    )
+
+    if anomaly:
+        # names the operation that produced a NaN in the backward pass, at the cost of running every backward twice.
+        # Diagnostic only: it changes nothing that is computed, only how much bookkeeping surrounds it.
+        torch.autograd.set_detect_anomaly(True)
 
     result = train(
         config,
@@ -166,6 +182,7 @@ def run_diagnostic(
             f"{identifier}_{tag}", steps, probe=False, diagnose=True
         ),
         diagnose=True,
+        skip_nonfinite=skip_nonfinite,
         progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
     )
     # GenAI wrote the rest of the below from its suggestions on 21-08-26. I have checked it below 
@@ -180,6 +197,17 @@ def run_diagnostic(
             else "no finite step recorded"
         )
     )
+    n_nonfinite = sum(1 for row in result.grad_norms if not math.isfinite(row["grad_norm"]))
+    print(
+        f"non-finite steps : {n_nonfinite:,} of {len(result.grad_norms):,} "
+        f"({n_nonfinite / max(1, len(result.grad_norms)):.2%})"
+    )
+    if skip_nonfinite:
+        print(
+            f"skipped updates  : {result.skipped_steps:,} "
+            f"({result.skipped_steps / max(1, steps):.2%} of the budget)"
+        )
+
     if first is None:
         print("gradient norm    : finite at every step")
     else:
@@ -188,9 +216,9 @@ def run_diagnostic(
         print(
             f"  kind           : {record['kind']}  "
             + (
-                "(overflow in the backward pass; the clip poisons the model on this step)"
+                "(the norm's sum of squares overflowed; the clip zeroes the step)"
                 if record["kind"] == "inf"
-                else "(a NaN was already circulating before the clip; the damage is earlier)"
+                else "(a NaN was already in the gradients; the clip can neither cause nor contain it)"
             )
         )
         print(f"  loss at step   : {record['loss']}  (finite: {record['loss_finite']})")
@@ -212,6 +240,10 @@ def run_diagnostic(
         "fold_index": fold_index,
         "fold": SOURCES[fold_index][0],
         "reconstruction_head": bool(reconstruction),
+        "skip_nonfinite": bool(skip_nonfinite),
+        "anomaly_detection": bool(anomaly),
+        "skipped_steps": result.skipped_steps,
+        "n_nonfinite_steps": n_nonfinite,
         "config": asdict(config),
         "final_loss": result.final_loss,
         "loss_history": result.loss_history,
@@ -344,6 +376,16 @@ def main() -> None:
         action="store_true",
         help="diagnostic only: disable the auxiliary reconstruction head to isolate the divergence",
     )
+    parser.add_argument(
+        "--skip-nonfinite",
+        action="store_true",
+        help="diagnostic only: do not apply the optimiser step when the pre-clip gradient norm is non-finite",
+    )
+    parser.add_argument(
+        "--anomaly",
+        action="store_true",
+        help="diagnostic only: enable autograd anomaly detection to name the op producing a NaN",
+    )
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -359,6 +401,12 @@ def main() -> None:
             "FAIL: --no-reconstruction is only available under --diagnose. The inner loop trains the "
             "complete registered FM package; dropping the auxiliary objective from a scored run would "
             "make it an unregistered configuration."
+        )
+    if (args.skip_nonfinite or args.anomaly) and not args.diagnose:
+        raise SystemExit(
+            "FAIL: --skip-nonfinite and --anomaly are only available under --diagnose. Skipping optimiser "
+            "steps changes what a run applies and is not yet a registered amendment, so it must not appear "
+            "in a scored run until it is."
         )
     if args.select:
         return report_selection()
@@ -403,6 +451,8 @@ def main() -> None:
             args.steps,
             args.seed,
             reconstruction=not args.no_reconstruction,
+            skip_nonfinite=args.skip_nonfinite,
+            anomaly=args.anomaly,
             device=device,
             pool=pool,
             identifier=identifier,

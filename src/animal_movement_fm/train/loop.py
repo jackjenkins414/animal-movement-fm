@@ -93,6 +93,7 @@ class TrainResult:
     loss_shares: list[dict] = field(default_factory=list)
     grad_norms: list[dict] = field(default_factory=list)
     nonfinite_steps: list[dict] = field(default_factory=list)
+    skipped_steps: int = 0
     resumed_from: int = 0
 
     @property
@@ -143,15 +144,17 @@ def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, 
     """
     Describe the batch and the parameters involved in a non-finite gradient norm.
 
-    Called only after `clip_grad_norm_` has already run, which is deliberate: the clip multiplies every gradient by
-    `max_norm / (inf + 1e-6)`, i.e. by zero, so finite gradients become exactly zero while the overflowed elements
-    become `inf * 0 = NaN`. Whatever still reads non-finite is therefore the tensor the overflow originated in.
+    Called after `clip_grad_norm_` has already run, which is deliberate. The clip multiplies every gradient by
+    `max_norm / (total_norm + 1e-6)`, so with a non-finite norm that coefficient is zero: finite elements become exactly
+    zero and any infinite element becomes NaN. `origin_parameters` therefore separates the two cases. An empty list means
+    the elements were individually finite and only their sum of squares overflowed, so the clip zeroed the step cleanly;
+    a populated list names the tensors that were already non-finite before the clip could act.
     """
     return {
         "step": int(step),
-        # `inf` and `nan` mean different things here. An infinite norm is the trapdoor firing on this step: the forward
-        # pass was finite, something overflowed in the backward, and the clip is about to poison the model. A NaN norm
-        # means a NaN was already circulating before the clip could do anything, so the damage was done earlier.
+        # `inf` and `nan` distinguish where the failure began. An infinite norm with no named origin tensor is an
+        # aggregate overflow in the norm itself and the step is simply lost. A NaN norm means a NaN was already
+        # circulating in the backward pass, which the clip can neither cause nor contain.
         "kind": "inf" if math.isinf(float(grad_norm)) else "nan",
         "grad_norm": float(grad_norm),
         "loss": float(loss),
@@ -199,6 +202,7 @@ def train(
     log_every: int = 500,
     progress=None,
     diagnose: bool = False,
+    skip_nonfinite: bool = False,
 ) -> TrainResult:
     """
     Train one configuration on one prepared source pool.
@@ -210,6 +214,11 @@ def train(
     diagnostic run and a scored run follow identical numerics from the same seed. It is off by default because reading the
     norm forces a host/device synchronisation on every step; with it off the norm is inspected at the logging cadence, which
     still detects a poisoned run but localises it only to within `log_every` steps.
+
+    `skip_nonfinite` does change what is applied: when the pre-clip norm is non-finite the optimiser step is not taken, so
+    the update never reaches the weights. The learning-rate schedule still advances, keeping the cosine curve on the
+    registered timeline, and the count of skipped steps is returned so it can be reported. It is off by default and is not
+    part of any registered configuration; it exists to be measured before it is proposed as an amendment.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -228,7 +237,7 @@ def train(
     generator.manual_seed(config.seed)
 
     start_step, history, loss_shares = 0, [], []
-    grad_norms, nonfinite_steps = [], []
+    grad_norms, nonfinite_steps, skipped_steps = [], [], 0
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -251,6 +260,7 @@ def train(
         loss_shares = list(state.get("loss_shares", []))
         grad_norms = list(state.get("grad_norms", []))
         nonfinite_steps = list(state.get("nonfinite_steps", []))
+        skipped_steps = int(state.get("skipped_steps", 0))
 
     def save(step: int) -> None:
         if checkpoint_path is None:
@@ -271,6 +281,7 @@ def train(
                 "loss_shares": loss_shares,
                 "grad_norms": grad_norms,
                 "nonfinite_steps": nonfinite_steps,
+                "skipped_steps": skipped_steps,
                 "species": list(pool.names),
             },
             tmp,
@@ -306,19 +317,34 @@ def train(
         # a non finite norm can indicate a gradient spike that will propagate NaNs into the optimiser state 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         at_log_step = (step + 1) % log_every == 0 or step + 1 == config.steps
-        if diagnose or at_log_step:
-            # reading the norm synchronises with the device, so outside diagnose mode it is read at the logging cadence
+        skip_this_step = False
+        if diagnose or skip_nonfinite or at_log_step:
+            # reading the norm synchronises with the device, so with neither flag set it is read at the logging cadence
             norm = float(grad_norm)
             if diagnose:
-                grad_norms.append({"step": int(step), "grad_norm": norm})
-            if not math.isfinite(norm) and len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
-                nonfinite_steps.append(
-                    _nonfinite_record(
-                        step, norm, loss.detach(), features, targets, species, pool.names, model
-                    )
+                # the per-step input extreme is recorded alongside the norm so the two can be correlated afterwards
+                grad_norms.append(
+                    {
+                        "step": int(step),
+                        "grad_norm": norm,
+                        "loss": float(loss.detach()),
+                        "max_abs_feature": float(features.abs().max()),
+                    }
                 )
+            if not math.isfinite(norm):
+                if len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
+                    nonfinite_steps.append(
+                        _nonfinite_record(
+                            step, norm, loss.detach(), features, targets, species, pool.names, model
+                        )
+                    )
+                if skip_nonfinite:
+                    skip_this_step = True
+                    skipped_steps += 1
 
-        optimiser.step()
+        # the schedule advances either way, so a skipped step costs an update but does not shift the cosine curve
+        if not skip_this_step:
+            optimiser.step()
         scheduler.step()
 
         if (step + 1) % log_every == 0 or step + 1 == config.steps:
@@ -342,5 +368,6 @@ def train(
         loss_shares=loss_shares,
         grad_norms=grad_norms,
         nonfinite_steps=nonfinite_steps,
+        skipped_steps=skipped_steps,
         resumed_from=start_step,
     )
