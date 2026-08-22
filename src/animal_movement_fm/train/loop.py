@@ -40,6 +40,10 @@ RECONSTRUCTION_WEIGHT = 0.5
 # non-finite too, and the first few are the only informative ones.
 NONFINITE_RECORD_LIMIT = 20
 
+# T3: an optimiser step whose pre-clip gradient norm is not finite is not applied. Registered in
+# preregistration_tier2_tuning.md on 22-08-2026; the skipped count is reported for every run.
+SKIP_NONFINITE_STEPS = True
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -202,7 +206,7 @@ def train(
     log_every: int = 500,
     progress=None,
     diagnose: bool = False,
-    skip_nonfinite: bool = False,
+    skip_nonfinite: bool = SKIP_NONFINITE_STEPS,
 ) -> TrainResult:
     """
     Train one configuration on one prepared source pool.
@@ -215,10 +219,10 @@ def train(
     norm forces a host/device synchronisation on every step; with it off the norm is inspected at the logging cadence, which
     still detects a poisoned run but localises it only to within `log_every` steps.
 
-    `skip_nonfinite` does change what is applied: when the pre-clip norm is non-finite the optimiser step is not taken, so
-    the update never reaches the weights. The learning-rate schedule still advances, keeping the cosine curve on the
-    registered timeline, and the count of skipped steps is returned so it can be reported. It is off by default and is not
-    part of any registered configuration; it exists to be measured before it is proposed as an amendment.
+    `skip_nonfinite` withholds the optimiser step when the pre-clip norm is non-finite, so the update never reaches the
+    weights. The learning-rate schedule still advances, keeping the cosine curve on the registered timeline, and the count
+    of skipped steps is returned so it can be reported. This is registered behaviour (T3) and defaults to on; passing
+    false reproduces the pre-amendment failure and is for diagnostics only.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -248,6 +252,13 @@ def train(
                 "one configuration's training into another's."
             )
         model.load_state_dict(state["model"])
+        # a checkpoint written before T3 can hold NaN weights from a diverged run; resuming one would
+        # silently continue a dead model and produce a result file that looks like every other
+        if not all(torch.isfinite(parameter).all() for parameter in model.parameters()):
+            raise ValueError(
+                f"{checkpoint_path} holds non-finite weights, so the run it came from had already "
+                "diverged. Delete it and start that budget again rather than resuming a dead model."
+            )
         optimiser.load_state_dict(state["optimiser"])
         scheduler.load_state_dict(state["scheduler"])
         generator.set_state(state["generator"].to(generator.get_state().device))

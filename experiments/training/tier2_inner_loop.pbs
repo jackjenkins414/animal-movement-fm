@@ -16,12 +16,11 @@
 #   qsub -v STEPS=5000,DIAGNOSE=1,PBS_ARRAY_INDEX=18            experiments/training/tier2_inner_loop.pbs
 #   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,PBS_ARRAY_INDEX=18  experiments/training/tier2_inner_loop.pbs
 #
-# SKIPNF=1 withholds the optimiser step when the pre-clip gradient norm is non-finite; ANOMALY=1
-# turns on autograd anomaly detection to name the operation that produced a NaN. Both are
+# T3 withholds an optimiser step whose pre-clip gradient norm is non-finite, and applies to every
+# run. NOSKIPNF=1 turns it off and ANOMALY=1 turns on autograd anomaly detection; both are
 # diagnostic only and are refused outside DIAGNOSE=1.
-#   qsub -v STEPS=5000,DIAGNOSE=1,SKIPNF=1,PBS_ARRAY_INDEX=18            experiments/training/tier2_inner_loop.pbs
-#   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,SKIPNF=1,PBS_ARRAY_INDEX=18  experiments/training/tier2_inner_loop.pbs
-#   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,ANOMALY=1,PBS_ARRAY_INDEX=18 experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,NOSKIPNF=1,PBS_ARRAY_INDEX=18 experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,ANOMALY=1,PBS_ARRAY_INDEX=18  experiments/training/tier2_inner_loop.pbs
 
 #PBS -P um09
 #PBS -q gpuhopper
@@ -72,10 +71,10 @@ if [ "${DIAGNOSE:-0}" = "1" ]; then
     echo "FAIL: NORECON must be 1 when enabled; got '$NORECON'" >&2
     exit 1
   fi
-  if [ "${SKIPNF:-0}" = "1" ]; then
-    probe_args+=(--skip-nonfinite)
-  elif [ "${SKIPNF:-0}" != "0" ]; then
-    echo "FAIL: SKIPNF must be 1 when enabled; got '$SKIPNF'" >&2
+  if [ "${NOSKIPNF:-0}" = "1" ]; then
+    probe_args+=(--no-skip-nonfinite)
+  elif [ "${NOSKIPNF:-0}" != "0" ]; then
+    echo "FAIL: NOSKIPNF must be 1 when enabled; got '$NOSKIPNF'" >&2
     exit 1
   fi
   if [ "${ANOMALY:-0}" = "1" ]; then
@@ -87,8 +86,8 @@ if [ "${DIAGNOSE:-0}" = "1" ]; then
 elif [ "${DIAGNOSE:-0}" != "0" ]; then
   echo "FAIL: DIAGNOSE must be 1 when enabled; got '$DIAGNOSE'" >&2
   exit 1
-elif [ "${NORECON:-0}" != "0" ] || [ "${SKIPNF:-0}" != "0" ] || [ "${ANOMALY:-0}" != "0" ]; then
-  echo "FAIL: NORECON, SKIPNF and ANOMALY are only meaningful with DIAGNOSE=1" >&2
+elif [ "${NORECON:-0}" != "0" ] || [ "${NOSKIPNF:-0}" != "0" ] || [ "${ANOMALY:-0}" != "0" ]; then
+  echo "FAIL: NORECON, NOSKIPNF and ANOMALY are only meaningful with DIAGNOSE=1" >&2
   exit 1
 fi
 

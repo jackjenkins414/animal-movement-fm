@@ -142,7 +142,7 @@ def run_diagnostic(
     seed: int,
     *,
     reconstruction: bool,
-    skip_nonfinite: bool = False,
+    skip_nonfinite: bool = True,
     anomaly: bool = False,
     device: torch.device,
     pool: PreparedPool,
@@ -158,13 +158,14 @@ def run_diagnostic(
     """
     config = build_diagnostic_config(grid_index, steps, seed, reconstruction=reconstruction)
     tag = "reconON" if reconstruction else "reconOFF"
-    if skip_nonfinite:
-        tag += "_skipNF"
+    # T3 is the default, so only the deviation is named in the filename
+    if not skip_nonfinite:
+        tag += "_noSkipNF"
     if anomaly:
         tag += "_anomaly"
     print(
         f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring"
-        + (", skipping non-finite steps" if skip_nonfinite else "")
+        + (", withholding non-finite steps (T3)" if skip_nonfinite else ", T3 disabled")
         + (", autograd anomaly detection on" if anomaly else ""),
         flush=True,
     )
@@ -377,9 +378,9 @@ def main() -> None:
         help="diagnostic only: disable the auxiliary reconstruction head to isolate the divergence",
     )
     parser.add_argument(
-        "--skip-nonfinite",
+        "--no-skip-nonfinite",
         action="store_true",
-        help="diagnostic only: do not apply the optimiser step when the pre-clip gradient norm is non-finite",
+        help="diagnostic only: apply every optimiser step, reproducing the pre-T3 divergence",
     )
     parser.add_argument(
         "--anomaly",
@@ -402,11 +403,10 @@ def main() -> None:
             "complete registered FM package; dropping the auxiliary objective from a scored run would "
             "make it an unregistered configuration."
         )
-    if (args.skip_nonfinite or args.anomaly) and not args.diagnose:
+    if (args.no_skip_nonfinite or args.anomaly) and not args.diagnose:
         raise SystemExit(
-            "FAIL: --skip-nonfinite and --anomaly are only available under --diagnose. Skipping optimiser "
-            "steps changes what a run applies and is not yet a registered amendment, so it must not appear "
-            "in a scored run until it is."
+            "FAIL: --no-skip-nonfinite and --anomaly are only available under --diagnose. T3 registers that "
+            "a non-finite gradient step is withheld, so a scored run may not switch that off."
         )
     if args.select:
         return report_selection()
@@ -451,7 +451,7 @@ def main() -> None:
             args.steps,
             args.seed,
             reconstruction=not args.no_reconstruction,
-            skip_nonfinite=args.skip_nonfinite,
+            skip_nonfinite=not args.no_skip_nonfinite,
             anomaly=args.anomaly,
             device=device,
             pool=pool,
@@ -484,9 +484,20 @@ def main() -> None:
             checkpoint_path=checkpoint_path(identifier, target, probe=args.probe),
             progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
         )
-        entry = {"steps": target, "final_loss": result.final_loss, **score(result.model, frame, fold_index, device)}
+        # T3 requires the withheld-step count to travel with the result rather than only the log
+        entry = {
+            "steps": target,
+            "final_loss": result.final_loss,
+            "skipped_steps": result.skipped_steps,
+            "nonfinite_steps": result.nonfinite_steps,
+            **score(result.model, frame, fold_index, device),
+        }
         scores.append(entry)
-        print(f"  scored at {target:,} steps: skill {entry['skill']:+.4f}", flush=True)
+        print(
+            f"  scored at {target:,} steps: skill {entry['skill']:+.4f}, "
+            f"{result.skipped_steps:,} step(s) withheld ({result.skipped_steps / target:.2%})",
+            flush=True,
+        )
 
     payload = {
         "run_id": identifier,
