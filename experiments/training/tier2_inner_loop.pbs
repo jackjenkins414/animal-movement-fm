@@ -10,6 +10,11 @@
 #   qsub -v STEPS=40000,PROBE=1 -J 6-30:12 experiments/training/tier2_inner_loop.pbs
 # After all three subjobs finish:
 #   uv run python experiments/training/tier2_inner_loop.py --select-probe
+#
+# Training-only numerical diagnostic; no scoring, no selection. PBS refuses a single-element
+# array, so pass the index explicitly and omit -J:
+#   qsub -v STEPS=5000,DIAGNOSE=1,PBS_ARRAY_INDEX=18            experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=5000,DIAGNOSE=1,NORECON=1,PBS_ARRAY_INDEX=18  experiments/training/tier2_inner_loop.pbs
 
 #PBS -P um09
 #PBS -q gpuhopper
@@ -44,6 +49,27 @@ if [ "${PROBE:-0}" = "1" ]; then
   probe_args=(--probe)
 elif [ "${PROBE:-0}" != "0" ]; then
   echo "FAIL: PROBE must be 1 when enabled; got '$PROBE'" >&2
+  exit 1
+fi
+
+# I added this to the file after GenAI gave it to me; validated that it is correct
+if [ "${DIAGNOSE:-0}" = "1" ]; then
+  if [ "${PROBE:-0}" = "1" ]; then
+    echo "FAIL: DIAGNOSE=1 and PROBE=1 are mutually exclusive" >&2
+    exit 1
+  fi
+  probe_args=(--diagnose)
+  if [ "${NORECON:-0}" = "1" ]; then
+    probe_args+=(--no-reconstruction)
+  elif [ "${NORECON:-0}" != "0" ]; then
+    echo "FAIL: NORECON must be 1 when enabled; got '$NORECON'" >&2
+    exit 1
+  fi
+elif [ "${DIAGNOSE:-0}" != "0" ]; then
+  echo "FAIL: DIAGNOSE must be 1 when enabled; got '$DIAGNOSE'" >&2
+  exit 1
+elif [ "${NORECON:-0}" != "0" ]; then
+  echo "FAIL: NORECON is only meaningful with DIAGNOSE=1" >&2
   exit 1
 fi
 

@@ -49,6 +49,11 @@ SPLITS = REPO / "splits"
 RESULTS = REPO / "results" / "tier2_inner_loop"
 CHECKPOINTS = REPO / "checkpoints" / "tier2_inner_loop"
 
+# Diagnostic runs are written outside RESULTS on purpose. `report_selection` globs RESULTS for *.json, so a diagnostic
+# file placed there could be picked up as a scored run; a separate directory makes that structurally impossible rather
+# than relying on a name filter.
+DIAGNOSTICS = REPO / "results" / "tier2_diagnostics"
+
 # (segments stem, split manifest stem, profile row key)
 SOURCES: tuple[tuple[str, str, str], ...] = (
     ("ciconia_ciconia", "stork", "white_stork"),
@@ -108,6 +113,119 @@ def build_inner_loop_config(grid_index: int, steps: int, seed: int) -> TrainConf
     return config
 
 
+def build_diagnostic_config(
+    grid_index: int, steps: int, seed: int, *, reconstruction: bool
+) -> TrainConfig:
+    """
+    Build a training only configuration for a numerical diagnostic.
+
+    Identical to `build_inner_loop_config` except that the auxiliary reconstruction head can be switched off, which is the
+    point this exercise; it isolates whether a divergence follows the masked objective or the trunk. A configuration
+    built here is never scored and never selected from, so it does not carry the full FM guard.
+    """
+    d_model, layers, lr = GRID[grid_index]
+    return TrainConfig(
+        d_model=d_model,
+        num_layers=layers,
+        lr=lr,
+        steps=steps,
+        seed=seed,
+        use_fm_package=True,
+        use_reconstruction_head=bool(reconstruction),
+    )
+
+
+def run_diagnostic(
+    grid_index: int,
+    fold_index: int,
+    steps: int,
+    seed: int,
+    *,
+    reconstruction: bool,
+    device: torch.device,
+    pool: PreparedPool,
+    identifier: str,
+    started: float,
+) -> None:
+    """
+    Train one configuration on one fold with gradient norm instrumentation and no scoring.
+
+    Nothing here selects, ranks or compares anything: no pseudo target validation individuals are read, and the output is
+    written outside the results directory the selection pass globs. The run exists to name the step at which the pre clip
+    gradient norm first becomes non-finite, and the parameter the overflow originated in.
+    """
+    config = build_diagnostic_config(grid_index, steps, seed, reconstruction=reconstruction)
+    tag = "reconON" if reconstruction else "reconOFF"
+    print(f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring", flush=True)
+
+    result = train(
+        config,
+        pool,
+        device=device,
+        checkpoint_path=checkpoint_path(
+            f"{identifier}_{tag}", steps, probe=False, diagnose=True
+        ),
+        diagnose=True,
+        progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
+    )
+    # GenAI wrote the rest of the below from its suggestions on 21-08-26. I have checked it below 
+    norms = [row["grad_norm"] for row in result.grad_norms if math.isfinite(row["grad_norm"])]
+    first = result.first_nonfinite_step
+    print(f"\nfinal loss       : {result.final_loss:.5f}")
+    print(
+        "pre-clip norm    : "
+        + (
+            f"max {max(norms):.4g} over {len(norms):,} finite steps"
+            if norms
+            else "no finite step recorded"
+        )
+    )
+    if first is None:
+        print("gradient norm    : finite at every step")
+    else:
+        record = result.nonfinite_steps[0]
+        print(f"gradient norm    : first non-finite at step {first:,} of {steps:,}")
+        print(
+            f"  kind           : {record['kind']}  "
+            + (
+                "(overflow in the backward pass; the clip poisons the model on this step)"
+                if record["kind"] == "inf"
+                else "(a NaN was already circulating before the clip; the damage is earlier)"
+            )
+        )
+        print(f"  loss at step   : {record['loss']}  (finite: {record['loss_finite']})")
+        print(f"  max |feature|  : {record['max_abs_feature']:.6g}")
+        print(f"  max |target|   : {record['max_abs_target']:.6g}")
+        print(f"  batch species  : {record['batch_species']}")
+        # a short list points at the tensor that overflowed; a list covering the whole model means the forward pass was
+        # already poisoned, so the full set is kept in the JSON and only the head of it is printed
+        origin = record["origin_parameters"]
+        shown = ", ".join(origin[:8]) + (f", ... (+{len(origin) - 8} more)" if len(origin) > 8 else "")
+        print(f"  origin tensors : {len(origin)} of {sum(1 for _ in result.model.parameters())}: {shown}")
+
+    DIAGNOSTICS.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "diagnostic": "tier2_nonfinite_gradient",
+        "scored": False,
+        "run_id": identifier,
+        "grid_index": grid_index,
+        "fold_index": fold_index,
+        "fold": SOURCES[fold_index][0],
+        "reconstruction_head": bool(reconstruction),
+        "config": asdict(config),
+        "final_loss": result.final_loss,
+        "loss_history": result.loss_history,
+        "loss_shares": result.loss_shares,
+        "grad_norms": result.grad_norms,
+        "nonfinite_steps": result.nonfinite_steps,
+        "first_nonfinite_step": first,
+        "elapsed_s": time.time() - started,
+    }
+    out = DIAGNOSTICS / f"{identifier}_{tag}_{steps}_diagnostic.json"
+    out.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {out}  ({payload['elapsed_s'] / 60:.1f} min)")
+
+
 def validate_probe_request(grid_index: int, steps: int, seed: int) -> None:
     """
     Refuse any step-budget probe outside the registered Option A design."""
@@ -122,10 +240,12 @@ def validate_probe_request(grid_index: int, steps: int, seed: int) -> None:
         raise SystemExit("FAIL: unregistered step-budget probe: " + "; ".join(problems))
 
 
-def checkpoint_path(identifier: str, target_steps: int, *, probe: bool) -> Path:
+def checkpoint_path(
+    identifier: str, target_steps: int, *, probe: bool, diagnose: bool = False
+) -> Path:
     """
-    Keep corrected full FM probe, grid and invalid legacy checkpoints disjoint."""
-    mode = "probe" if probe else "grid"
+    Keep corrected full FM probe, grid, diagnostic and invalid legacy checkpoints disjoint."""
+    mode = "diagnose" if diagnose else ("probe" if probe else "grid")
     return CHECKPOINTS / f"{identifier}_registered_fullfm_{mode}_{target_steps}.pt"
 
 
@@ -214,11 +334,32 @@ def main() -> None:
         action="store_true",
         help="apply amendment T2 to the three corrected probe files and fix the step budget",
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="train only, with per-step gradient-norm instrumentation and no pseudo-target scoring",
+    )
+    parser.add_argument(
+        "--no-reconstruction",
+        action="store_true",
+        help="diagnostic only: disable the auxiliary reconstruction head to isolate the divergence",
+    )
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     if args.select and args.select_probe:
         raise SystemExit("FAIL: --select and --select-probe are mutually exclusive")
+    if args.diagnose and (args.probe or args.select or args.select_probe):
+        raise SystemExit(
+            "FAIL: --diagnose is a training-only instrument and cannot be combined with --probe, "
+            "--select or --select-probe. It produces no skill and selects nothing."
+        )
+    if args.no_reconstruction and not args.diagnose:
+        raise SystemExit(
+            "FAIL: --no-reconstruction is only available under --diagnose. The inner loop trains the "
+            "complete registered FM package; dropping the auxiliary objective from a scored run would "
+            "make it an unregistered configuration."
+        )
     if args.select:
         return report_selection()
     if args.select_probe:
@@ -253,6 +394,20 @@ def main() -> None:
         flush=True,
     )
     print(f"realised shares  : {pool.realised_species_shares(torch.Generator(device=device).manual_seed(0))}")
+
+    if args.diagnose:
+        # returns before any validation individual is touched
+        return run_diagnostic(
+            grid_index,
+            fold_index,
+            args.steps,
+            args.seed,
+            reconstruction=not args.no_reconstruction,
+            device=device,
+            pool=pool,
+            identifier=identifier,
+            started=started,
+        )
 
     frame = validation_frame(fold_index)
     print(f"validation frame : {len(frame):,} fixes, {frame['individual_id'].nunique()} individuals", flush=True)

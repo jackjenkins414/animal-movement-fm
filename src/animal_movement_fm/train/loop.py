@@ -36,6 +36,10 @@ FEEDFORWARD_MULTIPLIER = 2  # dim_feedforward = 2 x d_model, as `MovementFM` alr
 MASK_RATIO = 0.15
 RECONSTRUCTION_WEIGHT = 0.5
 
+# cap on stored non-finite gradient records; once a run is poisoned every later step is
+# non-finite too, and the first few are the only informative ones.
+NONFINITE_RECORD_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -87,11 +91,20 @@ class TrainResult:
     steps_run: int
     loss_history: list[float] = field(default_factory=list)
     loss_shares: list[dict] = field(default_factory=list)
+    grad_norms: list[dict] = field(default_factory=list)
+    nonfinite_steps: list[dict] = field(default_factory=list)
     resumed_from: int = 0
 
     @property
     def final_loss(self) -> float:
         return self.loss_history[-1] if self.loss_history else float("nan")
+
+    @property
+    def first_nonfinite_step(self) -> int | None:
+        """
+        Zero-based step of the earliest recorded non-finite gradient norm, if any.
+        """
+        return self.nonfinite_steps[0]["step"] if self.nonfinite_steps else None
 
 
 def lr_scale(step: int, *, total_steps: int, warmup_fraction: float) -> float:
@@ -126,6 +139,36 @@ def _sample_token_mask(
     return mask
 
 
+def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, model) -> dict:
+    """
+    Describe the batch and the parameters involved in a non-finite gradient norm.
+
+    Called only after `clip_grad_norm_` has already run, which is deliberate: the clip multiplies every gradient by
+    `max_norm / (inf + 1e-6)`, i.e. by zero, so finite gradients become exactly zero while the overflowed elements
+    become `inf * 0 = NaN`. Whatever still reads non-finite is therefore the tensor the overflow originated in.
+    """
+    return {
+        "step": int(step),
+        # `inf` and `nan` mean different things here. An infinite norm is the trapdoor firing on this step: the forward
+        # pass was finite, something overflowed in the backward, and the clip is about to poison the model. A NaN norm
+        # means a NaN was already circulating before the clip could do anything, so the damage was done earlier.
+        "kind": "inf" if math.isinf(float(grad_norm)) else "nan",
+        "grad_norm": float(grad_norm),
+        "loss": float(loss),
+        "loss_finite": bool(math.isfinite(float(loss))),
+        "max_abs_feature": float(features.abs().max()),
+        "max_abs_target": float(targets.abs().max()),
+        "batch_species": {
+            name: int((species == index).sum()) for index, name in enumerate(names)
+        },
+        "origin_parameters": [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+        ],
+    }
+
+
 def _species_loss_share(model, features, targets, species, names, config) -> dict:
     """
     Return each source species' share of the batch forecast loss.
@@ -155,12 +198,18 @@ def train(
     checkpoint_every: int = 2_000,
     log_every: int = 500,
     progress=None,
+    diagnose: bool = False,
 ) -> TrainResult:
     """
     Train one configuration on one prepared source pool.
 
-    If `checkpoint_path` exists, the run resumes from that saved state. Model, optimiser, scheduler, sampler generator, 
+    If `checkpoint_path` exists, the run resumes from that saved state. Model, optimiser, scheduler, sampler generator,
     and global RNG state are restored so a resumed run follows the same sampling/dropout sequence as an uninterrupted run.
+
+    `diagnose` only changes how often the pre-clip gradient norm is inspected, never what is computed or applied, so a
+    diagnostic run and a scored run follow identical numerics from the same seed. It is off by default because reading the
+    norm forces a host/device synchronisation on every step; with it off the norm is inspected at the logging cadence, which
+    still detects a poisoned run but localises it only to within `log_every` steps.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -179,6 +228,7 @@ def train(
     generator.manual_seed(config.seed)
 
     start_step, history, loss_shares = 0, [], []
+    grad_norms, nonfinite_steps = [], []
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -199,6 +249,8 @@ def train(
             torch.cuda.set_rng_state_all(state["cuda_rng"])
         start_step, history = state["step"], list(state["loss_history"])
         loss_shares = list(state.get("loss_shares", []))
+        grad_norms = list(state.get("grad_norms", []))
+        nonfinite_steps = list(state.get("nonfinite_steps", []))
 
     def save(step: int) -> None:
         if checkpoint_path is None:
@@ -217,6 +269,8 @@ def train(
                 "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 "loss_history": history,
                 "loss_shares": loss_shares,
+                "grad_norms": grad_norms,
+                "nonfinite_steps": nonfinite_steps,
                 "species": list(pool.names),
             },
             tmp,
@@ -246,7 +300,24 @@ def train(
             loss = normalised_huber(model(features), targets)
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+
+        # GenAI suggested this addition; we coded this part
+        # `clip_grad_norm_` returns the global gradient norm before clipping; keep it for diagnostics;
+        # a non finite norm can indicate a gradient spike that will propagate NaNs into the optimiser state 
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+        at_log_step = (step + 1) % log_every == 0 or step + 1 == config.steps
+        if diagnose or at_log_step:
+            # reading the norm synchronises with the device, so outside diagnose mode it is read at the logging cadence
+            norm = float(grad_norm)
+            if diagnose:
+                grad_norms.append({"step": int(step), "grad_norm": norm})
+            if not math.isfinite(norm) and len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
+                nonfinite_steps.append(
+                    _nonfinite_record(
+                        step, norm, loss.detach(), features, targets, species, pool.names, model
+                    )
+                )
+
         optimiser.step()
         scheduler.step()
 
@@ -269,5 +340,7 @@ def train(
         steps_run=config.steps - start_step,
         loss_history=history,
         loss_shares=loss_shares,
+        grad_norms=grad_norms,
+        nonfinite_steps=nonfinite_steps,
         resumed_from=start_step,
     )
