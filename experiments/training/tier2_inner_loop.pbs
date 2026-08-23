@@ -2,9 +2,11 @@
 # Tier 2 inner loop: 12 configurations x 3 pseudo-target folds, one seed each.
 # Array indices 0-35 are fold major: 0-11 stork, 12-23 Cervus, 24-35 M. leonina.
 #
-# We're doing:
-#   qsub -v STEPS=<n> -J 0-17  experiments/training/tier2_inner_loop.pbs
-#   qsub -v STEPS=<n> -J 18-35 experiments/training/tier2_inner_loop.pbs
+# max array size is 10 so the 36 grid run goes in 4 chunks
+#   qsub -v STEPS=<n> -J 0-9   experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=<n> -J 10-19 experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=<n> -J 20-29 experiments/training/tier2_inner_loop.pbs
+#   qsub -v STEPS=<n> -J 30-35 experiments/training/tier2_inner_loop.pbs
 #
 # Corrected registered probe: grid index 6, seed 0, all three folds (indices 6, 18, 30).
 #   qsub -v STEPS=40000,PROBE=1 -J 6-30:12 experiments/training/tier2_inner_loop.pbs

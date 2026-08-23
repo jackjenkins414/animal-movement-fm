@@ -207,6 +207,8 @@ def train(
     progress=None,
     diagnose: bool = False,
     skip_nonfinite: bool = SKIP_NONFINITE_STEPS,
+    monitor=None,
+    monitor_every: int = 0,
 ) -> TrainResult:
     """
     Train one configuration on one prepared source pool.
@@ -223,6 +225,12 @@ def train(
     weights. The learning-rate schedule still advances, keeping the cosine curve on the registered timeline, and the count
     of skipped steps is returned so it can be reported. This is registered behaviour (T3) and defaults to on; passing
     false reproduces the pre-amendment failure and is for diagnostics only.
+
+    `monitor`, if given, is called as `monitor(step, model)` every `monitor_every` optimiser steps
+    with the model in eval mode, and is what lets the arms holding the registered validation
+    privilege (S, and later F) select a checkpoint. It observes only: it draws no random numbers and
+    touches neither the optimiser nor the sampler, so a monitored run and an unmonitored run from the
+    same seed follow identical numerics. Z, B and Za pass no monitor and never reach the branch.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -369,6 +377,13 @@ def train(
             save(step + 1)
         if progress is not None and history and (step + 1) % log_every == 0:
             progress(step + 1, history[-1])
+        # checkpoint selection for the arms registered as allowed to see a validation set. Placed
+        # after the update so the model handed to the callback is the state reached at this step.
+        if monitor is not None and monitor_every and (step + 1) % monitor_every == 0:
+            model.eval()
+            with torch.no_grad():
+                monitor(step + 1, model)
+            model.train()
 
     save(config.steps)
     return TrainResult(

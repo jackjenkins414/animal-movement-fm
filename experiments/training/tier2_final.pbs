@@ -1,0 +1,57 @@
+#!/bin/bash
+# Tier 2 final training at the selected configuration, one model per subjob five seeds each.
+# Run plan: `tier2_final_train.py --list`.  0-4 Z, 5-9 B, 10-24 S, 25-39 Za (deferred).
+#
+# Critical path (max_array_size is 10):
+#   qsub -v STEPS=20000 -J 0-9   experiments/training/tier2_final.pbs
+#   qsub -v STEPS=20000 -J 10-19 experiments/training/tier2_final.pbs
+#   qsub -v STEPS=20000 -J 20-24 experiments/training/tier2_final.pbs
+# Za, once the freeze records the deferral:
+#   qsub -v STEPS=20000 -J 25-34 experiments/training/tier2_final.pbs
+#   qsub -v STEPS=20000 -J 35-39 experiments/training/tier2_final.pbs
+#
+# The configuration comes from results/tier2_inner_loop/tier2_selection.json; GRID_INDEX=<n> overrides
+# it and is recorded in every result file as unregistered.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier2_final
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+
+# keep uv's large CUDA cache off the home quota; same fix as the inner loop
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+extra_args=()
+if [ -n "${GRID_INDEX:-}" ]; then
+  echo "WARNING: overriding the selected configuration with grid index ${GRID_INDEX}" >&2
+  extra_args=(--grid-index "$GRID_INDEX")
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/tier2_final_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

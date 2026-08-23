@@ -669,6 +669,9 @@ def report_selection() -> None:
             {
                 "grid_index": grid_index,
                 "n_parameters": group[0]["n_parameters"],
+                # T2 fixes one common budget for every grid run, so disagreement here means the grid was submitted with two 
+                # different STEPS values and is not comparable
+                "steps": sorted({r["config"]["steps"] for r in group}),
                 "scores": [_as_fold_score(r) for r in group],
             }
         )
@@ -693,12 +696,67 @@ def report_selection() -> None:
         f"\nselected: grid index {winner['grid_index']}, d_model={d_model}, layers={layers}, lr={lr:g}, "
         f"mean skill {winner['mean_skill']:+.4f}, min {winner['min_skill']:+.4f}"
     )
-    if winner["grid_index"] == len(GRID) - 1:
+    boundary = winner["grid_index"] == len(GRID) - 1
+    if boundary:
         print(
             "\nNOTE: this is the maximum of the capacity axis. Report it as a boundary selection -- "
             "the budget did not bracket capacity from above, so 'best available' and 'best' are not "
             "distinguishable here."
         )
+    # GenAI reference: I asked GenAI to write the decision to local disk and refuse a mixed step budget after I found our
+    # final training driver would otherwise take its configuration from the command line (so a simple typo could put an
+    # unregistered cell into Z, B, S or Za)
+    budgets = sorted({steps for candidate in complete for steps in candidate["steps"]})
+    if len(budgets) != 1:
+        raise SystemExit(
+            f"FAIL: the scored runs used more than one optimiser-step budget ({budgets}). T2 fixes "
+            "one budget for all 36 runs, so these results are not comparable and no selection is made."
+        )
+    decision = {
+        "decision": "tier2_configuration",
+        "rule": [
+            "highest_mean_skill",
+            "highest_minimum_skill",
+            "fewer_parameters",
+            "lowest_grid_index",
+        ],
+        "selected_grid_index": winner["grid_index"],
+        "config": {"d_model": d_model, "num_layers": layers, "lr": lr},
+        "n_parameters": winner["n_parameters"],
+        "optimiser_steps": budgets[0],
+        "mean_skill": winner["mean_skill"],
+        "min_skill": winner["min_skill"],
+        "folds": [source[0] for source in SOURCES],
+        "n_configurations_scored": len(complete),
+        "incomplete_configurations": [
+            {"grid_index": grid_index, "n_folds": n} for grid_index, n in incomplete
+        ],
+        "capacity_boundary_selection": boundary,
+        "candidates_by_rank": [
+            {
+                "grid_index": candidate["grid_index"],
+                "d_model": GRID[candidate["grid_index"]][0],
+                "num_layers": GRID[candidate["grid_index"]][1],
+                "lr": GRID[candidate["grid_index"]][2],
+                "n_parameters": candidate["n_parameters"],
+                "mean_skill": combine_folds(candidate["scores"]),
+                "min_skill": min(score.skill for score in candidate["scores"]),
+                "fold_skills": {score.fold: score.skill for score in candidate["scores"]},
+            }
+            for candidate in sorted(
+                complete,
+                key=lambda c: (
+                    -combine_folds(c["scores"]),
+                    -min(s.skill for s in c["scores"]),
+                    c["n_parameters"],
+                    c["grid_index"],
+                ),
+            )
+        ],
+    }
+    out = RESULTS / "tier2_selection.json"
+    out.write_text(json.dumps(decision, indent=2) + "\n")
+    print(f"wrote {out}")
 
 
 def _as_fold_score(run: dict):
