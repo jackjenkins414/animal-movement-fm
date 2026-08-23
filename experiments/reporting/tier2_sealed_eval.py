@@ -31,7 +31,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
 
-from tier2_final_train import (  # the run plan and species tables live in one place
+from tier2_final_train import (  # the run plan and species tables live in one place # type: ignore
     EVALUATION_FLOOR,
     HELD_OUT,
     SEEDS,
