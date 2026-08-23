@@ -31,10 +31,13 @@ def _epoch_seconds(timestamps) -> np.ndarray:
     if values.dtype == object:
         import pandas as pd
 
+        # bug catch; to_datetime takes 1D only, and we always hand a (batch, context) so flatten and restore the shape; naive timestamps 
+        # skip this branch entirely which is why it went unexercised until a species arrived with tz aware ones...
         values = (
-            pd.DatetimeIndex(pd.to_datetime(values, utc=True))
+            pd.DatetimeIndex(pd.to_datetime(values.ravel(), utc=True))
             .tz_localize(None)
             .to_numpy()
+            .reshape(values.shape)
         )
 
     return values.astype("datetime64[s]").astype("int64").astype(float)
