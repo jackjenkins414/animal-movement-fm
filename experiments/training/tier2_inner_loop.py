@@ -29,8 +29,16 @@ from dataclasses import asdict
 from pathlib import Path
 from statistics import fmean
 
+import contextlib
+from dataclasses import replace as dataclass_replace
+
 import pandas as pd
 import torch
+
+try:  # torch >= 2.3
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:  # pragma; no cover, older torch on some machines
+    SDPBackend = sdpa_kernel = None
 
 from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.multispecies import SourcePool, SpeciesWindows
@@ -134,6 +142,43 @@ def build_diagnostic_config(
         use_reconstruction_head=bool(reconstruction),
     )
 
+# normalised east/north displacement channels; these can become very large when the per window scale hits its floor; the remaining 
+# channels are logged, gated or bounded
+DISPLACEMENT_CHANNELS = (0, 1)
+
+
+def sdpa_context(backend: str):
+    """
+    Return a context manager for selecting the scaled dot product attention backend.
+
+    This diagnostic isolates attention kernel instability from problems in the input representation. Large but finite projected 
+    inputs can trigger non finite gradients (as we found out) in the efficient SDPA backend while remaining finite under the 
+    math backend. Pinning the backend changes neither the data, targets, loss, nor model parameters.
+    """
+    if backend == "auto":
+        return contextlib.nullcontext()
+    if sdpa_kernel is None:
+        raise SystemExit(
+            "FAIL: this torch build has no torch.nn.attention.sdpa_kernel, so the backend cannot be "
+            "pinned. just repot torch version and run with --sdpa auto."
+        )
+    return sdpa_kernel({"math": SDPBackend.MATH, "efficient": SDPBackend.EFFICIENT_ATTENTION}[backend])
+
+
+def asinh_displacement_pool(pool: PreparedPool) -> PreparedPool:
+    """
+    Return a copy of the pool with `asinh` applied to normalised displacement channels.
+
+    This is a diagnostic representation change that compresses extreme encoder inputs while leaving the forecasting target unchanged. 
+    The registered forecast loss and loss share calculation therefore remain unchanged. If reconstruction is enabled, its displacement 
+    target comes from `features[..., :2]` and is transformed as well; any scored use of this representation would need to account for 
+    that explicitly.
+    """
+    features = pool.features.clone()
+    channels = list(DISPLACEMENT_CHANNELS)
+    features[..., channels] = torch.asinh(features[..., channels])
+    return dataclass_replace(pool, features=features)
+
 
 def run_diagnostic(
     grid_index: int,
@@ -144,6 +189,8 @@ def run_diagnostic(
     reconstruction: bool,
     skip_nonfinite: bool = True,
     anomaly: bool = False,
+    sdpa: str = "auto",
+    asinh_inputs: bool = False,
     device: torch.device,
     pool: PreparedPool,
     identifier: str,
@@ -163,10 +210,16 @@ def run_diagnostic(
         tag += "_noSkipNF"
     if anomaly:
         tag += "_anomaly"
+    if sdpa != "auto":
+        tag += f"_sdpa{sdpa}"
+    if asinh_inputs:
+        tag += "_asinh"
     print(
         f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring"
         + (", withholding non-finite steps (T3)" if skip_nonfinite else ", T3 disabled")
-        + (", autograd anomaly detection on" if anomaly else ""),
+        + (", autograd anomaly detection on" if anomaly else "")
+        + (f", SDPA backend pinned to {sdpa}" if sdpa != "auto" else "")
+        + (", asinh on displacement channels" if asinh_inputs else ""),
         flush=True,
     )
 
@@ -175,17 +228,28 @@ def run_diagnostic(
         # Diagnostic only: it changes nothing that is computed, only how much bookkeeping surrounds it.
         torch.autograd.set_detect_anomaly(True)
 
-    result = train(
-        config,
-        pool,
-        device=device,
-        checkpoint_path=checkpoint_path(
-            f"{identifier}_{tag}", steps, probe=False, diagnose=True
-        ),
-        diagnose=True,
-        skip_nonfinite=skip_nonfinite,
-        progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
-    )
+    if asinh_inputs:
+        pool = asinh_displacement_pool(pool)
+        # GenAI print statement for clarity
+        print(
+            f"  asinh applied      : max |displacement| now "
+            f"{float(pool.features[..., list(DISPLACEMENT_CHANNELS)].abs().max()):.4g}",
+            flush=True,
+        )
+
+    with sdpa_context(sdpa):
+        result = train(
+            config,
+            pool,
+            device=device,
+            checkpoint_path=checkpoint_path(
+                f"{identifier}_{tag}", steps, probe=False, diagnose=True
+            ),
+            diagnose=True,
+            skip_nonfinite=skip_nonfinite,
+            strict_budget=False,
+            progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
+        )
     # GenAI wrote the rest of the below from its suggestions on 21-08-26. I have checked it below 
     norms = [row["grad_norm"] for row in result.grad_norms if math.isfinite(row["grad_norm"])]
     first = result.first_nonfinite_step
@@ -243,6 +307,16 @@ def run_diagnostic(
         "reconstruction_head": bool(reconstruction),
         "skip_nonfinite": bool(skip_nonfinite),
         "anomaly_detection": bool(anomaly),
+        "sdpa_backend": sdpa,
+        "asinh_displacement_inputs": bool(asinh_inputs),
+        "asinh_also_transforms_reconstruction_target": bool(asinh_inputs and reconstruction),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "attempted_batches": result.attempted_batches,
+        "applied_updates": result.applied_updates,
+        "withheld_fraction": result.withheld_fraction,
+        "reached_registered_budget": result.applied_updates >= steps,
         "skipped_steps": result.skipped_steps,
         "n_nonfinite_steps": n_nonfinite,
         "config": asdict(config),
@@ -387,6 +461,17 @@ def main() -> None:
         action="store_true",
         help="diagnostic only: enable autograd anomaly detection to name the op producing a NaN",
     )
+    parser.add_argument(
+        "--sdpa",
+        choices=("auto", "math", "efficient"),
+        default="auto",
+        help="diagnostic only: pin the attention backend (PyTorch issue #125674)",
+    )
+    parser.add_argument(
+        "--asinh-inputs",
+        action="store_true",
+        help="diagnostic only: apply asinh to the normalised displacement channels",
+    )
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -407,6 +492,14 @@ def main() -> None:
         raise SystemExit(
             "FAIL: --no-skip-nonfinite and --anomaly are only available under --diagnose. T3 registers that "
             "a non-finite gradient step is withheld, so a scored run may not switch that off."
+        )
+    if (args.sdpa != "auto" or args.asinh_inputs) and not args.diagnose:
+        raise SystemExit(
+            "FAIL: --sdpa and --asinh-inputs are only available under --diagnose. Pinning the "
+            "attention backend changes no registered quantity and may well become the default for "
+            "every arm, but that is a decision to record in the tuning document, not one to make by "
+            "passing a flag to a scored run. --asinh-inputs changes the registered input "
+            "representation (tuning s6) and needs an amendment before it can be scored."
         )
     if args.select:
         return report_selection()
@@ -453,6 +546,8 @@ def main() -> None:
             reconstruction=not args.no_reconstruction,
             skip_nonfinite=not args.no_skip_nonfinite,
             anomaly=args.anomaly,
+            sdpa=args.sdpa,
+            asinh_inputs=args.asinh_inputs,
             device=device,
             pool=pool,
             identifier=identifier,

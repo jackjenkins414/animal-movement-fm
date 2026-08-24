@@ -44,6 +44,42 @@ NONFINITE_RECORD_LIMIT = 20
 # preregistration_tier2_tuning.md on 22-08-2026; the skipped count is reported for every run.
 SKIP_NONFINITE_STEPS = True
 
+# T4; our registered budget counts applied optimiser updates and the LR schedule advances only with those updates, so
+# keep drawing batches until `config.steps` updates are applied; idea here is to this cap makes a fatal run fail 
+MAX_ATTEMPT_MULTIPLIER = 4
+
+def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
+    """
+    Return the pre clip gradient norm and if any gradient element is non finite.
+
+    Use normal norm calculation first. If aggregate norm is non finite but every gradient element is finite, then we recompute 
+    the norm in float64 to handle aggregate overflow. Gradients are clipped only when the resulting norm is finite.
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    if not grads:
+        return 0.0, False
+
+    total = float(torch.linalg.vector_norm(torch.stack([g.norm(2) for g in grads]), 2))
+    nonfinite_element = False
+    if not math.isfinite(total):
+        nonfinite_element = any(not torch.isfinite(g).all() for g in grads)
+        if not nonfinite_element:
+            # all elements are finite; only the float32 aggregate overflowed
+            total = float(
+                torch.linalg.vector_norm(
+                    torch.stack(
+                        [torch.linalg.vector_norm(g, 2, dtype=torch.float64) for g in grads]
+                    ),
+                    2,
+                )
+            )
+
+    if math.isfinite(total) and total > max_norm:
+        coefficient = max_norm / (total + 1e-6)
+        for grad in grads:
+            grad.mul_(coefficient)
+
+    return total, nonfinite_element
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -98,7 +134,15 @@ class TrainResult:
     grad_norms: list[dict] = field(default_factory=list)
     nonfinite_steps: list[dict] = field(default_factory=list)
     skipped_steps: int = 0
+    attempted_batches: int = 0
+    applied_updates: int = 0
     resumed_from: int = 0
+
+    # reporting convenience that GenAI suggested I add
+    @property
+    def withheld_fraction(self) -> float:
+        """Withheld attempts as a share of all attempts. Zero in a healthy run."""
+        return self.skipped_steps / self.attempted_batches if self.attempted_batches else 0.0
 
     @property
     def final_loss(self) -> float:
@@ -146,19 +190,17 @@ def _sample_token_mask(
 
 def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, model) -> dict:
     """
-    Describe the batch and the parameters involved in a non-finite gradient norm.
+    Record diagnostic details for a batch with a non finite gradient norm.
 
-    Called after `clip_grad_norm_` has already run, which is deliberate. The clip multiplies every gradient by
-    `max_norm / (total_norm + 1e-6)`, so with a non-finite norm that coefficient is zero: finite elements become exactly
-    zero and any infinite element becomes NaN. `origin_parameters` therefore separates the two cases. An empty list means
-    the elements were individually finite and only their sum of squares overflowed, so the clip zeroed the step cleanly;
-    a populated list names the tensors that were already non-finite before the clip could act.
+    Since clipping is only applied to finite norms, the gradients inspected here are unchanged from autograd. `origin_parameters` 
+    thus identifies parameters with legit non finite gradients; note an empty list indicates aggregate norm overflow despite finite 
+    gradient elements.
     """
     return {
         "step": int(step),
-        # `inf` and `nan` distinguish where the failure began. An infinite norm with no named origin tensor is an
-        # aggregate overflow in the norm itself and the step is simply lost. A NaN norm means a NaN was already
-        # circulating in the backward pass, which the clip can neither cause nor contain.
+        # `inf` and `nan` distinguish where the failure began. An infinite norm with no named origin tensor is an aggregate overflow 
+        # in the norm itself and the step is simply lost. A NaN norm means a NaN was already circulating in the backward pass, which 
+        # the clip can neither cause nor contain.
         "kind": "inf" if math.isinf(float(grad_norm)) else "nan",
         "grad_norm": float(grad_norm),
         "loss": float(loss),
@@ -209,28 +251,23 @@ def train(
     skip_nonfinite: bool = SKIP_NONFINITE_STEPS,
     monitor=None,
     monitor_every: int = 0,
+    strict_budget: bool = True,
 ) -> TrainResult:
     """
-    Train one configuration on one prepared source pool.
+    Train one configuration on a prepared source pool.
 
-    If `checkpoint_path` exists, the run resumes from that saved state. Model, optimiser, scheduler, sampler generator,
-    and global RNG state are restored so a resumed run follows the same sampling/dropout sequence as an uninterrupted run.
+    If `checkpoint_path` already exists, we resume training from the saved model, optimiser, scheduler, sampler generator, etc; 
+    restoring all of those files is important so a resumed run follows the same sampling and dropout sequence as the 
+    uninterrupted run.
 
-    `diagnose` only changes how often the pre-clip gradient norm is inspected, never what is computed or applied, so a
-    diagnostic run and a scored run follow identical numerics from the same seed. It is off by default because reading the
-    norm forces a host/device synchronisation on every step; with it off the norm is inspected at the logging cadence, which
-    still detects a poisoned run but localises it only to within `log_every` steps.
+    Under our registered T3/T4 behaviour, optimiser updates with non-finite pre clip gradient norms can be withheld. `config.steps` 
+    counts applied optimiser updates instead of just attempted batches, and the LR schedule advances only when an update is really
+    applied. So the loop keeps drawing batches until the registered update budget is reached, subject to `MAX_ATTEMPT_MULTIPLIER`; 
+    'strict_budget` controls whether failure to reach that budget raises or is returned as a short diagnostic run.
 
-    `skip_nonfinite` withholds the optimiser step when the pre-clip norm is non-finite, so the update never reaches the
-    weights. The learning-rate schedule still advances, keeping the cosine curve on the registered timeline, and the count
-    of skipped steps is returned so it can be reported. This is registered behaviour (T3) and defaults to on; passing
-    false reproduces the pre-amendment failure and is for diagnostics only.
-
-    `monitor`, if given, is called as `monitor(step, model)` every `monitor_every` optimiser steps
-    with the model in eval mode, and is what lets the arms holding the registered validation
-    privilege (S, and later F) select a checkpoint. It observes only: it draws no random numbers and
-    touches neither the optimiser nor the sampler, so a monitored run and an unmonitored run from the
-    same seed follow identical numerics. Z, B and Za pass no monitor and never reach the branch.
+    `diagnose records additional gradient information without changing the training calculation itself. If `monitor` is supplied, 
+    it observes the model in eval mode every `monitor_every` applied updates for checkpoint selection, without drawing random numbers 
+    or modifying the optimiser or sampler state.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -248,7 +285,7 @@ def train(
     generator = torch.Generator(device=device)
     generator.manual_seed(config.seed)
 
-    start_step, history, loss_shares = 0, [], []
+    start_step, attempted, history, loss_shares = 0, 0, [], []
     grad_norms, nonfinite_steps, skipped_steps = [], [], 0
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
@@ -276,6 +313,9 @@ def train(
         if state.get("cuda_rng") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state["cuda_rng"])
         start_step, history = state["step"], list(state["loss_history"])
+        # pre T4 checkpoints have no attempt count; treating it as the applied count is the only honest fallback 
+        # and is flagged by attempted == applied on a run that clearly skipped
+        attempted = int(state.get("attempted", state["step"]))
         loss_shares = list(state.get("loss_shares", []))
         grad_norms = list(state.get("grad_norms", []))
         nonfinite_steps = list(state.get("nonfinite_steps", []))
@@ -290,6 +330,7 @@ def train(
             {
                 "config": asdict(config),
                 "step": step,
+                "attempted": attempted,
                 "model": model.state_dict(),
                 "optimiser": optimiser.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -309,7 +350,13 @@ def train(
         tmp.replace(checkpoint_path)
 
     model.train()
-    for step in range(start_step, config.steps):
+    # T4's four clocks; `applied` is the registered budget; `attempted` is how many batches it cost
+    # they are equal in a healthy run and the gap between them is the thing worth reporting
+    applied = start_step
+    max_attempts = MAX_ATTEMPT_MULTIPLIER * config.steps
+    while applied < config.steps and attempted < max_attempts:
+        step = attempted  # attempt index, so a diagnostic record points at the batch that failed
+        attempted += 1
         features, targets, species = pool.sample(generator, config.batch_size)
 
         optimiser.zero_grad(set_to_none=True)
@@ -332,64 +379,82 @@ def train(
         loss.backward()
 
         # GenAI suggested this addition; we coded this part
-        # `clip_grad_norm_` returns the global gradient norm before clipping; keep it for diagnostics;
-        # a non finite norm can indicate a gradient spike that will propagate NaNs into the optimiser state 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        at_log_step = (step + 1) % log_every == 0 or step + 1 == config.steps
-        skip_this_step = False
-        if diagnose or skip_nonfinite or at_log_step:
-            # reading the norm synchronises with the device, so with neither flag set it is read at the logging cadence
-            norm = float(grad_norm)
-            if diagnose:
-                # the per-step input extreme is recorded alongside the norm so the two can be correlated afterwards
-                grad_norms.append(
-                    {
-                        "step": int(step),
-                        "grad_norm": norm,
-                        "loss": float(loss.detach()),
-                        "max_abs_feature": float(features.abs().max()),
-                    }
+        # the global gradient norm before clipping; a non finite norm can indicate a gradient spike
+        # that will propagate NaNs into the optimiser state. T4 computes it stably; see the helper
+        norm, nonfinite_element = _clip_grad_norm_stable(model.parameters(), config.grad_clip)
+        if diagnose:
+            # the per-attempt input extreme is recorded alongside the norm so the two can be correlated afterwards
+            grad_norms.append(
+                {
+                    "step": int(step),
+                    "applied": int(applied),
+                    "grad_norm": norm,
+                    "nonfinite_element": bool(nonfinite_element),
+                    "loss": float(loss.detach()),
+                    "max_abs_feature": float(features.abs().max()),
+                }
+            )
+
+        if not math.isfinite(norm):
+            if len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
+                record = _nonfinite_record(
+                    step, norm, loss.detach(), features, targets, species, pool.names, model
                 )
-            if not math.isfinite(norm):
-                if len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
-                    nonfinite_steps.append(
-                        _nonfinite_record(
-                            step, norm, loss.detach(), features, targets, species, pool.names, model
-                        )
-                    )
-                if skip_nonfinite:
-                    skip_this_step = True
-                    skipped_steps += 1
+                # T4 distinguishes the two causes directly rather than inferring them from whether
+                # the clip left any origin tensors behind
+                record["nonfinite_element"] = bool(nonfinite_element)
+                record["applied"] = int(applied)
+                nonfinite_steps.append(record)
+            if skip_nonfinite:
+                skipped_steps += 1
+                # T4: neither the optimiser nor the schedule advances. The registered cosine curve is
+                # defined over applied updates, so a withheld attempt costs a batch and nothing else
+                continue
 
-        # the schedule advances either way, so a skipped step costs an update but does not shift the cosine curve
-        if not skip_this_step:
-            optimiser.step()
+        optimiser.step()
         scheduler.step()
+        applied += 1
 
-        if (step + 1) % log_every == 0 or step + 1 == config.steps:
+        if applied % log_every == 0 or applied == config.steps:
             history.append(float(loss.detach()))
             # report realised loss composition under the production loss
             loss_shares.append(
                 _species_loss_share(model, features, targets, species, pool.names, config)
             )
         # save only states the loop has actually reached
-        if checkpoint_every and (step + 1) % checkpoint_every == 0:
-            save(step + 1)
-        if progress is not None and history and (step + 1) % log_every == 0:
-            progress(step + 1, history[-1])
+        if checkpoint_every and applied % checkpoint_every == 0:
+            save(applied)
+        if progress is not None and history and applied % log_every == 0:
+            progress(applied, history[-1])
         # checkpoint selection for the arms registered as allowed to see a validation set. Placed
-        # after the update so the model handed to the callback is the state reached at this step.
-        if monitor is not None and monitor_every and (step + 1) % monitor_every == 0:
+        # after the update so the model handed to the callback is the state reached at this update
+        if monitor is not None and monitor_every and applied % monitor_every == 0:
             model.eval()
             with torch.no_grad():
-                monitor(step + 1, model)
+                monitor(applied, model)
             model.train()
 
-    save(config.steps)
+    if applied < config.steps:
+        message = (
+            f"exhausted {max_attempts:,} attempted batches after only {applied:,} of "
+            f"{config.steps:,} applied updates ({skipped_steps:,} withheld)"
+        )
+        if strict_budget:
+            raise RuntimeError(
+                message + ". The numerical path is broken; a run that cannot reach its registered "
+                "budget must fail rather than report a short one."
+            )
+        # a diagnostic exists to characterise the broken path, so it returns what it managed and
+        # says so. The short budget is visible in `applied_updates` and in the payload.
+        print(f"WARNING: {message}; returning a short run because strict_budget is off", flush=True)
+
+    save(applied)
     return TrainResult(
         model=model,
         config=config,
-        steps_run=config.steps - start_step,
+        steps_run=applied - start_step,
+        attempted_batches=attempted,
+        applied_updates=applied,
         loss_history=history,
         loss_shares=loss_shares,
         grad_norms=grad_norms,
