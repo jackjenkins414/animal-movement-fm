@@ -129,3 +129,54 @@ No unregistered configuration enters the sealed evaluation. The inner loop may n
 **T2; 21-08-2026 — corrected probe.** After seeing T1 but before any corrected score, fix training length using grid index 6 and seed 0 over all three pseudo target folds. In each fold independently train 5k, 10k, 20k, 30k and 40k schedules, opening no test partition or held-out-species file.
 
 **Decision.** Choose the budget with highest mean travel-p90 persistence skill across folds; exact ties go to highest minimum skill, then fewer steps. The winner is fixed for all 36 grid runs and subsequent registered models; `--select-probe` applies and records this rule mechanically.
+
+**T4; 25-08-2026 — the withheld step is a withheld step, and the grid is re-run.**
+
+In T3 we registered that an optimiser step is withheld when the pre-clip gradient norm is non-finite, while the LR schedule still advances so the registered cosine curve stays on its original timeline. We based that on a measured withholding rate of 0.50%. The figure came from fold 1, grid index 6, at the 5,000 step probe budget; the middle capacity model at the shortest budget, and ultimately not a representative cell in the full design. Across the 36 registered grid runs at the T2 budget of 20,000 steps, the withholding rates were:
+
+| grid | `d_model` | L | lr | fold 0 | fold 1 | fold 2 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 64 | 2 | 3e-4 | 0.00% | 0.01% | 0.00% |
+| 1 | 64 | 2 | 1e-3 | 0.00% | 0.01% | 0.03% |
+| 2 | 64 | 4 | 3e-4 | 0.00% | 0.07% | 0.04% |
+| 3 | 64 | 4 | 1e-3 | 0.00% | 0.07% | 0.05% |
+| 4 | 128 | 2 | 3e-4 | 0.00% | 2.10% | 2.56% |
+| 5 | 128 | 2 | 1e-3 | 0.00% | 0.90% | 0.86% |
+| 6 | 128 | 4 | 3e-4 | 0.00% | 1.10% | 0.76% |
+| 7 | 128 | 4 | 1e-3 | 0.00% | 7.36% | 19.53% |
+| 8 | 256 | 2 | 3e-4 | 0.00% | 15.19% | 8.52% |
+| 9 | 256 | 2 | 1e-3 | 0.01% | 51.66% | 5.70% |
+| 10 | 256 | 4 | 3e-4 | 0.00% | 3.46% | 1.52% |
+| 11 | 256 | 4 | 1e-3 | 0.01% | 25.55% | 42.16% |
+
+**The structure of this table is why we cant use the.** Fold 0 is the fold whose training pool contains no white stork, and as is visible, it remains clean at every capacity, so capacity alone is not enough to trigger the failure. Folds 1 and 2 both include stork, and there the withholding rate rises with `d_model` by roughly three orders of magnitude, from  $\leq$ 0.07% at 64 to as much as 51.66% at 256. The mechanism appears to be multiplicative; the $\sigma$ = 30 m floor in section 6 allows normalised displacement values above 7,800 on a stork window, and the encoder feeds attention `input_proj(features) · sqrt(d_model)`. The same window thus reaches the attention kernel at roughly twice the magnitude for `d_model` = 256 as for 64. LR then only compounds the problem again within the 256 block. The withholding rate therefore tracks **both axes being searched by the grid**, and only on the folds containing the species the study is intended to generalise from.
+
+**This is not a handicap that a winning model can simply overcome.** Under T3, a withheld attempt still advanced the LR schedule. So a damaged run therefore trained on a *filtered* version of the source pool while still consuming the full cosine schedule. The batches being dropped were the extreme displacement stork windows, including migratory launches. A configuration withholding 42% of its attempts was therefore solving an easier and differently distributed problem, then being scored on travel regime p90, which is exactly the tail those dropped windows contribute to. The failure could equally have also hurt a configurations score or made it look better, and the design gives no legible way to tell which because the damage is collinear with the two grid axes. Grid index 11, which the registered selection rule returned, is also the most heavily withheld cell in the grid, with a mean withholding rate of 22.6% across folds. Its win is therefore uninterpretable in either direction.
+
+Section 2 also requires that no grid configuration receive more or fewer training steps than another. So under T3, that requirement was then not met. At 20,000 registered steps, the number of applied optimiser updates across the grid ranged from 20,000 down to 9,668.
+
+**The T3 schedule clause is withdrawn.** The registered budget in sec 5 now counts **applied optimiser updates**, and the LR schedule advances only when an update is actually applied. A run continues drawing batches until it has made the registered number of updates, with a cap of four times that number. A run that reaches the cap has failed and raises rather than returning a short budget. `attempted_batches`, `applied_updates`, `withheld_fraction` and `reached_registered_budget` are recorded in every run payload. Nothing else in sec 5 changes; the budget remains the value fixed by T2, the gradient clip remains global norm 1.0, and the representation, loss, floor and channel list in sec 6 are unchanged.
+
+**Two numerical corrections are made, neither of which is a registered quantity.**
+
+1. The gradient norm is accumulated in float64 when the float32 aggregate overflows. This separates a genuinely non finite gradient tensor, which cannot be repaired, from a float32 sum of squares overflow across otherwise finite elements, which can. Clipping is applied only when the resulting norm is finite, so a withheld attempt leaves the gradients exactly as autograd produced them.
+2. The scaled dot product attention backend is now also pinned to `math` for every training run; changes no data, target, loss, parameter, or constant in sec 5.
+
+**Attribution of the failure.** In T3 we identified PyTorchs fused attention kernel as the likely cause, but at that point it could not separate the kernel from the large input magnitudes allowed by the $\sigma$ = 30 m floor. A 2x2 diagnostic separates the two factors by crossing attention backend with `asinh` compression on the normalised displacement channels, using grid 11, fold 0, 2,000 applied updates, torch 2.5.1+cu121 on an H200 (GenAI suggestion here, which we implemented):
+
+| backend | inputs | attempts withheld |
+| --- | --- | ---: |
+| efficient | as registered | 14.13%, every one a genuine non finite gradient |
+| efficient | `asinh` | 0% |
+| math | as registered | 0% |
+| math | `asinh` | 0% |
+
+Either intervention on its own removes the failure, which places the problem in the kernel rather than in the registered representation (PyTorch issue #125674). Pinning `math` costs ~15% wall clock and leaves the registered input representation unchanged, whereas `asinh` would change that representation and is therefore not adopted as of now. No aggregate overflow case appeared once the norm was accumulated in float64, so the two corrections address separate failure modes and both are retained. 
+
+**The 36 run grid is re run and the first grid's results are excluded**, on the same footing as T1's invalid probe. No configuration is carried forward from the original grid, and the grid is not partially backfilled; all 36 runs are repeated under this amendment. The excluded run artifacts are kept unmodified under `results/tier2_inner_loop_T3_excluded/` rather than deleted. The re run is also gated on the observed withholding rate; any non zero rate is checked before selection rather than accepted, because our 2x2 diagnostic above predicts exactly zero.
+
+**The final training runs already produced are excluded as well.** 25 runs of Z, B and S were trained before this amendment. They inherit both problems; they used the withdrawn schedule rule, and they used the configuration selected from the grid now being excluded. Neither the training runs nor that selected configuration are carried forward. We have kept them under `results/tier2_final_T3_excluded/` and all affected runs are repeated in full after the re run grid has selected a configuration. No model trained before this amendment enters the freeze or sealed evaluation.
+
+**Residual confound in T2, declared and not corrected.** The step budget was fixed by our T2 probe, which ran under the same defect. Its withholding rates were 0.50 / 0.15 / 1.10 / 1.59 / 0.78% on fold 1 and 0.02 / 0.02 / 0.76 / 0.14 / 0.07% on fold 2 across the 5k / 10k / 20k / 30k / 40k budgets, with zero withholding throughout fold 0. At those rates, the applied update count differs from the registered budget by less than 1.6%, which is far smaller than the spacing between the compared budgets. So our choice of 20,000 steps therefore stands and the probe is not re run as of now. This remains a known limitation rather than being repaired retrospectively, and a clean re run of the probe we added to `notes.md`.
+
+**Status.** No sealed test partition has been opened for any species at any point. The grid re run reads source species validation individuals only, as required by sec 1, and no held-out species file from any partition has been accessed. Amendment here is recorded before the first scored run of the re run and before selection.
