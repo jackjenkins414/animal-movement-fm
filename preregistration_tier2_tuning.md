@@ -162,7 +162,7 @@ Section 2 also requires that no grid configuration receive more or fewer trainin
 1. The gradient norm is accumulated in float64 when the float32 aggregate overflows. This separates a genuinely non finite gradient tensor, which cannot be repaired, from a float32 sum of squares overflow across otherwise finite elements, which can. Clipping is applied only when the resulting norm is finite, so a withheld attempt leaves the gradients exactly as autograd produced them.
 2. The scaled dot product attention backend is now also pinned to `math` for every training run; changes no data, target, loss, parameter, or constant in sec 5.
 
-**Attribution of the failure.** In T3 we identified PyTorchs fused attention kernel as the likely cause, but at that point it could not separate the kernel from the large input magnitudes allowed by the $\sigma$ = 30 m floor. A 2x2 diagnostic separates the two factors by crossing attention backend with `asinh` compression on the normalised displacement channels, using grid 11, fold 0, 2,000 applied updates, torch 2.5.1+cu121 on an H200 (GenAI suggestion here, which we implemented):
+**Attribution of the failure.** In T3 we identified PyTorchs fused attention kernel as the likely cause, but at that point it could not separate the kernel from the large input magnitudes allowed by the $\sigma$ = 30 m floor. A 2x2 diagnostic separates the two factors by crossing attention backend with `asinh` compression on the normalised displacement channels, using grid 11, fold 1, 2,000 applied updates, torch 2.5.1+cu121 on an H200 (GenAI suggestion here, which we implemented):
 
 | backend | inputs | attempts withheld |
 | --- | --- | ---: |

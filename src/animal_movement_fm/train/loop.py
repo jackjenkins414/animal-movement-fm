@@ -56,22 +56,32 @@ SKIP_NONFINITE_STEPS = True
 # forever; a run that hits it has failed and says so rather than silently reporting a short budget.
 MAX_ATTEMPT_MULTIPLIER = 4
 
-# Pin scaled dot-product attention to the math backend for every training run;  an environment level 
-# safeguard rather than a change to the registered data, targets, loss, model, or input representation
+# Every training run pins the scaled dot product attention backend to `math`.It is here rather than in
+# a runner so that no arm can be launched without it.
 #
-# PyTorch issue #125674 can produce non finite gradients in the efficient SDPA backward pass from large 
-# but finite float32 inputs, while the math backend remains finite. Diagnostic runs on this problem 
-# reproduced that pattern and showed that either using the math backend or compressing the inputs removed
-# the failure. So we keep the original representation and pin the safer backend
+# PyTorch issue #125674: `ScaledDotProductEfficientAttentionBackward0` returns NaN from finite
+# float32 inputs of large magnitude while the math backend stays finite. Measured on this problem,
+# torch 2.5.1+cu121 / H200, 2,000 applied updates, grid 11, fold 1 (a fold whose training pool
+# contains white stork, so a fold where the failure actually occurs):
+#
+#   efficient, raw inputs      14.13% of attempts withheld, every one a genuine non-finite gradient
+#   efficient, asinh inputs     0%
+#   math,      raw inputs       0%
+#   math,      asinh inputs     0%
+#
+# Two independent interventions each remove the failure, which places it in the kernel rather than in
+# the input representation. Pinning `math` costs ~15% wall clock (1.17 vs 1.02 min over an identical
+# 2,000 attempts) and leaves the registered representation untouched, so it is the cheaper of the two.
+# Inference is unaffected — the defect is in the backward pass — but the setting is harmless there.
 SDPA_BACKEND = "math"
 
 
 def sdpa_context(backend: str):
     """
-    Return a context manager for the requested scaled-dot-product-attention backend.
+    Return a context manager pinning the attention backend, or a null context for `"auto"`.
 
-    `"auto"` leaves backend selection to PyTorch and is used only for diagnostics that deliberately reproduce 
-    the unstable path. Normal training uses the module level `SDPA_BACKEND` so every arm is pinned consistently.
+    `"auto"` leaves the choice to torch and exists only so a diagnostic can reproduce the defective
+    path deliberately. Scored runs take the module default.
     """
     if backend == "auto":
         return contextlib.nullcontext()
@@ -85,6 +95,7 @@ def sdpa_context(backend: str):
     except KeyError:
         raise ValueError(f"unknown sdpa backend {backend!r}") from None
     return sdpa_kernel(selected)
+
 
 def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
     """
@@ -325,18 +336,19 @@ def train(
     timeline; that was measured at a 0.5% withholding rate. At the rates actually observed (up to 90% on one arm) it
     consumed the whole curve while updating a fraction of the time, and left different arms with different effective
     budgets. The loop therefore keeps drawing batches until it has made `config.steps` updates, capped at
-    `MAX_ATTEMPT_MULTIPLIER x steps`, and raises rather than returning a short budget if it cannot get there. 
-    attempted_batches`, `applied_updates` and `skipped_steps` are all reported. `strict_budget` defaults to true so a scored 
-    run that cannot reach its budget raises instead of quietly reporting a short one; diagnostics pass false, because 
+    `MAX_ATTEMPT_MULTIPLIER x steps`, and raises rather than returning a short budget if it cannot get there.
+    `attempted_batches`, `applied_updates` and `skipped_steps` are all reported. `strict_budget` defaults to true so a 
+    scored run that cannot reach its budget raises instead of quietly reporting a short one; diagnostics pass false, because 
     characterising the broken path is the whole point.
 
-    `monitor`, if given, is called as `monitor(step, model)` every `monitor_every` optimiser steps with the model in eval 
-    mode, and is what lets the arms holding the registered validation privilege (S, and later F) select a checkpoint. It 
-    observes only: it draws no random numbers and touches neither the optimiser nor the sampler, so a monitored run and an 
-    unmonitored run from the same seed follow identical numerics. Z, B and Za pass no monitor and never reach the branch.
+    `monitor`, if given, is called as `monitor(step, model)` every `monitor_every` optimiser steps with the model in eval mode, 
+    and is what lets the arms holding the registered validation privilege (S, and later F) select a checkpoint. It observes only: 
+    it draws no random numbers and touches neither the optimiser nor the sampler, so a monitored run and an unmonitored run from 
+    the same seed follow identical numerics. Z, B and Za pass no monitor and never reach the branch.
 
-    `sdpa_backend selects the attention backend for the full training loop, including the backward pass. Normal runs use 
-    the module-level SDPA_BACKEND; alternative backends are available for numerical diagnostics.
+    `sdpa_backend` pins the attention kernel for the whole loop and defaults to the module constant, so every arm gets it without 
+    the runner having to remember. Only a diagnostic passes `"auto"` or `"efficient"`, to reproduce the defective path on purpose. 
+    See `SDPA_BACKEND`.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
