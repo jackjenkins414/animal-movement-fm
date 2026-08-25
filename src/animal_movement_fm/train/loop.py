@@ -8,11 +8,17 @@ restoring model, optimiser, scheduler, sampler, and RNG state.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
+
+try:  # torch >= 2.3
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:  # pragma: no cover - older torch on some machines
+    SDPBackend = sdpa_kernel = None
 
 from animal_movement_fm.data.enu import N_FEATURES
 from animal_movement_fm.models.fm import MovementFM
@@ -44,16 +50,60 @@ NONFINITE_RECORD_LIMIT = 20
 # preregistration_tier2_tuning.md on 22-08-2026; the skipped count is reported for every run.
 SKIP_NONFINITE_STEPS = True
 
-# T4; our registered budget counts applied optimiser updates and the LR schedule advances only with those updates, so
-# keep drawing batches until `config.steps` updates are applied; idea here is to this cap makes a fatal run fail 
+# T4: the registered budget counts *applied* optimiser updates, not attempted batches, and the
+# learning-rate schedule advances only when an update is applied. A run therefore keeps drawing
+# batches until it has made `config.steps` updates. This cap stops a pathological run from drawing
+# forever; a run that hits it has failed and says so rather than silently reporting a short budget.
 MAX_ATTEMPT_MULTIPLIER = 4
+
+# Pin scaled dot-product attention to the math backend for every training run;  an environment level 
+# safeguard rather than a change to the registered data, targets, loss, model, or input representation
+#
+# PyTorch issue #125674 can produce non finite gradients in the efficient SDPA backward pass from large 
+# but finite float32 inputs, while the math backend remains finite. Diagnostic runs on this problem 
+# reproduced that pattern and showed that either using the math backend or compressing the inputs removed
+# the failure. So we keep the original representation and pin the safer backend
+SDPA_BACKEND = "math"
+
+
+def sdpa_context(backend: str):
+    """
+    Return a context manager for the requested scaled-dot-product-attention backend.
+
+    `"auto"` leaves backend selection to PyTorch and is used only for diagnostics that deliberately reproduce 
+    the unstable path. Normal training uses the module level `SDPA_BACKEND` so every arm is pinned consistently.
+    """
+    if backend == "auto":
+        return contextlib.nullcontext()
+    if sdpa_kernel is None:
+        raise RuntimeError(
+            "this torch build has no torch.nn.attention.sdpa_kernel, so the attention backend "
+            "cannot be pinned and PyTorch #125674 cannot be ruled out. Report the torch version."
+        )
+    try:
+        selected = {"math": SDPBackend.MATH, "efficient": SDPBackend.EFFICIENT_ATTENTION}[backend]
+    except KeyError:
+        raise ValueError(f"unknown sdpa backend {backend!r}") from None
+    return sdpa_kernel(selected)
 
 def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
     """
-    Return the pre clip gradient norm and if any gradient element is non finite.
+    Return `(total_norm, any_nonfinite_element)` and clip the gradients in place.
 
-    Use normal norm calculation first. If aggregate norm is non finite but every gradient element is finite, then we recompute 
-    the norm in float64 to handle aggregate overflow. Gradients are clipped only when the resulting norm is finite.
+    Two different questions have to be answered separately, and `clip_grad_norm_` conflates them:
+
+    1. Does any individual gradient tensor hold a NaN or an Inf? Nothing can repair that; the update
+       has to be withheld.
+    2. Are all elements finite while the float32 *aggregate* sum of squares overflows? That is an
+       arithmetic artefact, and recomputing the norm in float64 recovers a usable value.
+
+    The fast path is float32 and costs what the stock helper costs. Only when that comes back
+    non-finite do we pay for the per-tensor finite check and the float64 recomputation, which is rare
+    once the underlying defect is fixed. The clip is applied only when the norm is finite, so a
+    withheld step leaves the gradients untouched and `origin_parameters` in the diagnostic record
+    names exactly the tensors that were already bad, rather than tensors the clip itself poisoned.
+
+    `max_norm` is unchanged at the registered 1.0; only the arithmetic used to reach it differs.
     """
     grads = [p.grad for p in parameters if p.grad is not None]
     if not grads:
@@ -64,7 +114,7 @@ def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
     if not math.isfinite(total):
         nonfinite_element = any(not torch.isfinite(g).all() for g in grads)
         if not nonfinite_element:
-            # all elements are finite; only the float32 aggregate overflowed
+            # every element is finite; only the float32 aggregate overflowed
             total = float(
                 torch.linalg.vector_norm(
                     torch.stack(
@@ -78,8 +128,8 @@ def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
         coefficient = max_norm / (total + 1e-6)
         for grad in grads:
             grad.mul_(coefficient)
-
     return total, nonfinite_element
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -138,7 +188,6 @@ class TrainResult:
     applied_updates: int = 0
     resumed_from: int = 0
 
-    # reporting convenience that GenAI suggested I add
     @property
     def withheld_fraction(self) -> float:
         """Withheld attempts as a share of all attempts. Zero in a healthy run."""
@@ -190,17 +239,19 @@ def _sample_token_mask(
 
 def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, model) -> dict:
     """
-    Record diagnostic details for a batch with a non finite gradient norm.
+    Describe the batch and the parameters involved in a non-finite gradient norm.
 
-    Since clipping is only applied to finite norms, the gradients inspected here are unchanged from autograd. `origin_parameters` 
-    thus identifies parameters with legit non finite gradients; note an empty list indicates aggregate norm overflow despite finite 
-    gradient elements.
+    Under T4 the clip is applied only when the norm is finite, so by the time this runs on a non-finite norm the
+    gradients are exactly as autograd left them. `origin_parameters` therefore names the tensors that are genuinely
+    non-finite, with no need to reason about what the clip did to them; an empty list means every element was finite and
+    only the aggregate overflowed. The caller records `nonfinite_element` alongside, which answers the same question
+    directly.
     """
     return {
         "step": int(step),
-        # `inf` and `nan` distinguish where the failure began. An infinite norm with no named origin tensor is an aggregate overflow 
-        # in the norm itself and the step is simply lost. A NaN norm means a NaN was already circulating in the backward pass, which 
-        # the clip can neither cause nor contain.
+        # `inf` and `nan` distinguish where the failure began. An infinite norm with no named origin tensor is an
+        # aggregate overflow in the norm itself and the step is simply lost. A NaN norm means a NaN was already
+        # circulating in the backward pass, which the clip can neither cause nor contain.
         "kind": "inf" if math.isinf(float(grad_norm)) else "nan",
         "grad_norm": float(grad_norm),
         "loss": float(loss),
@@ -252,22 +303,40 @@ def train(
     monitor=None,
     monitor_every: int = 0,
     strict_budget: bool = True,
+    sdpa_backend: str = SDPA_BACKEND,
 ) -> TrainResult:
     """
-    Train one configuration on a prepared source pool.
+    Train one configuration on one prepared source pool.
 
-    If `checkpoint_path` already exists, we resume training from the saved model, optimiser, scheduler, sampler generator, etc; 
-    restoring all of those files is important so a resumed run follows the same sampling and dropout sequence as the 
-    uninterrupted run.
+    If `checkpoint_path` exists, the run resumes from that saved state. Model, optimiser, scheduler, sampler generator,
+    and global RNG state are restored so a resumed run follows the same sampling/dropout sequence as an uninterrupted run.
 
-    Under our registered T3/T4 behaviour, optimiser updates with non-finite pre clip gradient norms can be withheld. `config.steps` 
-    counts applied optimiser updates instead of just attempted batches, and the LR schedule advances only when an update is really
-    applied. So the loop keeps drawing batches until the registered update budget is reached, subject to `MAX_ATTEMPT_MULTIPLIER`; 
-    'strict_budget` controls whether failure to reach that budget raises or is returned as a short diagnostic run.
+    `diagnose` only changes how often the pre-clip gradient norm is inspected, never what is computed or applied, so a
+    diagnostic run and a scored run follow identical numerics from the same seed. It is off by default because reading the
+    norm forces a host/device synchronisation on every step; with it off the norm is inspected at the logging cadence, which
+    still detects a poisoned run but localises it only to within `log_every` steps.
 
-    `diagnose records additional gradient information without changing the training calculation itself. If `monitor` is supplied, 
-    it observes the model in eval mode every `monitor_every` applied updates for checkpoint selection, without drawing random numbers 
-    or modifying the optimiser or sampler state.
+    `skip_nonfinite` withholds the optimiser step when the pre-clip norm is non-finite, so the update never reaches the
+    weights, and the count is returned so it can be reported. This is registered behaviour (T3) and defaults to on;
+    passing false reproduces the pre-amendment failure and is for diagnostics only.
+
+    **T4.** `config.steps` counts *applied* optimiser updates, not attempted batches, and the schedule advances only with
+    the optimiser. T3 originally advanced the schedule on a withheld attempt so the cosine curve stayed on the registered
+    timeline; that was measured at a 0.5% withholding rate. At the rates actually observed (up to 90% on one arm) it
+    consumed the whole curve while updating a fraction of the time, and left different arms with different effective
+    budgets. The loop therefore keeps drawing batches until it has made `config.steps` updates, capped at
+    `MAX_ATTEMPT_MULTIPLIER x steps`, and raises rather than returning a short budget if it cannot get there. 
+    attempted_batches`, `applied_updates` and `skipped_steps` are all reported. `strict_budget` defaults to true so a scored 
+    run that cannot reach its budget raises instead of quietly reporting a short one; diagnostics pass false, because 
+    characterising the broken path is the whole point.
+
+    `monitor`, if given, is called as `monitor(step, model)` every `monitor_every` optimiser steps with the model in eval 
+    mode, and is what lets the arms holding the registered validation privilege (S, and later F) select a checkpoint. It 
+    observes only: it draws no random numbers and touches neither the optimiser nor the sampler, so a monitored run and an 
+    unmonitored run from the same seed follow identical numerics. Z, B and Za pass no monitor and never reach the branch.
+
+    `sdpa_backend selects the attention backend for the full training loop, including the backward pass. Normal runs use 
+    the module-level SDPA_BACKEND; alternative backends are available for numerical diagnostics.
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
@@ -313,8 +382,8 @@ def train(
         if state.get("cuda_rng") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state["cuda_rng"])
         start_step, history = state["step"], list(state["loss_history"])
-        # pre T4 checkpoints have no attempt count; treating it as the applied count is the only honest fallback 
-        # and is flagged by attempted == applied on a run that clearly skipped
+        # pre-T4 checkpoints have no attempt count; treating it as the applied count is the only
+        # honest fallback and is flagged by attempted == applied on a run that clearly skipped
         attempted = int(state.get("attempted", state["step"]))
         loss_shares = list(state.get("loss_shares", []))
         grad_norms = list(state.get("grad_norms", []))
@@ -350,89 +419,91 @@ def train(
         tmp.replace(checkpoint_path)
 
     model.train()
-    # T4's four clocks; `applied` is the registered budget; `attempted` is how many batches it cost
-    # they are equal in a healthy run and the gap between them is the thing worth reporting
+    # T4's four clocks. `applied` is the registered budget; `attempted` is how many batches it cost.
+    # They are equal in a healthy run and the gap between them is the thing worth reporting.
     applied = start_step
     max_attempts = MAX_ATTEMPT_MULTIPLIER * config.steps
-    while applied < config.steps and attempted < max_attempts:
-        step = attempted  # attempt index, so a diagnostic record points at the batch that failed
-        attempted += 1
-        features, targets, species = pool.sample(generator, config.batch_size)
+    # the pin covers every attempt, including the backward pass, which is where #125674 bites
+    with sdpa_context(sdpa_backend):
+        while applied < config.steps and attempted < max_attempts:
+            step = attempted  # attempt index, so a diagnostic record points at the batch that failed
+            attempted += 1
+            features, targets, species = pool.sample(generator, config.batch_size)
 
-        optimiser.zero_grad(set_to_none=True)
-        if config.use_reconstruction_head:
-            token_mask = _sample_token_mask(
-                features.shape[:2], config.mask_ratio, generator, device
-            )
-            prediction, reconstruction = model(features, token_mask=token_mask)
-            movement = features[..., :2]  # scaled east/north target for reconstruction
-            forecast_loss = normalised_huber(prediction, targets)
-            reconstruction_loss = masked_reconstruction_loss(
-                reconstruction,
-                movement,
-                token_mask,
-            )
-            loss = forecast_loss + config.reconstruction_weight * reconstruction_loss
-        else:
-            loss = normalised_huber(model(features), targets)
-
-        loss.backward()
-
-        # GenAI suggested this addition; we coded this part
-        # the global gradient norm before clipping; a non finite norm can indicate a gradient spike
-        # that will propagate NaNs into the optimiser state. T4 computes it stably; see the helper
-        norm, nonfinite_element = _clip_grad_norm_stable(model.parameters(), config.grad_clip)
-        if diagnose:
-            # the per-attempt input extreme is recorded alongside the norm so the two can be correlated afterwards
-            grad_norms.append(
-                {
-                    "step": int(step),
-                    "applied": int(applied),
-                    "grad_norm": norm,
-                    "nonfinite_element": bool(nonfinite_element),
-                    "loss": float(loss.detach()),
-                    "max_abs_feature": float(features.abs().max()),
-                }
-            )
-
-        if not math.isfinite(norm):
-            if len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
-                record = _nonfinite_record(
-                    step, norm, loss.detach(), features, targets, species, pool.names, model
+            optimiser.zero_grad(set_to_none=True)
+            if config.use_reconstruction_head:
+                token_mask = _sample_token_mask(
+                    features.shape[:2], config.mask_ratio, generator, device
                 )
-                # T4 distinguishes the two causes directly rather than inferring them from whether
-                # the clip left any origin tensors behind
-                record["nonfinite_element"] = bool(nonfinite_element)
-                record["applied"] = int(applied)
-                nonfinite_steps.append(record)
-            if skip_nonfinite:
-                skipped_steps += 1
-                # T4: neither the optimiser nor the schedule advances. The registered cosine curve is
-                # defined over applied updates, so a withheld attempt costs a batch and nothing else
-                continue
+                prediction, reconstruction = model(features, token_mask=token_mask)
+                movement = features[..., :2]  # scaled east/north target for reconstruction
+                forecast_loss = normalised_huber(prediction, targets)
+                reconstruction_loss = masked_reconstruction_loss(
+                    reconstruction,
+                    movement,
+                    token_mask,
+                )
+                loss = forecast_loss + config.reconstruction_weight * reconstruction_loss
+            else:
+                loss = normalised_huber(model(features), targets)
 
-        optimiser.step()
-        scheduler.step()
-        applied += 1
+            loss.backward()
 
-        if applied % log_every == 0 or applied == config.steps:
-            history.append(float(loss.detach()))
-            # report realised loss composition under the production loss
-            loss_shares.append(
-                _species_loss_share(model, features, targets, species, pool.names, config)
-            )
-        # save only states the loop has actually reached
-        if checkpoint_every and applied % checkpoint_every == 0:
-            save(applied)
-        if progress is not None and history and applied % log_every == 0:
-            progress(applied, history[-1])
-        # checkpoint selection for the arms registered as allowed to see a validation set. Placed
-        # after the update so the model handed to the callback is the state reached at this update
-        if monitor is not None and monitor_every and applied % monitor_every == 0:
-            model.eval()
-            with torch.no_grad():
-                monitor(applied, model)
-            model.train()
+            # GenAI suggested this addition; we coded this part
+            # the global gradient norm before clipping; a non finite norm can indicate a gradient spike
+            # that will propagate NaNs into the optimiser state. T4 computes it stably; see the helper.
+            norm, nonfinite_element = _clip_grad_norm_stable(model.parameters(), config.grad_clip)
+            if diagnose:
+                # the per-attempt input extreme is recorded alongside the norm so the two can be correlated afterwards
+                grad_norms.append(
+                    {
+                        "step": int(step),
+                        "applied": int(applied),
+                        "grad_norm": norm,
+                        "nonfinite_element": bool(nonfinite_element),
+                        "loss": float(loss.detach()),
+                        "max_abs_feature": float(features.abs().max()),
+                    }
+                )
+
+            if not math.isfinite(norm):
+                if len(nonfinite_steps) < NONFINITE_RECORD_LIMIT:
+                    record = _nonfinite_record(
+                        step, norm, loss.detach(), features, targets, species, pool.names, model
+                    )
+                    # T4 distinguishes the two causes directly rather than inferring them from whether
+                    # the clip left any origin tensors behind
+                    record["nonfinite_element"] = bool(nonfinite_element)
+                    record["applied"] = int(applied)
+                    nonfinite_steps.append(record)
+                if skip_nonfinite:
+                    skipped_steps += 1
+                    # T4: neither the optimiser nor the schedule advances. The registered cosine curve is
+                    # defined over applied updates, so a withheld attempt costs a batch and nothing else.
+                    continue
+
+            optimiser.step()
+            scheduler.step()
+            applied += 1
+
+            if applied % log_every == 0 or applied == config.steps:
+                history.append(float(loss.detach()))
+                # report realised loss composition under the production loss
+                loss_shares.append(
+                    _species_loss_share(model, features, targets, species, pool.names, config)
+                )
+            # save only states the loop has actually reached
+            if checkpoint_every and applied % checkpoint_every == 0:
+                save(applied)
+            if progress is not None and history and applied % log_every == 0:
+                progress(applied, history[-1])
+            # checkpoint selection for the arms registered as allowed to see a validation set. Placed
+            # after the update so the model handed to the callback is the state reached at this update.
+            if monitor is not None and monitor_every and applied % monitor_every == 0:
+                model.eval()
+                with torch.no_grad():
+                    monitor(applied, model)
+                model.train()
 
     if applied < config.steps:
         message = (

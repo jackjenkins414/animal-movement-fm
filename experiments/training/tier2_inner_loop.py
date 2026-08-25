@@ -29,16 +29,10 @@ from dataclasses import asdict
 from pathlib import Path
 from statistics import fmean
 
-import contextlib
 from dataclasses import replace as dataclass_replace
 
 import pandas as pd
 import torch
-
-try:  # torch >= 2.3
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-except ImportError:  # pragma; no cover, older torch on some machines
-    SDPBackend = sdpa_kernel = None
 
 from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.multispecies import SourcePool, SpeciesWindows
@@ -48,7 +42,7 @@ from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_b
 from animal_movement_fm.eval.harness import evaluate
 from animal_movement_fm.eval.selection import combine_folds, score_fold, select_configuration
 from animal_movement_fm.models.persistence import Persistence
-from animal_movement_fm.train.loop import TrainConfig, train
+from animal_movement_fm.train.loop import SDPA_BACKEND, TrainConfig, train
 from animal_movement_fm.train.pool import PreparedPool
 
 REPO = Path(__file__).resolve().parents[2]
@@ -142,37 +136,21 @@ def build_diagnostic_config(
         use_reconstruction_head=bool(reconstruction),
     )
 
-# normalised east/north displacement channels; these can become very large when the per window scale hits its floor; the remaining 
-# channels are logged, gated or bounded
+
+# The channels holding the normalised displacement. These are the ones that reach 7,860 on a floored stork window; every 
+# other channel is already logged, gated or a bounded sinusoid.
 DISPLACEMENT_CHANNELS = (0, 1)
-
-
-def sdpa_context(backend: str):
-    """
-    Return a context manager for selecting the scaled dot product attention backend.
-
-    This diagnostic isolates attention kernel instability from problems in the input representation. Large but finite projected 
-    inputs can trigger non finite gradients (as we found out) in the efficient SDPA backend while remaining finite under the 
-    math backend. Pinning the backend changes neither the data, targets, loss, nor model parameters.
-    """
-    if backend == "auto":
-        return contextlib.nullcontext()
-    if sdpa_kernel is None:
-        raise SystemExit(
-            "FAIL: this torch build has no torch.nn.attention.sdpa_kernel, so the backend cannot be "
-            "pinned. just repot torch version and run with --sdpa auto."
-        )
-    return sdpa_kernel({"math": SDPBackend.MATH, "efficient": SDPBackend.EFFICIENT_ATTENTION}[backend])
 
 
 def asinh_displacement_pool(pool: PreparedPool) -> PreparedPool:
     """
-    Return a copy of the pool with `asinh` applied to normalised displacement channels.
+    Return a copy of the pool with `asinh` applied to the normalised displacement channels.
 
-    This is a diagnostic representation change that compresses extreme encoder inputs while leaving the forecasting target unchanged. 
-    The registered forecast loss and loss share calculation therefore remain unchanged. If reconstruction is enabled, its displacement 
-    target comes from `features[..., :2]` and is transformed as well; any scored use of this representation would need to account for 
-    that explicitly.
+    Diagnostic only. This is the Stage B candidate in its simplest form: the *encoder view* is compressed while the 
+    forecasting target stays raw, so the registered radial pseudo-Huber and its loss shares are untouched. `asinh` 
+    turns 7,860 into 9.66 and 610 into 7.11, which is the whole point. Note that with the reconstruction head on, the 
+    auxiliary target is `features[..., :2]` and is therefore compressed too; that choice is exactly what a Stage B 
+    amendment would have to declare, and it is recorded in the diagnostic payload rather than left implicit.
     """
     features = pool.features.clone()
     channels = list(DISPLACEMENT_CHANNELS)
@@ -189,7 +167,7 @@ def run_diagnostic(
     reconstruction: bool,
     skip_nonfinite: bool = True,
     anomaly: bool = False,
-    sdpa: str = "auto",
+    sdpa: str = SDPA_BACKEND,
     asinh_inputs: bool = False,
     device: torch.device,
     pool: PreparedPool,
@@ -210,7 +188,7 @@ def run_diagnostic(
         tag += "_noSkipNF"
     if anomaly:
         tag += "_anomaly"
-    if sdpa != "auto":
+    if sdpa != SDPA_BACKEND:
         tag += f"_sdpa{sdpa}"
     if asinh_inputs:
         tag += "_asinh"
@@ -218,7 +196,7 @@ def run_diagnostic(
         f"diagnostic       : {tag}, {steps:,} steps, no pseudo-target scoring"
         + (", withholding non-finite steps (T3)" if skip_nonfinite else ", T3 disabled")
         + (", autograd anomaly detection on" if anomaly else "")
-        + (f", SDPA backend pinned to {sdpa}" if sdpa != "auto" else "")
+        + (f", SDPA backend {sdpa} instead of the default {SDPA_BACKEND}" if sdpa != SDPA_BACKEND else "")
         + (", asinh on displacement channels" if asinh_inputs else ""),
         flush=True,
     )
@@ -230,26 +208,23 @@ def run_diagnostic(
 
     if asinh_inputs:
         pool = asinh_displacement_pool(pool)
-        # GenAI print statement for clarity
         print(
             f"  asinh applied      : max |displacement| now "
             f"{float(pool.features[..., list(DISPLACEMENT_CHANNELS)].abs().max()):.4g}",
             flush=True,
         )
 
-    with sdpa_context(sdpa):
-        result = train(
-            config,
-            pool,
-            device=device,
-            checkpoint_path=checkpoint_path(
-                f"{identifier}_{tag}", steps, probe=False, diagnose=True
-            ),
-            diagnose=True,
-            skip_nonfinite=skip_nonfinite,
-            strict_budget=False,
-            progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
-        )
+    result = train(
+        config,
+        pool,
+        device=device,
+        checkpoint_path=checkpoint_path(f"{identifier}_{tag}", steps, probe=False, diagnose=True),
+        diagnose=True,
+        skip_nonfinite=skip_nonfinite,
+        strict_budget=False,
+        sdpa_backend=sdpa,
+        progress=lambda step, loss: print(f"  step {step:>7,}  loss {loss:.5f}", flush=True),
+    )
     # GenAI wrote the rest of the below from its suggestions on 21-08-26. I have checked it below 
     norms = [row["grad_norm"] for row in result.grad_norms if math.isfinite(row["grad_norm"])]
     first = result.first_nonfinite_step
@@ -464,8 +439,11 @@ def main() -> None:
     parser.add_argument(
         "--sdpa",
         choices=("auto", "math", "efficient"),
-        default="auto",
-        help="diagnostic only: pin the attention backend (PyTorch issue #125674)",
+        default=SDPA_BACKEND,
+        help=(
+            "diagnostic only: depart from the pinned attention backend (PyTorch issue #125674). "
+            f"Every run pins {SDPA_BACKEND!r}; 'auto' hands the choice back to torch."
+        ),
     )
     parser.add_argument(
         "--asinh-inputs",
@@ -493,13 +471,12 @@ def main() -> None:
             "FAIL: --no-skip-nonfinite and --anomaly are only available under --diagnose. T3 registers that "
             "a non-finite gradient step is withheld, so a scored run may not switch that off."
         )
-    if (args.sdpa != "auto" or args.asinh_inputs) and not args.diagnose:
+    if (args.sdpa != SDPA_BACKEND or args.asinh_inputs) and not args.diagnose:
         raise SystemExit(
-            "FAIL: --sdpa and --asinh-inputs are only available under --diagnose. Pinning the "
-            "attention backend changes no registered quantity and may well become the default for "
-            "every arm, but that is a decision to record in the tuning document, not one to make by "
-            "passing a flag to a scored run. --asinh-inputs changes the registered input "
-            "representation (tuning s6) and needs an amendment before it can be scored."
+            f"FAIL: --sdpa and --asinh-inputs are only available under --diagnose. Every arm now "
+            f"pins the {SDPA_BACKEND!r} attention backend in train(); leaving it is a diagnostic act, "
+            "not something to do to a scored run by passing a flag. --asinh-inputs changes the "
+            "registered input representation (tuning s6) and needs an amendment before it can be scored."
         )
     if args.select:
         return report_selection()
@@ -602,6 +579,11 @@ def main() -> None:
         "config": asdict(config),
         "n_parameters": config.build().n_parameters(),
         "scores": scores,
+        # environment provenance: the attention backend is pinned in train() (PyTorch #125674)
+        "sdpa_backend": SDPA_BACKEND,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "elapsed_s": time.time() - started,
         "probe": bool(args.probe),
         "probe_design": PROBE_DESIGN if args.probe else None,

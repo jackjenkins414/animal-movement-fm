@@ -40,7 +40,7 @@ from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_b
 from animal_movement_fm.eval.harness import evaluate
 from animal_movement_fm.eval.selection import score_fold
 from animal_movement_fm.models.persistence import Persistence
-from animal_movement_fm.train.loop import TrainConfig, train
+from animal_movement_fm.train.loop import SDPA_BACKEND, TrainConfig, train
 from animal_movement_fm.train.pool import PreparedPool
 
 REPO = Path(__file__).resolve().parents[2]
@@ -442,11 +442,19 @@ def main() -> None:
     )
 
     print(f"\nfinal loss       : {result.final_loss:.5f}")
-    # T3: keep the withheld-step count in both the log and result record.
+    # T3/T4: the four clocks. `applied` is the registered budget and must equal it; the gap between
+    # attempts and applied is the withholding, and is the number the freeze reports.
     print(
-        f"withheld steps   : {result.skipped_steps:,} of {args.steps:,} "
-        f"({result.skipped_steps / args.steps:.2%}) -- T3"
+        f"applied updates  : {result.applied_updates:,} of {args.steps:,} registered\n"
+        f"attempted batches: {result.attempted_batches:,}\n"
+        f"withheld         : {result.skipped_steps:,} ({result.withheld_fraction:.2%} of attempts) -- T3"
     )
+    if result.skipped_steps:
+        print(
+            "WARNING: this run withheld optimiser steps. T4 means the budget was still reached, but "
+            "the numerical path is not clean and the count belongs in the freeze.",
+            flush=True,
+        )
 
     reported_model, selection_payload = _resolve_reported_model(run, result, selection)
 
@@ -480,12 +488,20 @@ def main() -> None:
         "final_loss": result.final_loss,
         "loss_history": result.loss_history,
         "loss_shares": result.loss_shares,
-        # T3 diagnostics carried into the freeze.
+        # T3/T4 diagnostics carried into the freeze.
         "skipped_steps": result.skipped_steps,
+        "attempted_batches": result.attempted_batches,
+        "applied_updates": result.applied_updates,
+        "withheld_fraction": result.withheld_fraction,
         "nonfinite_steps": result.nonfinite_steps,
         "checkpoint_selection": selection_payload,
         "reported_checkpoint": reported_checkpoint.name,
         "opened_test_partition": False,
+        # environment provenance: the attention backend is pinned in train() (PyTorch #125674)
+        "sdpa_backend": SDPA_BACKEND,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "elapsed_s": time.time() - started,
     }
     out = RESULTS / f"{run.run_id}.json"
