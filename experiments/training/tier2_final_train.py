@@ -141,6 +141,32 @@ PLAN = build_plan()
 N_CRITICAL_PATH = sum(1 for run in PLAN if not run.deferred)
 
 
+# Tier E additon here!
+# exploratory variants we outlined in `tierE_exploratory_ablations.md`, not the prereg; so they use a separate run plan so 
+# the registered PLAN indices never move. `--tier-e` switches to that plan and writes results/checkpoints to separate 
+# directories, keeping Tier E artefacts out of anything that reads our registered Tier 2 outputs
+TIER_E_RESULTS = REPO / "results" / "tier_e"
+TIER_E_CHECKPOINTS = REPO / "checkpoints" / "tier_e"
+
+TIER_E_ARMS: dict[str, dict] = {
+    # remove reconstruction while keeping conditioning; paired with Za, which does the opposite, this helps isolate which 
+    # half of the FM package drives the low displacement failure we had 
+    "Zrecon": {
+        "description": "Z minus the masked reconstruction objective; conditioning path intact",
+        "use_fm_package": True,
+        "use_reconstruction_head": False,
+    },
+}
+
+
+def build_tier_e_plan() -> list[Run]:
+    """Return every Tier E variant at each registered seed."""
+    return [Run(arm, "", seed) for arm in TIER_E_ARMS for seed in SEEDS]
+
+
+TIER_E_PLAN = build_tier_e_plan()
+
+
 def held_out_entry(species: str) -> tuple[str, str, str, str, str]:
     for entry in HELD_OUT:
         if entry[0] == species:
@@ -227,19 +253,26 @@ def build_config(run: Run, grid_index: int, steps: int) -> TrainConfig:
     Build one run's configuration at the selected grid cell.
 
     Z, S and Za use the full FM package. B uses the same trunk with conditioning and reconstruction disabled; all other 
-    training settings remain shared.
+    training settings remain shared. A Tier E arm takes its flags from `TIER_E_ARMS` and is exempt
+    from the registered package guards, which is the whole point of it.
     """
     d_model, layers, lr = GRID[grid_index]
     is_baseline = run.arm == "B"
+    variant = TIER_E_ARMS.get(run.arm)
     config = TrainConfig(
         d_model=d_model,
         num_layers=layers,
         lr=lr,
         steps=steps,
         seed=run.seed,
-        use_fm_package=not is_baseline,
-        use_reconstruction_head=not is_baseline,
+        use_fm_package=variant["use_fm_package"] if variant else not is_baseline,
+        use_reconstruction_head=(
+            variant["use_reconstruction_head"] if variant else not is_baseline
+        ),
     )
+    if variant:
+        # exploratory by construction; the registered package guards below do not apply to it
+        return config
     if is_baseline:
         if config.use_fm_package or config.use_reconstruction_head:
             raise RuntimeError("B must be the trunk with the FM package stripped")
@@ -378,24 +411,40 @@ def main() -> None:
         help="override the selected configuration; recorded as unregistered in the result file",
     )
     parser.add_argument("--list", action="store_true", help="print the run plan and exit")
+    parser.add_argument(
+        "--tier-e",
+        action="store_true",
+        help=(
+            "run the exploratory Tier E plan instead of the registered one, writing to "
+            "results/tier_e and checkpoints/tier_e. Not a preregistered arm and never a Tier 2 result."
+        ),
+    )
     args = parser.parse_args()
 
+    global RESULTS, CHECKPOINTS
+    plan = PLAN
+    if args.tier_e:
+        # redirect before anything resolves a path, so no Tier E artefact can land in the Tier 2 directories that 
+        # report_selection and the sealed evaluation glob
+        plan = TIER_E_PLAN
+        RESULTS, CHECKPOINTS = TIER_E_RESULTS, TIER_E_CHECKPOINTS
+
     if args.list:
-        return print_plan()
+        return print_plan(plan, tier_e=args.tier_e)
 
     raw = args.index if args.index is not None else os.environ.get("PBS_ARRAY_INDEX")
     if raw is None:
         raise SystemExit("FAIL: no --index and no $PBS_ARRAY_INDEX in the environment")
     index = int(raw)
-    if not 0 <= index < len(PLAN):
-        raise SystemExit(f"index {index} is outside 0..{len(PLAN) - 1}; see --list")
+    if not 0 <= index < len(plan):
+        raise SystemExit(f"index {index} is outside 0..{len(plan) - 1}; see --list")
     if args.steps is None:
         raise SystemExit(
             "FAIL: --steps is required. The optimiser step budget is a registered constant "
             "(preregistration_tier2_tuning.md §5) and must be passed explicitly, not defaulted here."
         )
 
-    run = PLAN[index]
+    run = plan[index]
     grid_index, configuration_source = selected_grid_index(args.grid_index)
     d_model, layers, lr = GRID[grid_index]
 
@@ -497,6 +546,11 @@ def main() -> None:
         "checkpoint_selection": selection_payload,
         "reported_checkpoint": reported_checkpoint.name,
         "opened_test_partition": False,
+        # tier E artefacts are marked in the file as well as by their directory, so a stray copy
+        # cannot be mistaken for a registered result
+        "tier": "E" if args.tier_e else "2",
+        "exploratory": bool(args.tier_e),
+        "tier_e_variant": TIER_E_ARMS.get(run.arm, {}).get("description") if args.tier_e else None,
         # environment provenance: the attention backend is pinned in train() (PyTorch #125674)
         "sdpa_backend": SDPA_BACKEND,
         "torch_version": torch.__version__,
@@ -643,14 +697,24 @@ def _resolve_reported_model(run: Run, result, selection: dict):
     }
 
 
-def print_plan() -> None:
+def print_plan(plan: list[Run] | None = None, *, tier_e: bool = False) -> None:
     # GenAI reference: did all of this; I checked it 
-    print(f"{'idx':>4}  {'arm':<3} {'species':<24} {'seed':>4}  path")
-    for index, run in enumerate(PLAN):
+    plan = PLAN if plan is None else plan
+    print(f"{'idx':>4}  {'arm':<7} {'species':<24} {'seed':>4}  path")
+    for index, run in enumerate(plan):
         print(
-            f"{index:>4}  {run.arm:<3} {run.species or '-':<24} {run.seed:>4}  "
+            f"{index:>4}  {run.arm:<7} {run.species or '-':<24} {run.seed:>4}  "
             + ("deferred" if run.deferred else "critical")
         )
+    if tier_e:
+        print(f"\n{len(plan)} exploratory Tier E runs (0-{len(plan) - 1}).")
+        for arm, spec in TIER_E_ARMS.items():
+            print(f"  {arm:<7} {spec['description']}")
+        print(
+            "Governed by tierE_exploratory_ablations.md. Validation individuals only; no test "
+            "partition, no success band, never a Tier 2 result."
+        )
+        return
     print(
         f"\n{N_CRITICAL_PATH} critical-path runs (0-{N_CRITICAL_PATH - 1}), "
         f"{len(PLAN) - N_CRITICAL_PATH} deferred "

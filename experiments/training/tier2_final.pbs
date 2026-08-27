@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tier 2 final training at the selected configuration, one model per subjob five seeds each.
+# Tier 2 final training at the selected configuration, one model per subjob, five seeds each.
 # Run plan: `tier2_final_train.py --list`.  0-4 Z, 5-9 B, 10-24 S, 25-39 Za (deferred).
 #
 # Critical path (max_array_size is 10):
@@ -12,6 +12,10 @@
 #
 # The configuration comes from results/tier2_inner_loop/tier2_selection.json; GRID_INDEX=<n> overrides
 # it and is recorded in every result file as unregistered.
+#
+# Exploratory Tier E variants run against their own plan (`--tier-e --list`) and write to
+# results/tier_e and checkpoints/tier_e:
+#   qsub -v STEPS=20000,TIER_E=1 -J 0-4 experiments/training/tier2_final.pbs
 
 #PBS -P um09
 #PBS -q gpuhopper
@@ -42,9 +46,16 @@ if [ -z "${STEPS:-}" ]; then
 fi
 
 extra_args=()
+if [ "${TIER_E:-0}" = "1" ]; then
+  extra_args+=(--tier-e)
+elif [ "${TIER_E:-0}" != "0" ]; then
+  echo "FAIL: TIER_E must be 1 when enabled; got '$TIER_E'" >&2
+  exit 1
+fi
 if [ -n "${GRID_INDEX:-}" ]; then
   echo "WARNING: overriding the selected configuration with grid index ${GRID_INDEX}" >&2
-  extra_args=(--grid-index "$GRID_INDEX")
+  # append, never assign; assigning here drop --tier-e set above; not what we want
+  extra_args+=(--grid-index "$GRID_INDEX")
 fi
 
 echo "=== nci_account before ==="
