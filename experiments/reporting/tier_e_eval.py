@@ -33,6 +33,7 @@ from animal_movement_fm.data.resample import CONTEXT_LENGTH  # noqa: E402
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched  # noqa: E402
 from animal_movement_fm.eval.harness import evaluate  # noqa: E402
 from animal_movement_fm.models.persistence import Persistence  # noqa: E402
+from animal_movement_fm.train.loop import TrainConfig  # noqa: E402
 
 OUT = REPO / "results" / "tier_e"
 EARTH_RADIUS_M = 6_371_008.8
@@ -53,15 +54,28 @@ def geodesic_m(lon1, lat1, lon2, lat2) -> np.ndarray:
     return 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 # GenAI added 
-def reported_checkpoint(results_dir: Path, arm: str, species: str, seed: int) -> Path | None:
+def load_reported_model(results_dir: Path, arm: str, species: str, seed: int):
     """
-    Return the reported checkpoint for one arm, species and seed, if it exists.
+    Rebuild the model an arm reports for one species and seed, or None if it was not trained.
 
-    Z, B and the Tier E variants are species independent; Za is trained separately for each held-out species.
+    The `_reported.pt` file holds a state dict, not a model object, so the architecture is rebuilt
+    from the saved configuration exactly as the sealed evaluation does. Non-finite weights are
+    refused rather than silently scored.
+
+    Z, B and the Tier E variants are species independent; Za is trained separately for each held-out
+    species.
     """
     run_id = f"{arm}_{species}_s{seed}" if arm == "Za" else f"{arm}_s{seed}"
     path = results_dir / f"{run_id}_reported.pt"
-    return path if path.exists() else None
+    if not path.exists():
+        return None
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    model = TrainConfig(**state["config"]).build()
+    model.load_state_dict(state["model"])
+    if not all(torch.isfinite(p).all() for p in model.parameters()):
+        raise SystemExit(f"FAIL: {path} holds non-finite weights; that run diverged")
+    return model.eval()
+
 
 
 def quantile_by_individual(frame: pd.DataFrame, mask: np.ndarray, q: float) -> float:
@@ -99,7 +113,16 @@ def main() -> None:
 
     payload: dict = {"tier": "E", "partition": "validation", "species": {}}
 
-    for species, _, _, _, profile_key in wanted:
+    for species, _, profile_key, _, _ in wanted:
+        # HELD_OUT is (stem, split_stem, profile_key, domain, matching_source). Taking the last
+        # element here instead of the third silently scored canis_lupus against cervus_elaphus's
+        # 49.4 m boundary rather than its own 131.3 m, which changes the strata and every number
+        # in the table. The guard makes that failure loud rather than plausible.
+        if profile_key in T.SOURCE_STEMS:
+            raise SystemExit(
+                f"FAIL: {species} resolved to regime profile {profile_key!r}, which is a source "
+                "species. HELD_OUT was unpacked in the wrong order."
+            )
         frame = T.validation_frame(species)
         boundary = T.boundary_m(profile_key)
         persistence = evaluate(
@@ -130,10 +153,9 @@ def main() -> None:
         for arm, results_dir in ARMS:
             per_seed = []
             for seed in T.SEEDS:
-                checkpoint = reported_checkpoint(results_dir, arm, species, seed)
-                if checkpoint is None:
+                model = load_reported_model(results_dir, arm, species, seed)
+                if model is None:
                     continue
-                model = torch.load(checkpoint, map_location=device, weights_only=False)
                 results = evaluate_batched(
                     MovementFMPredictor(model, device=device),
                     frame,
