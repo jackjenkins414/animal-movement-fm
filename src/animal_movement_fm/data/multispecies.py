@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from animal_movement_fm.data.enu import encode_window, enu_steps, scale_target
+from animal_movement_fm.data.enu import SCALE_FLOOR_M, encode_window, enu_steps, scale_target
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import id_key
 
@@ -121,9 +121,15 @@ class SpeciesWindows:
             context_length=context_length,
         )
 
-    def gather(self, window_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def gather(
+        self, window_ids: np.ndarray, *, sigma: float = SCALE_FLOOR_M
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Materialise a batch as (features, target_scaled, scale).
+
+        `sigma` is the registered scale floor and defaults to it, so registered arms are unaffected.
+        A Tier E variant may pass a different value; whatever is passed here must also be passed at
+        inference, or the model is scored on a representation it was not trained on.
         """
         window_ids = np.asarray(window_ids, dtype=np.int64)
         base = self.starts[window_ids][:, None]
@@ -135,7 +141,9 @@ class SpeciesWindows:
 
         # Encode only the context so the target step cannot affect the window scale.
         c = self.context_length
-        features, scale = encode_window(lon[:, :c], lat[:, :c], timestamp_s=epoch_s[:, :c])
+        features, scale = encode_window(
+            lon[:, :c], lat[:, :c], timestamp_s=epoch_s[:, :c], sigma=sigma
+        )
         target_step = enu_steps(lon[:, self.context_length - 1 :], lat[:, self.context_length - 1 :])[:, 0, :]
         return features, scale_target(target_step, scale), scale
 

@@ -8,8 +8,11 @@ For each held-out species and arm, we reports the median across five training se
 p90 relative to persistence, and how far the model prediction moves from persistence as a share of the animal's step. The last 
 measure is also reported for low displacement windows, where the sealed evaluation showed the clearest FM failure.
 
-Za removes conditioning while keeping reconstruction; `Zrecon` removes reconstruction while keeping conditioning. Comparing them 
-aims to help us figure out which part of the FM package drives that behaviour.
+`Zrecon` removes the masked reconstruction objective and changes nothing else, so Z vs Zrecon isolates that objective.
+Za is not its complement; Za carries the full package and ablates the training pool (leave one domain source out), so we hope it
+answers whether transfer depends on a same domain source rather than which half of the architecture is responsible; `Zfloor300` keeps 
+the whole package and raises the scale floor instead, testing whether the objective is harmful only because sigma = 30m makes a 
+stationary window encode as a large normalised displacement.
 
 The arms are rescored on validation only so the comparison is like for like. Their sealed test results are not re read or changed.
 """
@@ -33,6 +36,7 @@ from animal_movement_fm.data.resample import CONTEXT_LENGTH  # noqa: E402
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched  # noqa: E402
 from animal_movement_fm.eval.harness import evaluate  # noqa: E402
 from animal_movement_fm.models.persistence import Persistence  # noqa: E402
+from animal_movement_fm.data.enu import SCALE_FLOOR_M  # noqa: E402
 from animal_movement_fm.train.loop import TrainConfig  # noqa: E402
 
 OUT = REPO / "results" / "tier_e"
@@ -44,6 +48,7 @@ ARMS = (
     ("B", T.RESULTS),
     ("Za", T.RESULTS),
     ("Zrecon", T.TIER_E_RESULTS),
+    ("Zfloor300", T.TIER_E_RESULTS),
 )
 
 
@@ -56,7 +61,7 @@ def geodesic_m(lon1, lat1, lon2, lat2) -> np.ndarray:
 # GenAI added 
 def load_reported_model(results_dir: Path, arm: str, species: str, seed: int):
     """
-    Rebuild the model an arm reports for one species and seed, or None if it was not trained.
+    Rebuild an arm's reported model and the scale floor it trained under, or None if untrained.
 
     The `_reported.pt` file holds a state dict, not a model object, so the architecture is rebuilt
     from the saved configuration exactly as the sealed evaluation does. Non-finite weights are
@@ -74,7 +79,15 @@ def load_reported_model(results_dir: Path, arm: str, species: str, seed: int):
     model.load_state_dict(state["model"])
     if not all(torch.isfinite(p).all() for p in model.parameters()):
         raise SystemExit(f"FAIL: {path} holds non-finite weights; that run diverged")
-    return model.eval()
+
+    # tier E variant couldve trained under different scale floor; so scoring it at the registered 30 m would feed it a 
+    # representation it never saw, so the floor is read back from the runs own result file; runs written before that 
+    # field existed used the registered value by construction
+    record = results_dir / f"{run_id}.json"
+    sigma = SCALE_FLOOR_M
+    if record.exists():
+        sigma = float(json.loads(record.read_text()).get("scale_floor_m", SCALE_FLOOR_M))
+    return model.eval(), sigma
 
 
 
@@ -153,11 +166,12 @@ def main() -> None:
         for arm, results_dir in ARMS:
             per_seed = []
             for seed in T.SEEDS:
-                model = load_reported_model(results_dir, arm, species, seed)
-                if model is None:
+                loaded = load_reported_model(results_dir, arm, species, seed)
+                if loaded is None:
                     continue
+                model, sigma = loaded
                 results = evaluate_batched(
-                    MovementFMPredictor(model, device=device),
+                    MovementFMPredictor(model, device=device, sigma=sigma),
                     frame,
                     context_length=CONTEXT_LENGTH,
                 ).sort_values(["individual_id", "timestamp"]).reset_index(drop=True)

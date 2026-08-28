@@ -35,6 +35,7 @@ from tier2_inner_loop import GRID, SOURCES  # single source of truth for the reg
 from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.multispecies import SourcePool, SpeciesWindows
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
+from animal_movement_fm.data.enu import SCALE_FLOOR_M
 from animal_movement_fm.data.split import load_split
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched
 from animal_movement_fm.eval.harness import evaluate
@@ -149,14 +150,29 @@ TIER_E_RESULTS = REPO / "results" / "tier_e"
 TIER_E_CHECKPOINTS = REPO / "checkpoints" / "tier_e"
 
 TIER_E_ARMS: dict[str, dict] = {
-    # remove reconstruction while keeping conditioning; paired with Za, which does the opposite, this helps isolate which 
-    # half of the FM package drives the low displacement failure we had 
+    # remove the masked reconstruction objective and keep everything else, so Z vs Zrecon differs in exactly one thing
     "Zrecon": {
         "description": "Z minus the masked reconstruction objective; conditioning path intact",
         "use_fm_package": True,
         "use_reconstruction_head": False,
     },
+    # reconstruction head is trained to reproduce the normalised displacement of masked tokens, and sigma = 30m makes a 
+    # near stationary window's normalised displacement enormous, so the objective explicitly teaches the model to emit motion
+    # where the animal did not move; raising the floor should let the objective be kept
+    "Zfloor300": {
+        "description": "Z with the scale floor raised from 30 m to 300 m; full package retained",
+        "use_fm_package": True,
+        "use_reconstruction_head": True,
+        "scale_floor_m": 300.0,
+    },
 }
+
+
+def tier_e_scale_floor(run: Run) -> float:
+    """
+    Return the scale floor a run trains under: the registered 30 m unless a Tier E arm overrides it.
+    """
+    return float(TIER_E_ARMS.get(run.arm, {}).get("scale_floor_m", SCALE_FLOOR_M))
 
 
 def build_tier_e_plan() -> list[Run]:
@@ -229,7 +245,10 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
         stem, split_stem, _, _, _ = held_out_entry(run.species)
         windows = _load_species_windows(stem, split_stem, "train")
         pool = SourcePool({stem: windows}, {stem: 1.0})
-        return PreparedPool.from_source_pool(pool, device=device), f"specialist:{stem}"
+        return (
+            PreparedPool.from_source_pool(pool, device=device, sigma=tier_e_scale_floor(run)),
+            f"specialist:{stem}",
+        )
 
     if run.arm == "Za":
         _, _, _, _, matching_source = held_out_entry(run.species)
@@ -245,7 +264,10 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
         for stem, split_stem, *_ in wanted
     }
     pool = SourcePool.from_registered_weights(species, WEIGHTS, pool=node)
-    return PreparedPool.from_source_pool(pool, device=device), node
+    return (
+        PreparedPool.from_source_pool(pool, device=device, sigma=tier_e_scale_floor(run)),
+        node,
+    )
 
 
 def build_config(run: Run, grid_index: int, steps: int) -> TrainConfig:
@@ -551,6 +573,8 @@ def main() -> None:
         "tier": "E" if args.tier_e else "2",
         "exploratory": bool(args.tier_e),
         "tier_e_variant": TIER_E_ARMS.get(run.arm, {}).get("description") if args.tier_e else None,
+        # the representation this model was trained under; evaluation must use the same value
+        "scale_floor_m": tier_e_scale_floor(run),
         # environment provenance: the attention backend is pinned in train() (PyTorch #125674)
         "sdpa_backend": SDPA_BACKEND,
         "torch_version": torch.__version__,

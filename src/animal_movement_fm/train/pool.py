@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from animal_movement_fm.data.enu import SCALE_FLOOR_M
 from animal_movement_fm.data.multispecies import SourcePool
 
 ENCODE_CHUNK = 50_000
@@ -54,6 +55,7 @@ class PreparedPool:
         device: torch.device | str = "cpu",
         dtype: torch.dtype = torch.float32,
         chunk: int = ENCODE_CHUNK,
+        sigma: float = SCALE_FLOOR_M,
     ) -> "PreparedPool":
         """
         Encode every window in pool and move the resulting tensors to device`.
@@ -81,7 +83,7 @@ class PreparedPool:
 
             for start in range(0, total, chunk):
                 ids = np.arange(start, min(start + chunk, total), dtype=np.int64)
-                features, targets, _ = windows.gather(ids)
+                features, targets, _ = windows.gather(ids, sigma=sigma)
 
                 feature_blocks.append(torch.as_tensor(features, dtype=dtype).to(device))
                 target_blocks.append(torch.as_tensor(targets, dtype=dtype).to(device))

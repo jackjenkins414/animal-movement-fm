@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from animal_movement_fm.data.enu import (
+    SCALE_FLOOR_M,
     encode_window,
     enu_to_lonlat,
     unscale_prediction,
@@ -31,8 +32,9 @@ def _epoch_seconds(timestamps) -> np.ndarray:
     if values.dtype == object:
         import pandas as pd
 
-        # bug catch; to_datetime takes 1D only, and we always hand a (batch, context) so flatten and restore the shape; naive timestamps 
-        # skip this branch entirely which is why it went unexercised until a species arrived with tz aware ones...
+        # `to_datetime` takes 1D only, and this function is always handed a (batch, context) array, so flatten and restore the 
+        # shape. Naive timestamps skip this branch entirely, which is why it went unexercised until a species arrived with 
+        # tz aware ones
         values = (
             pd.DatetimeIndex(pd.to_datetime(values.ravel(), utc=True))
             .tz_localize(None)
@@ -54,10 +56,14 @@ class MovementFMPredictor:
         *,
         device: torch.device | str | None = None,
         name: str | None = None,
+        sigma: float = SCALE_FLOOR_M,
     ) -> None:
         self.device = torch.device(device or next(model.parameters()).device)
         self.model = model.to(self.device).eval()
         self.name = name or "movement_fm"
+        # must match the scale floor the model was trained under; registered arms use the registered
+        # value at both ends, and a Tier E variant carries its own in its result file
+        self.sigma = float(sigma)
 
     def predict_batch(
         self,
@@ -80,6 +86,7 @@ class MovementFMPredictor:
             history[..., 0],
             history[..., 1],
             timestamp_s=timestamps,
+            sigma=self.sigma,
         )
 
         with torch.no_grad():
