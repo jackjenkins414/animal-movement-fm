@@ -165,6 +165,25 @@ TIER_E_ARMS: dict[str, dict] = {
         "use_reconstruction_head": True,
         "scale_floor_m": 300.0,
     },
+    # closes the architecture ablation; Zrecon is conditioning-on/reconstruction-off; this is its
+    # complement, conditioning off/reconstruction-on, which is B's trunk plus the objective. Together
+    # with Z (both on) and B (both off) the 2x2 is complete, so the conditioning paths contribution
+    # can be read directly instead of inferred from the Zrecon to B gap
+    "Brecon": {
+        "description": "B's trunk plus the masked reconstruction objective; no conditioning path",
+        "use_fm_package": False,
+        "use_reconstruction_head": True,
+    },
+    # Zfloor300 reduced the low displacement failure in proportion to how sigma compared with each
+    # species' regime boundary: wolf's is 131 m and it fell 9.61x -> 1.78x, while gull's is 411 m and
+    # NES's 1,609 m and both improved far less. If the floor has to exceed the low displacement scale
+    # rather than take any particular value, 1,000 m should help gull and NES where 300 m did not.
+    "Zfloor1000": {
+        "description": "Z with the scale floor raised from 30 m to 1,000 m; full package retained",
+        "use_fm_package": True,
+        "use_reconstruction_head": True,
+        "scale_floor_m": 1000.0,
+    },
 }
 
 

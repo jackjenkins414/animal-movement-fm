@@ -49,6 +49,8 @@ ARMS = (
     ("Za", T.RESULTS),
     ("Zrecon", T.TIER_E_RESULTS),
     ("Zfloor300", T.TIER_E_RESULTS),
+    ("Brecon", T.TIER_E_RESULTS),
+    ("Zfloor1000", T.TIER_E_RESULTS),
 )
 
 
