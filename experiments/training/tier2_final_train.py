@@ -165,26 +165,106 @@ TIER_E_ARMS: dict[str, dict] = {
         "use_reconstruction_head": True,
         "scale_floor_m": 300.0,
     },
-    # closes the architecture ablation; Zrecon is conditioning-on/reconstruction-off; this is its
-    # complement, conditioning off/reconstruction-on, which is B's trunk plus the objective. Together
-    # with Z (both on) and B (both off) the 2x2 is complete, so the conditioning paths contribution
-    # can be read directly instead of inferred from the Zrecon to B gap
+    # closes the architecture ablation; Zrecon is conditioning-on/reconstruction-off; this is its complement, conditioning off/
+    # reconstruction-on, which is B's trunk plus the objective. Together with Z (both on) and B (both off) the 2x2 is complete, 
+    # so the conditioning paths contribution can be read directly instead of inferred from the Zrecon to B gap
     "Brecon": {
         "description": "B's trunk plus the masked reconstruction objective; no conditioning path",
         "use_fm_package": False,
         "use_reconstruction_head": True,
     },
-    # Zfloor300 reduced the low displacement failure in proportion to how sigma compared with each
-    # species' regime boundary: wolf's is 131 m and it fell 9.61x -> 1.78x, while gull's is 411 m and
-    # NES's 1,609 m and both improved far less. If the floor has to exceed the low displacement scale
-    # rather than take any particular value, 1,000 m should help gull and NES where 300 m did not.
+    # Zfloor300 reduced the low displacement failure in proportion to how sigma compared with each species' regime boundary: wolf's 
+    # is 131 m and it fell 9.61x -> 1.78x, while gull's is 411 m and NES's 1,609 m and both improved far less. If the floor has to 
+    # exceed the low displacement scale rather than take any particular value, 1,000 m should help gull and NES where 300 m did not.
     "Zfloor1000": {
         "description": "Z with the scale floor raised from 30 m to 1,000 m; full package retained",
         "use_fm_package": True,
         "use_reconstruction_head": True,
         "scale_floor_m": 1000.0,
     },
+    # E1 and E2
+    # John flagged a gap in the original zero-shot setut; the model may need an explicit species signal rather than being asked to 
+    # infer one from three pooled source species. E1 asks whether species identity is useful at all; E2 then asks whether that 
+    # information can be added for an unseen species
+
+    # E1 (Q1): B's trunk plus a learned per species embedding driving FiLM, with context conditioning and reconstruction both off; 
+    # compared with B, species identity is the only new input. Scored on source-species validation data because only source species 
+    # have embedding rows.
+    "E1embed": {
+        "description": (
+            "B's trunk plus a learned 16-dim per-species embedding driving FiLM; no context conditioning, no reconstruction head. "
+            "Source species validation only; not zero-shot"
+        ),
+        "use_fm_package": True,
+        "use_context_conditioning": False,
+        "use_reconstruction_head": False,
+        "species_embed_dim": 16,
+        "scored_partition": "source_validation",
+    },
+
+    # capacity control for E1embed. Labels are redrawn independently per window; a fixed permutation would just relabel the lookup 
+    # rows and reproduce the same model.
+    "E1shuffle": {
+        "description": (
+            "E1embed with the species label drawn uniformly at random per window; the capacity control that separates species "
+            "information from FiLM capacity"
+        ),
+        "use_fm_package": True,
+        "use_context_conditioning": False,
+        "use_reconstruction_head": False,
+        "species_embed_dim": 16,
+        "random_species_labels": True,
+        "scored_partition": "source_validation",
+    },
+
+    # E2 (Q2): start from E1embed, freeze the trained model, and fit one new 16-dim embedding for the held-out species using its 
+    # training individuals. Evaluation is on that species' validation individuals. Unlike F, which tunes the full model, E2 adapts 
+    # species identity only
+    #
+    # the higher LR is deliberate because only 16 parameters are being fitted. The fitted embedding norm and loss curve are reported 
+    # so failed optimisation is visible
+    "E2embed": {
+        "description": (
+            "E1embed with the whole trunk frozen and one 16-dim embedding fitted per held-out species on that species' training "
+            "individuals; evaluated on its validation individuals"
+        ),
+        "use_fm_package": True,
+        "use_context_conditioning": False,
+        "use_reconstruction_head": False,
+        "species_embed_dim": 16,
+        "freeze_except_species_embedding": True,
+        "init_from": "E1embed",
+
+        # start from the model's normal random embedding initialisation. `donor_mean` remains a useful follow-up if E2 is flat, to 
+        # check that a null result is not just an optimisation artefact
+        "embedding_init": "random",
+
+        "per_species": True,
+        "training_pool": "attached_species_train",
+        "lr": 1e-2,
+        "scored_partition": "held_out_validation",
+    },
 }
+
+# flags a Tier E arm may set on the model or the training loop. Anything else in a spec is bookkeeping for this script and must not 
+# silently reach TrainConfig
+TIER_E_CONFIG_FLAGS = (
+    "use_fm_package",
+    "use_context_conditioning",
+    "use_reconstruction_head",
+    "species_embed_dim",
+    "random_species_labels",
+    "freeze_except_species_embedding",
+)
+
+# Tier E indices 0-19 are trained and reported (results.md section 7). The plan may only ever be appended to, so the first twenty run 
+# ids are pinned here and checked at import; a reordering that would silently repoint a finished result at a different arm fails loudly 
+# instead
+TIER_E_FROZEN_PREFIX: tuple[str, ...] = tuple(
+    f"{arm}_s{seed}"
+    for arm in ("Zrecon", "Zfloor300", "Brecon", "Zfloor1000")
+    for seed in SEEDS
+)
 
 
 def tier_e_scale_floor(run: Run) -> float:
@@ -195,11 +275,76 @@ def tier_e_scale_floor(run: Run) -> float:
 
 
 def build_tier_e_plan() -> list[Run]:
-    """Return every Tier E variant at each registered seed."""
-    return [Run(arm, "", seed) for arm in TIER_E_ARMS for seed in SEEDS]
+    """
+    Return every Tier E variant at each registered seed.
+
+    Most variants are species independent and contribute one block of five seeds. A `per_species` variant is attached to each held-out 
+    species in `HELD_OUT` order and contributes fifteen. New variants are appended to `TIER_E_ARMS`, never inserted, so an index that 
+    has already been trained keeps pointing at the run that produced it.
+    """
+    plan: list[Run] = []
+    for arm, spec in TIER_E_ARMS.items():
+        if spec.get("per_species"):
+            for species, *_ in HELD_OUT:
+                plan += [Run(arm, species, seed) for seed in SEEDS]
+        else:
+            plan += [Run(arm, "", seed) for seed in SEEDS]
+    return plan
 
 
 TIER_E_PLAN = build_tier_e_plan()
+
+_prefix = tuple(run.run_id for run in TIER_E_PLAN[: len(TIER_E_FROZEN_PREFIX)])
+if _prefix != TIER_E_FROZEN_PREFIX:
+    raise RuntimeError(
+        "the trained Tier E indices have moved. Expected\n  "
+        + "\n  ".join(TIER_E_FROZEN_PREFIX)
+        + "\nbut the plan now starts\n  "
+        + "\n  ".join(_prefix)
+        + "\nAppend to TIER_E_ARMS; never insert or reorder."
+    )
+del _prefix
+
+
+def donor_state_dict(run: Run, grid_index: int) -> tuple[dict, str]:
+    """
+    Load the weights a Tier E arm initialises from, minus the species lookup.
+
+    E2 starts from E1embed at the same seed and fits nothing but a species vector, so the donor's own lookup; three rows, one per 
+    source species; is deliberately dropped rather than reused: a held-out species is not one of those three, and seeding its 
+    vector from one of them would put a source species' identity into the answer.
+
+    The donor's trunk geometry is checked against this run's, because a silent mismatch would be caught only as a load error several 
+    lines later and would read as a code fault rather than as "you have not trained E1embed at this configuration yet".
+    """
+    variant = TIER_E_ARMS.get(run.arm, {})
+    donor_arm = variant["init_from"]
+    donor_id = f"{donor_arm}_s{run.seed}"
+    path = TIER_E_RESULTS / f"{donor_id}_reported.pt"
+    if not path.exists():
+        raise SystemExit(
+            f"FAIL: {run.arm} initialises from {donor_id}, but {path} does not exist. Train the "
+            f"{donor_arm} block first; E2 is gated on E1 by design."
+        )
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    donor_config = state["config"]
+    d_model, layers, _ = GRID[grid_index]
+    if (donor_config["d_model"], donor_config["num_layers"]) != (d_model, layers):
+        raise SystemExit(
+            f"FAIL: {donor_id} was trained at d_model={donor_config['d_model']}, "
+            f"{donor_config['num_layers']} layers; this run is at {d_model}, {layers}"
+        )
+    weights = {k: v for k, v in state["model"].items() if k != "species_embed.weight"}
+
+    how = variant.get("embedding_init", "random")
+    if how == "donor_mean":
+        # one row, the centroid of the donor's source rows
+        weights["species_embed.weight"] = state["model"]["species_embed.weight"].mean(
+            dim=0, keepdim=True
+        )
+    elif how != "random":
+        raise SystemExit(f"FAIL: unknown embedding_init {how!r}; use 'random' or 'donor_mean'")
+    return weights, f"{donor_id} ({how} embedding init)"
 
 
 def held_out_entry(species: str) -> tuple[str, str, str, str, str]:
@@ -260,13 +405,15 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
     Z/B use the full source pool, Za uses the registered "leave-one-domain-source-out" sub-pool, and S uses only its held-out species' 
     training individuals with weight 1.0.
     """
-    if run.arm == "S":
+    variant = TIER_E_ARMS.get(run.arm, {})
+    if run.arm == "S" or variant.get("training_pool") == "attached_species_train":
         stem, split_stem, _, _, _ = held_out_entry(run.species)
         windows = _load_species_windows(stem, split_stem, "train")
         pool = SourcePool({stem: windows}, {stem: 1.0})
+        node = f"specialist:{stem}" if run.arm == "S" else f"attached_species_train:{stem}"
         return (
             PreparedPool.from_source_pool(pool, device=device, sigma=tier_e_scale_floor(run)),
-            f"specialist:{stem}",
+            node,
         )
 
     if run.arm == "Za":
@@ -289,31 +436,47 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
     )
 
 
-def build_config(run: Run, grid_index: int, steps: int) -> TrainConfig:
+def build_config(run: Run, grid_index: int, steps: int, n_species: int = 0) -> TrainConfig:
     """
     Build one run's configuration at the selected grid cell.
 
     Z, S and Za use the full FM package. B uses the same trunk with conditioning and reconstruction disabled; all other 
     training settings remain shared. A Tier E arm takes its flags from `TIER_E_ARMS` and is exempt
     from the registered package guards, which is the whole point of it.
+
+    `n_species` is the size of the training pool's species list and sizes any learned species lookup. It is carried in the 
+    configuration rather than passed at build time so a saved checkpoint rebuilds its own architecture, exactly as every other 
+    architectural field already does.
     """
     d_model, layers, lr = GRID[grid_index]
     is_baseline = run.arm == "B"
     variant = TIER_E_ARMS.get(run.arm)
+    if variant:
+        flags = {key: variant[key] for key in TIER_E_CONFIG_FLAGS if key in variant}
+        if flags.get("species_embed_dim"):
+            flags["n_species"] = n_species
+        # a Tier E arm may override the selected learning rate; the registered cell was chosen for the full trunk and does 
+        # not have to suit an arm that fits sixteen numbers
+        config = TrainConfig(
+            d_model=d_model,
+            num_layers=layers,
+            lr=float(variant.get("lr", lr)),
+            steps=steps,
+            seed=run.seed,
+            **{"use_fm_package": True, "use_reconstruction_head": False, **flags},
+        )
+        # exploratory by construction; the registered package guards below do not apply to it
+        return config
+
     config = TrainConfig(
         d_model=d_model,
         num_layers=layers,
         lr=lr,
         steps=steps,
         seed=run.seed,
-        use_fm_package=variant["use_fm_package"] if variant else not is_baseline,
-        use_reconstruction_head=(
-            variant["use_reconstruction_head"] if variant else not is_baseline
-        ),
+        use_fm_package=not is_baseline,
+        use_reconstruction_head=not is_baseline,
     )
-    if variant:
-        # exploratory by construction; the registered package guards below do not apply to it
-        return config
     if is_baseline:
         if config.use_fm_package or config.use_reconstruction_head:
             raise RuntimeError("B must be the trunk with the FM package stripped")
@@ -515,8 +678,29 @@ def main() -> None:
         flush=True,
     )
 
-    config = build_config(run, grid_index, args.steps)
+    config = build_config(run, grid_index, args.steps, n_species=len(pool.names))
     checkpoint = CHECKPOINTS / f"{run.run_id}_g{grid_index:02d}_{args.steps}.pt"
+
+    variant = TIER_E_ARMS.get(run.arm, {})
+    initialisation: dict = {}
+    donor_id = None
+    if variant.get("init_from"):
+        weights, donor_id = donor_state_dict(run, grid_index)
+        initialisation["init_state_dict"] = weights
+        print(f"initialised from : {donor_id} (species lookup dropped, refitted here)", flush=True)
+    if config.lr != lr:
+        print(
+            f"learning rate    : {config.lr:g}, overriding the selected cell's {lr:g}. Exploratory "
+            "Tier E override, recorded in the result file.",
+            flush=True,
+        )
+    if config.species_embed_dim:
+        print(
+            f"species lookup   : {config.n_species} x {config.species_embed_dim}"
+            + ("  [labels drawn at random -- control arm]" if config.random_species_labels else "")
+            + ("  [trunk frozen]" if config.freeze_except_species_embedding else ""),
+            flush=True,
+        )
 
     monitor, selection = _make_monitor(run, device, grid_index, args.steps)
     result = train(
@@ -529,6 +713,7 @@ def main() -> None:
             flush=True,
         ),
         **monitor,
+        **initialisation,
     )
 
     print(f"\nfinal loss       : {result.final_loss:.5f}")
@@ -556,6 +741,10 @@ def main() -> None:
             "config": asdict(config),
             "grid_index": grid_index,
             "selection": {k: v for k, v in selection_payload.items() if k != "history"},
+            # the pool's species order is what a learned species lookup is indexed by, and it is
+            # `sorted(weights)`, not the order SOURCES happens to be written in. Scoring a species
+            # under the wrong row would be silent, so the mapping travels with the weights.
+            "pool_species": list(pool.names),
             "model": reported_model.state_dict(),
         },
         reported_checkpoint,
@@ -592,6 +781,25 @@ def main() -> None:
         "tier": "E" if args.tier_e else "2",
         "exploratory": bool(args.tier_e),
         "tier_e_variant": TIER_E_ARMS.get(run.arm, {}).get("description") if args.tier_e else None,
+        "tier_e_scored_partition": variant.get("scored_partition") if args.tier_e else None,
+        "initialised_from": donor_id,
+        # a frozen-trunk arm fits one vector, so "did it move" is the first thing to check before
+        # reading any score off it
+        "trainable_parameters": sum(
+            p.numel() for p in reported_model.parameters() if p.requires_grad
+        ),
+        "species_embedding": (
+            {
+                "dim": config.species_embed_dim,
+                "n_rows": config.n_species,
+                "row_norms": [
+                    float(row.norm()) for row in reported_model.species_embed.weight.detach()
+                ],
+                "random_labels": config.random_species_labels,
+            }
+            if config.species_embed_dim
+            else None
+        ),
         # the representation this model was trained under; evaluation must use the same value
         "scale_floor_m": tier_e_scale_floor(run),
         # environment provenance: the attention backend is pinned in train() (PyTorch #125674)

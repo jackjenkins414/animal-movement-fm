@@ -16,6 +16,18 @@
 # Exploratory Tier E variants run against their own plan (`--tier-e --list`) and write to
 # results/tier_e and checkpoints/tier_e:
 #   qsub -v STEPS=20000,TIER_E=1 -J 0-4 experiments/training/tier2_final.pbs
+#
+# Tier E plan: 0-4 Zrecon, 5-9 Zfloor300, 10-14 Brecon, 15-19 Zfloor1000 (all trained),
+# 20-24 E1embed, 25-29 E1shuffle, 30-44 E2embed (3 held-out species x 5 seeds, in HELD_OUT order:
+# larus_fuscus 30-34, canis_lupus 35-39, mirounga_angustirostris 40-44).
+#
+#   E1, the gate -- 20,000 steps, the registered budget:
+#     qsub -v STEPS=20000,TIER_E=1 -J 20-29 experiments/training/tier2_final.pbs
+#
+#   E2, only if E1 passes -- 2,000 steps; it initialises from E1embed at the matching seed, so the
+#   E1 block must be complete first, and its budget is a different number from E1's:
+#     qsub -v STEPS=2000,TIER_E=1 -J 30-39 experiments/training/tier2_final.pbs
+#     qsub -v STEPS=2000,TIER_E=1 -J 40-44 experiments/training/tier2_final.pbs
 
 #PBS -P um09
 #PBS -q gpuhopper
