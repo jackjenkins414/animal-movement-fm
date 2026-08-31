@@ -51,7 +51,7 @@ def test_forward_shape():
 def test_z_and_b_are_one_class_and_b_has_no_conditioning_path():
     z = MovementFM(d_model=32, num_layers=1, use_fm_package=True)
     b = MovementFM(d_model=32, num_layers=1, use_fm_package=False)
-    assert hasattr(z, "cond_proj") and not hasattr(b, "cond_proj")
+    assert z.cond_proj is not None and b.cond_proj is None
     assert z.n_parameters() > b.n_parameters()
     features, _ = _batch()
     assert b(features).shape == z(features).shape

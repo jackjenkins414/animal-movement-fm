@@ -175,7 +175,7 @@ def test_z_and_b_train_through_the_same_function(tmp_path):
     b = train(_config(use_fm_package=False), prepared, checkpoint_every=0)
 
     assert z.model.n_parameters() > b.model.n_parameters()
-    assert hasattr(z.model, "cond_proj") and not hasattr(b.model, "cond_proj")
+    assert z.model.cond_proj is not None and b.model.cond_proj is None
 
 
 def test_the_same_seed_gives_the_same_run(tmp_path):
