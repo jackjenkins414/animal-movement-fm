@@ -57,6 +57,7 @@ class MovementFMPredictor:
         device: torch.device | str | None = None,
         name: str | None = None,
         sigma: float = SCALE_FLOOR_M,
+        species_index: int | None = None,
     ) -> None:
         self.device = torch.device(device or next(model.parameters()).device)
         self.model = model.to(self.device).eval()
@@ -64,6 +65,25 @@ class MovementFMPredictor:
         # must match the scale floor the model was trained under; registered arms use the registered
         # value at both ends, and a Tier E variant carries its own in its result file
         self.sigma = float(sigma)
+
+        # Tier E: a model carrying a learned species lookup has to be told which row to read, and there is no defensible default; 
+        # picking one silently would score a species under another species' identity. Registered arms have no lookup and pass nothing
+        needs_species = getattr(model, "species_embed", None) is not None
+        if needs_species and species_index is None:
+            raise ValueError(
+                "this model carries a learned species embedding, so species_index is required. A species with no row in the table " \
+                "cannot be scored by this arm at all, which is the finding rather than a bug"
+            )
+        if species_index is not None:
+            if not needs_species:
+                raise ValueError(
+                    "species_index was given but this model has no species embedding to index"
+                )
+            if not 0 <= int(species_index) < model.n_species:
+                raise ValueError(
+                    f"species_index {species_index} is outside the trained table 0..{model.n_species - 1}"
+                )
+        self.species_index = None if species_index is None else int(species_index)
 
     def predict_batch(
         self,
@@ -89,13 +109,23 @@ class MovementFMPredictor:
             sigma=self.sigma,
         )
 
+        species = None
+        if self.species_index is not None:
+            species = torch.full(
+                (features.shape[0],),
+                self.species_index,
+                dtype=torch.long,
+                device=self.device,
+            )
+
         with torch.no_grad():
             output = self.model(
                 torch.as_tensor(
                     features,
                     dtype=torch.float32,
                     device=self.device,
-                )
+                ),
+                species=species,
             )
 
         # only the forecast output is scored if the reconstruction head is enabled

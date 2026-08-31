@@ -25,7 +25,7 @@ MOVEMENT_CHANNELS = tuple(
     for name in ("d_east_scaled", "d_north_scaled", "heading_cos", "heading_sin", "log_speed")
 )
 
-# context summary; mean log scale, mean dt, max dt.
+# context summary; mean log scale, mean dt, max dt
 CONTEXT_COND_DIM = 3
 
 
@@ -84,12 +84,20 @@ class MovementFM(nn.Module):
         use_fm_package: bool = True,
         external_cond_dim: int = 0,
         use_reconstruction_head: bool = False,
+        use_context_conditioning: bool = True,
+        n_species: int = 0,
+        species_embed_dim: int = 0,
     ) -> None:
         super().__init__()
         self.d_model = int(d_model)
         self.use_fm_package = bool(use_fm_package)
         self.external_cond_dim = int(external_cond_dim)
         self.use_reconstruction_head = bool(use_reconstruction_head)
+        # Tier E; the conditioning path's inputs are now selectable. The registered arms take the three window statistics and nothing else, 
+        # which is the default and is unchanged
+        self.use_context_conditioning = bool(use_context_conditioning)
+        self.n_species = int(n_species)
+        self.species_embed_dim = int(species_embed_dim)
         dim_feedforward = int(dim_feedforward or 2 * d_model)
 
         # continuous token features use a linear projection rather than an embedding lookup
@@ -105,8 +113,29 @@ class MovementFM(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        # A learned per-species lookup; it exists only for species that were trained on, so an arm carrying it is not zero-shot on a species 
+        # with no row; that is the whole point of the Tier E experiment it was added for, and it is why nothing registered uses it
+        self.species_embed = None
+        self.cond_proj = None
         if self.use_fm_package:
-            cond_dim = CONTEXT_COND_DIM + self.external_cond_dim
+            if self.species_embed_dim:
+                if self.n_species < 1:
+                    raise ValueError(
+                        f"species_embed_dim={self.species_embed_dim} needs n_species >= 1; a lookup table with no rows cannot be indexed"
+                    )
+                self.species_embed = nn.Embedding(self.n_species, self.species_embed_dim)
+                nn.init.normal_(self.species_embed.weight, std=0.02)
+
+            cond_dim = (
+                (CONTEXT_COND_DIM if self.use_context_conditioning else 0)
+                + self.species_embed_dim
+                + self.external_cond_dim
+            )
+            if cond_dim == 0:
+                raise ValueError(
+                    "the FM package is enabled but every conditioning input is switched off, so cond_proj would have no input. Disable " \
+                    "use_fm_package instead"
+                )
             # FiLM style conditioningl; multiplicative and additive modulation from window statistics
             self.cond_proj = nn.Sequential(
                 nn.Linear(cond_dim, d_model),
@@ -124,17 +153,48 @@ class MovementFM(nn.Module):
         if self.mask_token is not None:
             nn.init.normal_(self.mask_token, std=0.02)
 
+    def conditioning_inputs(
+        self,
+        features: torch.Tensor,
+        external_cond: torch.Tensor | None = None,
+        species: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Assemble the vector handed to `cond_proj`.
+
+        Concatenated in a fixed order (window statistics, species embedding, external descriptors) so a checkpoint's conditioning weights 
+        always mean the same thing. The registered arms supply only the first block, and the other two are zero-width for them.
+        """
+        parts = []
+        if self.use_context_conditioning:
+            parts.append(context_conditioning(features))
+        if self.species_embed is not None:
+            if species is None:
+                raise ValueError(
+                    "this model carries a learned species embedding, so it cannot be run without a species index. A species with no row in " \
+                    "the table has no embedding to look up, which is exactly why this arm is not zero-shot"
+                )
+            parts.append(self.species_embed(species))
+        if self.external_cond_dim:
+            if external_cond is None:
+                raise ValueError(
+                    f"external_cond_dim={self.external_cond_dim} but no external_cond was passed"
+                )
+            parts.append(external_cond)
+        return torch.cat(parts, dim=-1)
+
     def encode(
         self,
         features: torch.Tensor,
         external_cond: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
+        species: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Encode a feature window and return per token Transformer states.
 
-        `token_mask marks tokens hidden for the auxiliary reconstruction objective. Their projected embeddings are replaced 
-        by a learned mask token, while conditioning is still computed from the original unmasked window statistics.
+        `token_mask marks tokens hidden for the auxiliary reconstruction objective. Their projected embeddings are replaced by a learned mask \
+        token, while conditioning is still computed from the original unmasked window statistics.
         """
         x = self.input_proj(features) * math.sqrt(self.d_model)
         if token_mask is not None:
@@ -146,13 +206,7 @@ class MovementFM(nn.Module):
         out = self.encoder(x)
 
         if self.use_fm_package:
-            cond = context_conditioning(features)
-            if self.external_cond_dim:
-                if external_cond is None:
-                    raise ValueError(
-                        f"external_cond_dim={self.external_cond_dim} but no external_cond was passed"
-                    )
-                cond = torch.cat([cond, external_cond], dim=-1)
+            cond = self.conditioning_inputs(features, external_cond=external_cond, species=species)
             gamma, beta = self.cond_proj(cond).chunk(2, dim=-1)
             out = out * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
         return out
@@ -162,8 +216,11 @@ class MovementFM(nn.Module):
         features: torch.Tensor,
         external_cond: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
+        species: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        out = self.encode(features, external_cond=external_cond, token_mask=token_mask)
+        out = self.encode(
+            features, external_cond=external_cond, token_mask=token_mask, species=species
+        )
         # use the final token state as the window summary
         pred = self.head(out[:, -1, :])
         if self.recon_head is not None:

@@ -38,41 +38,38 @@ DROPOUT = 0.1  # Tier 1 Transformer
 NHEAD = 4  # Tier 1 Transformer
 FEEDFORWARD_MULTIPLIER = 2  # dim_feedforward = 2 x d_model, as `MovementFM` already defaults
 
-# fixed auxiliary reconstruction settings.
+# fixed auxiliary reconstruction settings
 MASK_RATIO = 0.15
 RECONSTRUCTION_WEIGHT = 0.5
 
-# cap on stored non-finite gradient records; once a run is poisoned every later step is
-# non-finite too, and the first few are the only informative ones.
+# cap on stored non-finite gradient records; once a run is poisoned every later step is non-finite too, and the first few are the 
+# only informative ones
 NONFINITE_RECORD_LIMIT = 20
 
-# T3: an optimiser step whose pre-clip gradient norm is not finite is not applied. Registered in
-# preregistration_tier2_tuning.md on 22-08-2026; the skipped count is reported for every run.
+# T3: an optimiser step whose pre-clip gradient norm is not finite is not applied. Registered in preregistration_tier2_tuning.md on 
+# 22-08-2026; the skipped count is reported for every run
 SKIP_NONFINITE_STEPS = True
 
-# T4: the registered budget counts *applied* optimiser updates, not attempted batches, and the
-# learning-rate schedule advances only when an update is applied. A run therefore keeps drawing
-# batches until it has made `config.steps` updates. This cap stops a pathological run from drawing
-# forever; a run that hits it has failed and says so rather than silently reporting a short budget.
+# T4: the registered budget counts *applied* optimiser updates, not attempted batches, and the learning-rate schedule advances only 
+# when an update is applied. A run therefore keeps drawing batches until it has made `config.steps` updates. This cap stops a 
+# pathological run from drawing forever; a run that hits it has failed and says so rather than silently reporting a short budget
 MAX_ATTEMPT_MULTIPLIER = 4
 
-# Every training run pins the scaled dot product attention backend to `math`.It is here rather than in
-# a runner so that no arm can be launched without it.
-#
-# PyTorch issue #125674: `ScaledDotProductEfficientAttentionBackward0` returns NaN from finite
-# float32 inputs of large magnitude while the math backend stays finite. Measured on this problem,
-# torch 2.5.1+cu121 / H200, 2,000 applied updates, grid 11, fold 1 (a fold whose training pool
-# contains white stork, so a fold where the failure actually occurs):
+# Every training run pins the scaled dot product attention backend to `math`.It is here rather than in a runner so that no arm can be 
+# launched without it
+
+# PyTorch issue #125674: `ScaledDotProductEfficientAttentionBackward0` returns NaN from finite float32 inputs of large magnitude while 
+# the math backend stays finite. Measured on this problem, torch 2.5.1+cu121 / H200, 2,000 applied updates, grid 11, fold 1 (a fold whose 
+# training pool contains white stork, so a fold where the failure actually occurs):
 #
 #   efficient, raw inputs      14.13% of attempts withheld, every one a genuine non-finite gradient
 #   efficient, asinh inputs     0%
 #   math,      raw inputs       0%
 #   math,      asinh inputs     0%
 #
-# Two independent interventions each remove the failure, which places it in the kernel rather than in
-# the input representation. Pinning `math` costs ~15% wall clock (1.17 vs 1.02 min over an identical
-# 2,000 attempts) and leaves the registered representation untouched, so it is the cheaper of the two.
-# Inference is unaffected — the defect is in the backward pass — but the setting is harmless there.
+# Two independent interventions each remove the failure, which places it in the kernel rather than in the input representation. Pinning 
+# `math` costs ~15% wall clock (1.17 vs 1.02 min over an identical 2,000 attempts) and leaves the registered representation untouched, so 
+# it is the cheaper of the two; inference is unaffected; the defect is in the backward pass; but the setting is harmless there
 SDPA_BACKEND = "math"
 
 
@@ -80,15 +77,15 @@ def sdpa_context(backend: str):
     """
     Return a context manager pinning the attention backend, or a null context for `"auto"`.
 
-    `"auto"` leaves the choice to torch and exists only so a diagnostic can reproduce the defective
-    path deliberately. Scored runs take the module default.
+    `"auto"` leaves the choice to torch and exists only so a diagnostic can reproduce the defective path deliberately. Scored runs take 
+    the module default.
     """
     if backend == "auto":
         return contextlib.nullcontext()
     if sdpa_kernel is None:
         raise RuntimeError(
-            "this torch build has no torch.nn.attention.sdpa_kernel, so the attention backend "
-            "cannot be pinned and PyTorch #125674 cannot be ruled out. Report the torch version."
+            "this torch build has no torch.nn.attention.sdpa_kernel, so the attention backend cannot be pinned and PyTorch #125674 cannot " \
+            "be ruled out. Report the torch version."
         )
     try:
         selected = {"math": SDPBackend.MATH, "efficient": SDPBackend.EFFICIENT_ATTENTION}[backend]
@@ -103,18 +100,15 @@ def _clip_grad_norm_stable(parameters, max_norm: float) -> tuple[float, bool]:
 
     Two different questions have to be answered separately, and `clip_grad_norm_` conflates them:
 
-    1. Does any individual gradient tensor hold a NaN or an Inf? Nothing can repair that; the update
-       has to be withheld.
-    2. Are all elements finite while the float32 *aggregate* sum of squares overflows? That is an
-       arithmetic artefact, and recomputing the norm in float64 recovers a usable value.
+    1. Does any individual gradient tensor hold a NaN or an Inf? Nothing can repair that; the update has to be withheld.
+    2. Are all elements finite while the float32 *aggregate* sum of squares overflows? That is an arithmetic artefact, and recomputing the 
+    norm in float64 recovers a usable value.
 
-    The fast path is float32 and costs what the stock helper costs. Only when that comes back
-    non-finite do we pay for the per-tensor finite check and the float64 recomputation, which is rare
-    once the underlying defect is fixed. The clip is applied only when the norm is finite, so a
-    withheld step leaves the gradients untouched and `origin_parameters` in the diagnostic record
-    names exactly the tensors that were already bad, rather than tensors the clip itself poisoned.
-
-    `max_norm` is unchanged at the registered 1.0; only the arithmetic used to reach it differs.
+    The fast path is float32 and costs what the stock helper costs. Only when that comes back non-finite do we pay for the per-tensor finite 
+    check and the float64 recomputation, which is rare once the underlying defect is fixed. The clip is applied only when the norm is finite, 
+    so a withheld step leaves the gradients untouched and `origin_parameters` in the diagnostic record names exactly the tensors that were 
+    already bad, rather than tensors the clip itself poisoned ; `max_norm` is unchanged at the registered 1.0; only the arithmetic used to reach 
+    it differs.
     """
     grads = [p.grad for p in parameters if p.grad is not None]
     if not grads:
@@ -165,12 +159,33 @@ class TrainConfig:
     use_reconstruction_head: bool = False
     mask_ratio: float = MASK_RATIO
     reconstruction_weight: float = RECONSTRUCTION_WEIGHT
+    # Tier E only. Every field below defaults to the registered behaviour, so a configuration written before they existed rebuilds identically 
+    # and every registered arm is untouched
+    use_context_conditioning: bool = True
+    n_species: int = 0
+    species_embed_dim: int = 0
+    # the shuffled-label control: the embedding is indexed by an i.i.d. uniform draw per window instead of the true species; a fixed permutation 
+    # of the labels would not be a control at all, because a learned lookup table is invariant to relabelling; only destroying the correspondence
+    # window by window leaves the capacity while removing the information.
+    random_species_labels: bool = False
+    # E2: everything except the species lookup is held fixed, so the only thing fitted is identity
+    freeze_except_species_embedding: bool = False
 
     def __post_init__(self) -> None:
         if self.steps < 1:
             raise ValueError("steps must be at least 1")
         if not 0.0 < self.mask_ratio < 1.0:
             raise ValueError("mask_ratio is a proportion of tokens and must lie strictly in (0, 1)")
+        if self.species_embed_dim and self.n_species < 1:
+            raise ValueError("species_embed_dim needs n_species >= 1")
+        if self.random_species_labels and not self.species_embed_dim:
+            raise ValueError(
+                "random_species_labels is the control for the species embedding and means nothing without one"
+            )
+        if self.freeze_except_species_embedding and not self.species_embed_dim:
+            raise ValueError(
+                "freeze_except_species_embedding would leave no trainable parameter at all unless the model carries a species embedding"
+            )
 
     def build(self, *, input_dim: int = N_FEATURES) -> MovementFM:
         return MovementFM(
@@ -182,6 +197,9 @@ class TrainConfig:
             dropout=self.dropout,
             use_fm_package=self.use_fm_package,
             use_reconstruction_head=self.use_reconstruction_head,
+            use_context_conditioning=self.use_context_conditioning,
+            n_species=self.n_species,
+            species_embed_dim=self.species_embed_dim,
         )
 
 
@@ -211,7 +229,7 @@ class TrainResult:
     @property
     def first_nonfinite_step(self) -> int | None:
         """
-        Zero-based step of the earliest recorded non-finite gradient norm, if any.
+        Zero-based step of the earliest recorded non finite gradient norm, if any.
         """
         return self.nonfinite_steps[0]["step"] if self.nonfinite_steps else None
 
@@ -235,8 +253,7 @@ def _sample_token_mask(
     """
     Sample a Bernoulli token mask with at least one masked token per sequence.
 
-    For rows where the initial draw masks nothing, we select one token uniformly so every sequence contributes to the 
-    reconstruction objective.
+    For rows where the initial draw masks nothing, we select one token uniformly so every sequence contributes to the reconstruction objective.
     """
     mask = torch.rand(shape, generator=generator, device=device) < ratio
     empty = ~mask.any(dim=1)
@@ -280,15 +297,17 @@ def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, 
     }
 
 
-def _species_loss_share(model, features, targets, species, names, config) -> dict:
+def _species_loss_share(model, features, targets, species, names, config, cond_species=None) -> dict:
     """
     Return each source species' share of the batch forecast loss.
 
     Reporting diagnostic only; shares are computed under the production radial pseudo-Huber loss and do not feed back 
-    into training decisions.
+    into training decisions. `cond_species` is the index the conditioning path was given for this
+    batch, which is the shuffled draw rather than the true label under the control arm; the shares
+    are still attributed to the true species, since that is what the reader wants to know.
     """
     with torch.no_grad():
-        output = model(features)
+        output = model(features, species=cond_species)
         prediction = output[0] if isinstance(output, tuple) else output
         per_window = radial_pseudo_huber(prediction - targets, delta=HUBER_DELTA, reduction="none")
         total = per_window.sum()
@@ -315,6 +334,7 @@ def train(
     monitor_every: int = 0,
     strict_budget: bool = True,
     sdpa_backend: str = SDPA_BACKEND,
+    init_state_dict: dict | None = None,
 ) -> TrainResult:
     """
     Train one configuration on one prepared source pool.
@@ -349,12 +369,37 @@ def train(
     `sdpa_backend` pins the attention kernel for the whole loop and defaults to the module constant, so every arm gets it without 
     the runner having to remember. Only a diagnostic passes `"auto"` or `"efficient"`, to reproduce the defective path on purpose. 
     See `SDPA_BACKEND`.
+
+    `init_state_dict` initialises the weights from an already-trained model before the optimiser is built, which is what Tier E's 
+    frozen-trunk arm needs; the species lookup is allowed to be absent from it, because that arm's whole purpose is to fit a table 
+    the donor model did not have. Any other missing or unexpected key is refused rather than silently ignored. Combined with
+    `config.freeze_except_species_embedding` the optimiser then sees only the lookup table, so the run fits one vector per species 
+    and nothing else. Registered arms pass neither and are unaffected
     """
     device = torch.device(device or pool.features.device)
     torch.manual_seed(config.seed)
 
     model = config.build(input_dim=pool.n_features).to(device)
-    optimiser = torch.optim.Adam(model.parameters(), lr=config.lr)
+
+    if init_state_dict is not None:
+        missing, unexpected = model.load_state_dict(init_state_dict, strict=False)
+        # the donor may legitimately lack the species lookup; nothing else may differ, or the arm is not the model it claims to be built 
+        # from
+        unexplained = set(missing) - {"species_embed.weight"}
+        if unexplained or unexpected:
+            raise ValueError(
+                "init_state_dict does not match this configuration: "
+                f"missing {sorted(unexplained)}, unexpected {sorted(unexpected)}"
+            )
+
+    if config.freeze_except_species_embedding:
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(name.startswith("species_embed."))
+
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable:
+        raise ValueError("no trainable parameters; the freeze left nothing for the optimiser")
+    optimiser = torch.optim.Adam(trainable, lr=config.lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimiser,
         lambda step: lr_scale(
@@ -442,12 +487,30 @@ def train(
             attempted += 1
             features, targets, species = pool.sample(generator, config.batch_size)
 
+            # the index the conditioning path is given. It is the true species except under the shuffled-label control, and None for every 
+            # arm without a lookup table; the draw uses the sampler generator, so a control run is as reproducible from its seed as any other
+            cond_species = None
+            if config.species_embed_dim:
+                cond_species = (
+                    torch.randint(
+                        0,
+                        config.n_species,
+                        (config.batch_size,),
+                        generator=generator,
+                        device=device,
+                    )
+                    if config.random_species_labels
+                    else species
+                )
+
             optimiser.zero_grad(set_to_none=True)
             if config.use_reconstruction_head:
                 token_mask = _sample_token_mask(
                     features.shape[:2], config.mask_ratio, generator, device
                 )
-                prediction, reconstruction = model(features, token_mask=token_mask)
+                prediction, reconstruction = model(
+                    features, token_mask=token_mask, species=cond_species
+                )
                 movement = features[..., :2]  # scaled east/north target for reconstruction
                 forecast_loss = normalised_huber(prediction, targets)
                 reconstruction_loss = masked_reconstruction_loss(
@@ -457,14 +520,14 @@ def train(
                 )
                 loss = forecast_loss + config.reconstruction_weight * reconstruction_loss
             else:
-                loss = normalised_huber(model(features), targets)
+                loss = normalised_huber(model(features, species=cond_species), targets)
 
             loss.backward()
 
             # GenAI suggested this addition; we coded this part
             # the global gradient norm before clipping; a non finite norm can indicate a gradient spike
             # that will propagate NaNs into the optimiser state. T4 computes it stably; see the helper.
-            norm, nonfinite_element = _clip_grad_norm_stable(model.parameters(), config.grad_clip)
+            norm, nonfinite_element = _clip_grad_norm_stable(trainable, config.grad_clip)
             if diagnose:
                 # the per-attempt input extreme is recorded alongside the norm so the two can be correlated afterwards
                 grad_norms.append(
@@ -502,7 +565,9 @@ def train(
                 history.append(float(loss.detach()))
                 # report realised loss composition under the production loss
                 loss_shares.append(
-                    _species_loss_share(model, features, targets, species, pool.names, config)
+                    _species_loss_share(
+                        model, features, targets, species, pool.names, config, cond_species
+                    )
                 )
             # save only states the loop has actually reached
             if checkpoint_every and applied % checkpoint_every == 0:
