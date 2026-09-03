@@ -1,0 +1,59 @@
+#!/bin/bash
+# Tier E evaluation on a compute node
+#
+# `tier_e_eval.py` rebuilds every window for every arm and every seed, so the source-species mode
+# reconstructs white stork's ~146,000 validation windows twenty times over. That is far past what a
+# Gadi login node will tolerate; the run is killed part way through and the only symptom is output
+# that stops mid table with no traceback. Run it here instead.
+#
+#   held-out species validation (the default Tier E table):
+#     qsub -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
+#   source-species validation (E1embed / E1shuffle, which only have rows for source species):
+#     qsub -v SOURCES=1 -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
+#   one species only, when a rerun does not need the whole table:
+#     qsub -v SOURCES=1,SPECIES=cervus_elaphus -l walltime=00:30:00 experiments/reporting/tier_e_report.pbs
+#
+# Reads validation individuals only and opens no test partition, exactly as the script does when it
+# is run by hand.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier_e_report
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+
+# keep uv's large CUDA cache off the home quota; same fix as the training jobs
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+if [ "${SOURCES:-0}" = "1" ]; then
+  extra_args+=(--sources)
+elif [ "${SOURCES:-0}" != "0" ]; then
+  echo "FAIL: SOURCES must be 1 when enabled; got '$SOURCES'" >&2
+  exit 1
+fi
+if [ -n "${SPECIES:-}" ]; then
+  extra_args+=(--species "$SPECIES")
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/tier_e_eval.py "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
