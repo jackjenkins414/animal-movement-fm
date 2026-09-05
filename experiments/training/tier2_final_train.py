@@ -41,6 +41,7 @@ from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_b
 from animal_movement_fm.eval.harness import evaluate
 from animal_movement_fm.eval.selection import score_fold
 from animal_movement_fm.models.persistence import Persistence
+from animal_movement_fm.train.finetune import Subset, nested_subsets
 from animal_movement_fm.train.loop import SDPA_BACKEND, TrainConfig, train
 from animal_movement_fm.train.pool import PreparedPool
 
@@ -62,6 +63,17 @@ EVALUATION_FLOOR = 25
 # and report the final registered checkpoint
 SELECTION_RULE = "argmin_validation_travel_p90"
 SELECTION_EVERY = 1_000
+
+# fine tuning (F), is 2,000 optimiser steps at a peak rate of 10%
+FINETUNE_STEPS = 2_000
+FINETUNE_LR_FRACTION = 0.1
+
+# F_k is "Z further trained". Z has five seeds and the registered count of 21 runs (3 species x 7)
+FINETUNE_INIT_ARM = "Z"
+FINETUNE_INIT_SEED = 0
+
+# three independent draws at k = 1% and at k = 10%, one at k = 100% where there is nothing to vary
+FINETUNE_DRAWS_PER_FRACTION = {1: 3, 10: 3, 100: 1}
 
 # (segments stem, split manifest stem, regime_profiles.csv row key, domain, matching source)
 HELD_OUT: tuple[tuple[str, str, str, str, str], ...] = (
@@ -105,21 +117,27 @@ class Run:
     species: str
     seed: int
     deferred: bool = False
+    # F only; registered fraction of the held-out species' training individuals
+    k_percent: int | None = None
+    draw: int | None = None
 
     @property
     def run_id(self) -> str:
-        return (
+        base = (
             f"{self.arm}_{self.species}_s{self.seed}"
             if self.species
             else f"{self.arm}_s{self.seed}"
         )
+        if self.k_percent is None:
+            return base
+        return f"{self.arm}_{self.species}_k{self.k_percent:03d}_d{self.draw}_s{self.seed}"
 
     @property
     def uses_validation_selection(self) -> bool:
         """
         Return whether this arm may use validation data for checkpoint selection.
         """
-        return self.arm == "S"
+        return self.arm in {"S", "F"}
 
 
 def build_plan() -> list[Run]:
@@ -135,11 +153,35 @@ def build_plan() -> list[Run]:
         plan += [Run("S", species, seed) for seed in SEEDS]
     for species, *_ in HELD_OUT:
         plan += [Run("Za", species, seed, deferred=True) for seed in SEEDS]
+    # F appended after the arms that have already run; 7 runs per species, in fraction order
+    for species, *_ in HELD_OUT:
+        for k_percent, draws in FINETUNE_DRAWS_PER_FRACTION.items():
+            plan += [
+                Run("F", species, FINETUNE_INIT_SEED, deferred=True, k_percent=k_percent, draw=draw)
+                for draw in range(draws)
+            ]
     return plan
 
 
 PLAN = build_plan()
 N_CRITICAL_PATH = sum(1 for run in PLAN if not run.deferred)
+
+# Indices 0-39 are trained and reported so we append F at 40 onwards
+PLAN_FROZEN_PREFIX: tuple[str, ...] = tuple(
+    [f"Z_s{seed}" for seed in SEEDS]
+    + [f"B_s{seed}" for seed in SEEDS]
+    + [f"S_{species}_s{seed}" for species, *_ in HELD_OUT for seed in SEEDS]
+    + [f"Za_{species}_s{seed}" for species, *_ in HELD_OUT for seed in SEEDS]
+)
+_plan_prefix = tuple(run.run_id for run in PLAN[: len(PLAN_FROZEN_PREFIX)])
+if _plan_prefix != PLAN_FROZEN_PREFIX:
+    raise RuntimeError(
+        "the registered PLAN indices have moved. Expected the first "
+        f"{len(PLAN_FROZEN_PREFIX)} runs to be\n  " + "\n  ".join(PLAN_FROZEN_PREFIX)
+        + "\nbut the plan now starts\n  " + "\n  ".join(_plan_prefix)
+        + "\nAppend to build_plan; never insert or reorder."
+    )
+del _plan_prefix
 
 
 # Tier E additon here!
@@ -375,11 +417,16 @@ def _load_species_windows(
     stem: str,
     split_stem: str,
     partition: str,
+    individuals=None,
 ) -> SpeciesWindows:
     """
     Build one species' train or validation window index.
 
     Test partitions are refused unconditionally so sealed evaluation cannot be bypassed through this training script.
+
+    `individuals` restricts the build to a subset of that partition and is used only by F, whose registered rule is a 
+    fraction of the held-out species' training individuals. The subset is checked to be a subset: an id that is not in 
+    the partition would silently widen the pool F is supposed to be limited of.
     """
     if partition == "test":
         raise SystemExit(
@@ -390,12 +437,34 @@ def _load_species_windows(
         raise SystemExit(f"FAIL: unknown partition {partition!r}")
 
     split = load_split(SPLITS / f"{split_stem}_split_seed42.json")
+    wanted = getattr(split, partition)
+    if individuals is not None:
+        intruders = sorted(set(map(str, individuals)) - set(map(str, wanted)))
+        if intruders:
+            raise SystemExit(
+                f"FAIL: {len(intruders)} requested individual(s) are not in {stem}'s {partition} "
+                f"partition, e.g. {intruders[:3]}. A fine tuning subset must be drawn from it"
+            )
+        wanted = individuals
+
     return SpeciesWindows.build(
         PROCESSED / f"{stem}_segments.parquet",
-        getattr(split, partition),
+        wanted,
         context_length=CONTEXT_LENGTH,
         name=stem,
     )
+
+
+def finetune_subset(run: Run) -> Subset:
+    """
+    Return the registered fine tuning subset for one F run.
+
+    The draw is a property of `(k, draw index)` alone, so the same draw index gives the same nested
+    family every time this is called, and a rerun of one plan index reproduces its own subset.
+    """
+    stem, split_stem, _, _, _ = held_out_entry(run.species)
+    split = load_split(SPLITS / f"{split_stem}_split_seed42.json")
+    return nested_subsets(split.train, draw=run.draw)[run.k_percent]
 
 
 def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
@@ -405,6 +474,23 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
     Z/B use the full source pool, Za uses the registered "leave-one-domain-source-out" sub-pool, and S uses only its held-out species' 
     training individuals with weight 1.0.
     """
+    if run.arm == "F":
+        stem, split_stem, _, _, _ = held_out_entry(run.species)
+        subset = finetune_subset(run)
+        windows = _load_species_windows(stem, split_stem, "train", subset.individuals)
+        pool = SourcePool({stem: windows}, {stem: 1.0})
+        print(
+            f"fine tune subset : k = {run.k_percent}% draw {run.draw} -> "
+            f"{subset.n_individuals} of {subset.n_available} individuals "
+            f"({subset.realised_fraction:.1%} realised)"
+            + ("  [raised to the registered floor of 5]" if subset.floored else ""),
+            flush=True,
+        )
+        return (
+            PreparedPool.from_source_pool(pool, device=device, sigma=SCALE_FLOOR_M),
+            f"finetune:{stem}:k{run.k_percent}:d{run.draw}",
+        )
+
     variant = TIER_E_ARMS.get(run.arm, {})
     if run.arm == "S" or variant.get("training_pool") == "attached_species_train":
         stem, split_stem, _, _, _ = held_out_entry(run.species)
@@ -450,6 +536,22 @@ def build_config(run: Run, grid_index: int, steps: int, n_species: int = 0) -> T
     """
     d_model, layers, lr = GRID[grid_index]
     is_baseline = run.arm == "B"
+
+    if run.arm == "F":
+        # F is Z further trained, so the architecture is Z's exactly 
+        config = TrainConfig(
+            d_model=d_model,
+            num_layers=layers,
+            lr=FINETUNE_LR_FRACTION * lr,
+            steps=FINETUNE_STEPS,
+            seed=run.seed,
+            use_fm_package=True,
+            use_reconstruction_head=True,
+        )
+        if not (config.use_fm_package and config.use_reconstruction_head):
+            raise RuntimeError("F must be same FM package as Z")
+        return config
+
     variant = TIER_E_ARMS.get(run.arm)
     if variant:
         flags = {key: variant[key] for key in TIER_E_CONFIG_FLAGS if key in variant}
@@ -652,6 +754,17 @@ def main() -> None:
     grid_index, configuration_source = selected_grid_index(args.grid_index)
     d_model, layers, lr = GRID[grid_index]
 
+    steps = args.steps
+    if run.arm == "F":
+        steps = FINETUNE_STEPS
+        if args.steps != FINETUNE_STEPS:
+            print(
+                f"NOTE: --steps {args.steps:,} is ignored for F. The registered fine tuning budget "
+                f"is {FINETUNE_STEPS:,} optimiser steps at a peak rate of "
+                f"{FINETUNE_LR_FRACTION:.0%} of the selected cell's.",
+                flush=True,
+            )
+
     RESULTS.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"run              : {run.run_id}  (plan index {index} of {len(PLAN) - 1})")
@@ -678,13 +791,33 @@ def main() -> None:
         flush=True,
     )
 
-    config = build_config(run, grid_index, args.steps, n_species=len(pool.names))
-    checkpoint = CHECKPOINTS / f"{run.run_id}_g{grid_index:02d}_{args.steps}.pt"
+    config = build_config(run, grid_index, steps, n_species=len(pool.names))
+    checkpoint = CHECKPOINTS / f"{run.run_id}_g{grid_index:02d}_{config.steps}.pt"
 
     variant = TIER_E_ARMS.get(run.arm, {})
     initialisation: dict = {}
     donor_id = None
-    if variant.get("init_from"):
+    if run.arm == "F":
+        donor_id = f"{FINETUNE_INIT_ARM}_s{FINETUNE_INIT_SEED}"
+        donor_path = RESULTS / f"{donor_id}_reported.pt"
+        if not donor_path.exists():
+            raise SystemExit(
+                f"FAIL: F is Z further trained, but {donor_path} does not exist. F cannot be run "
+                "before the arm it fine-tunes."
+            )
+        donor = torch.load(donor_path, map_location="cpu", weights_only=False)
+        if donor["config"]["d_model"] != d_model or donor["config"]["num_layers"] != layers:
+            raise SystemExit(
+                f"FAIL: {donor_id} was trained at d_model={donor['config']['d_model']}, "
+                f"{donor['config']['num_layers']} layers; this run is at {d_model}, {layers}"
+            )
+        initialisation["init_state_dict"] = donor["model"]
+        print(
+            f"initialised from : {donor_id} (registered: F_k is Z further trained; the seed is "
+            "declared, see FINETUNE_INIT_SEED)",
+            flush=True,
+        )
+    elif variant.get("init_from"):
         weights, donor_id = donor_state_dict(run, grid_index)
         initialisation["init_state_dict"] = weights
         print(f"initialised from : {donor_id} (species lookup dropped, refitted here)", flush=True)
@@ -702,7 +835,7 @@ def main() -> None:
             flush=True,
         )
 
-    monitor, selection = _make_monitor(run, device, grid_index, args.steps)
+    monitor, selection = _make_monitor(run, device, grid_index, config.steps)
     result = train(
         config,
         pool,
@@ -720,7 +853,7 @@ def main() -> None:
     # T3/T4: the four clocks. `applied` is the registered budget and must equal it; the gap between
     # attempts and applied is the withholding, and is the number the freeze reports.
     print(
-        f"applied updates  : {result.applied_updates:,} of {args.steps:,} registered\n"
+        f"applied updates  : {result.applied_updates:,} of {config.steps:,} registered\n"
         f"attempted batches: {result.attempted_batches:,}\n"
         f"withheld         : {result.skipped_steps:,} ({result.withheld_fraction:.2%} of attempts) -- T3"
     )
@@ -732,6 +865,9 @@ def main() -> None:
         )
 
     reported_model, selection_payload = _resolve_reported_model(run, result, selection)
+
+    # resolved once; the draw is deterministic, so this is the same subset the pool was built from
+    subset = finetune_subset(run) if run.arm == "F" else None
 
     # Sealed evaluation reads this explicit reported checkpoint rather than reconstructing a filename.
     reported_checkpoint = RESULTS / f"{run.run_id}_reported.pt"
@@ -764,6 +900,26 @@ def main() -> None:
         "training_pool": pool_node,
         "pool_species": list(pool.names),
         "pool_windows": pool.n_windows,
+        # the preregistration requires the realised individual and window counts alongside every k,
+        # because the same fraction means a different absolute amount of data on each species
+        "finetune": (
+            {
+                "k_percent": run.k_percent,
+                "draw": run.draw,
+                "draw_seed": subset.seed,
+                "n_individuals": subset.n_individuals,
+                "n_individuals_available": subset.n_available,
+                "realised_fraction": subset.realised_fraction,
+                "raised_to_floor": subset.floored,
+                "n_windows": pool.n_windows,
+                "initialised_from_arm": FINETUNE_INIT_ARM,
+                "initialised_from_seed": FINETUNE_INIT_SEED,
+                "registered_steps": FINETUNE_STEPS,
+                "peak_lr": config.lr,
+            }
+            if run.arm == "F"
+            else None
+        ),
         "final_loss": result.final_loss,
         "loss_history": result.loss_history,
         "loss_shares": result.loss_shares,
@@ -951,10 +1107,12 @@ def _resolve_reported_model(run: Run, result, selection: dict):
 def print_plan(plan: list[Run] | None = None, *, tier_e: bool = False) -> None:
     # GenAI reference: did all of this; I checked it 
     plan = PLAN if plan is None else plan
-    print(f"{'idx':>4}  {'arm':<7} {'species':<24} {'seed':>4}  path")
+    print(f"{'idx':>4}  {'arm':<9} {'species':<24} {'seed':>4} {'k':>5} {'draw':>5}  path")
     for index, run in enumerate(plan):
         print(
-            f"{index:>4}  {run.arm:<7} {run.species or '-':<24} {run.seed:>4}  "
+            f"{index:>4}  {run.arm:<9} {run.species or '-':<24} {run.seed:>4} "
+            f"{('-' if run.k_percent is None else f'{run.k_percent}%'):>5} "
+            f"{('-' if run.draw is None else run.draw):>5}  "
             + ("deferred" if run.deferred else "critical")
         )
     if tier_e:

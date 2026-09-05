@@ -10,6 +10,15 @@
 #   qsub -v STEPS=20000 -J 25-34 experiments/training/tier2_final.pbs
 #   qsub -v STEPS=20000 -J 35-39 experiments/training/tier2_final.pbs
 #
+# F, the registered fine tuning curve, 40-60. Seven runs per held-out species in HELD_OUT order:
+# larus_fuscus 40-46, canis_lupus 47-53, mirounga_angustirostris 54-60. Within a species the order
+# is k=1% draws 0-2, k=10% draws 0-2, k=100%.
+#
+#   qsub -v STEPS=2000 -J 40-49 -l walltime=00:30:00 experiments/training/tier2_final.pbs
+#   qsub -v STEPS=2000 -J 50-59 -l walltime=00:30:00 experiments/training/tier2_final.pbs
+#   qsub -v STEPS=2000,PBS_ARRAY_INDEX=60 -l walltime=00:30:00 experiments/training/tier2_final.pbs
+# (the last is a single element; PBS refuses a one element array, so pass the index through -v)
+#
 # The configuration comes from results/tier2_inner_loop/tier2_selection.json; GRID_INDEX=<n> overrides
 # it and is recorded in every result file as unregistered.
 #
