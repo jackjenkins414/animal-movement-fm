@@ -171,6 +171,8 @@ def available_runs() -> dict[tuple[str, str, int], str]:
     found = {}
     for path in sorted(FINAL.glob("*.json")):
         payload = json.loads(path.read_text())
+        if payload.get("finetune") is not None:
+            continue
         found[(payload["arm"], payload.get("species") or "", int(payload["seed"]))] = payload["run_id"]
     return found
 
