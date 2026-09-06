@@ -1,0 +1,51 @@
+#!/bin/bash
+# The registered fine-tuning curve (F), reported against the sealed test partition.
+#
+# Two phases in one job: --predict scores all 21 F runs on the held-out species' test partitions and
+# writes one prediction file each, --report builds the curve from those plus the Z, B, S and P
+# predictions the sealed evaluation already wrote earlier. 
+#
+#   qsub -l walltime=00:30:00 experiments/reporting/tier2_finetune_curve.pbs
+#
+# Re-report only, once the predictions exist:
+#   qsub -v REPORT_ONLY=1 -l walltime=00:15:00 experiments/reporting/tier2_finetune_curve.pbs
+#
+# The freeze check runs before any test partition is opened, on the same terms as
+# tier2_sealed_eval.py: preregistration_tier2_freeze.md must be committed and clean.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=00:30:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier2_finetune_curve
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+if [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/tier2_finetune_curve.py "${phase_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
