@@ -441,6 +441,24 @@ Subpools: without stork, *Cervus* 76.406% / SOES 23.594%; without *Cervus*, stor
 
 **Status.** No Tier 2 model trained, no configuration evaluated, no held-out partition read.
 
+### A13; 07-09-2026: F's initialisation and objective declared; the F100 vs S comparison qualified
+
+**Changes.** There are threes things sec 3 left underdetermined about F, which we now address and fix here. 
+
+1. **F initialises from Z seed 0.** In sec 3 we defined $F_k$ as "Z further trained" and fixes seven runs per held-out species, which totals the 21 recorded in the freeze sec 5 and leaves no seed dimension; Z has five seeds. Thus, every F run starts from `Z_s0`. Now declared as `FINETUNE_INIT_SEED` in `experiments/training/tier2_final_train.py` and carried in the `finetune` block of every F result file.
+
+2. **F keeps the masked reconstruction objective.** In sec 3 we gave F "the same architecture and frozen configuration as Z and S". S trains the complete FM package, so F does too, and our A12 auxiliary objective is active throughout fine-tuning. Only the step budget and the peak LR differ from Z, exactly as our sec 3 freeze fixed for them.
+
+3. **The F100 against S comparison is qualified, not withdrawn.** In sec 3 we stated that $F_{100}$ and S "differ only in whether the weights were pretrained on the other species first". Under our freeze sec 3 budget they also differ by an order of magnitude in optimiser steps, being that of **2,000 against 20,000**, and in checkpoint selection resolution, **two validation evaluations against twenty**. $F_{100}$ on *L. fuscus* takes 2,000 steps at batch 256 over 597,407 windows and so does not complete a single pass over its own training data. The comparison is therefore reported as a **joint** statement about pretraining *and* fine-tuning budget. We make no claim about the value of pretraining alone from it.
+
+**Our reasons.** (1) and (2) are ambiguities that we had to resolve before F could even run at all; leaving them somewhat implicit from a code POV would have made the arm unreproducible from the registration. (3) is not our choice but moreso a limitation; the budget in the freeze sec 3 was a declared judgement call made before any fine-tuning run, and it is unchanged here, but the interpretation sec 3 attached to $F_{100}$ against S does not survive it. So we namethat as the alternative to reporting a confounded comparison as a clean one.
+
+**Effect on what is claimed.** None on any success band; since sec 4 is defined on Z alone and no band reads F, as sec 3 already states. The F curve is reported with (3) attached, so the strongest available reading of it is that pretraining followed by a 10% fine-tuning budget does not reach a specialist trained from scratch at full budget. Whether pretraining alone helps or hurts is **not** something we set out to answer in this work as of now (perhaps in the future). 
+
+**Consequence of (1), stated as a limitation.** F is the only trained arm with no seed variance estimate. The spread reported at $k$ = 1% and 10% is the **draw spread** registered in sec 3; sensitivity to which training animals were selected, and is a different quantity from seed variance and from the sec 3 paired bootstrap over test individuals. Therefore F points carry no error bar that is comparable to the other arms'.
+
+**Status, stated precisely here since this amendment is later than the others.** Our choices in (1) and (2) were implemented on 31-08-2026 and every F run executed under them on 06-09-2026; they are recoverable from our code and the `finetune` block of each result file as of those dates. Our amendment text was done today (07-09-2026), after the F curve was computed and read. That is weaker than registering them in advance and is recorded as such. (3) was identified from the completed curve and is a limitation rather than a decision, so it could not have been registered earlier without the arm having run. We didn't open any sealed partition by this amendment, no registered constant is altered, and no result in sec 4 or the freeze is revised.
+
 ## GenAI Reference 
 
 I initially used GenAI by giving it this preregistration, which I had written myself, and asking whether the success criteria seemed reasonable for the scope of my project (which I outlined in the chat). It agreed that the criteria was appropriate, but pointed out one issue I had overlooked; trait conditioning is not meaningfully testable in Tier 2 because the model sees only three source species, and therefore only three distinct trait vectors. At that scale, the traits are perfectly confounded with species identity, so the model could simply use them as a species lookup rather than learn a genuinely transferable relationship between biological traits and movement.
