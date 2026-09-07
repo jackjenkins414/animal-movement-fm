@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 from statistics import median
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -39,6 +40,7 @@ sys.path.insert(0, str(REPO / "experiments" / "reporting"))
 
 import tier2_final_train as T  # noqa: E402
 import tier2_sealed_eval as SE  # noqa: E402
+from tier2_persistence_distance import geodesic_m  # noqa: E402
 
 from animal_movement_fm.data.resample import CONTEXT_LENGTH  # noqa: E402
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched  # noqa: E402
@@ -136,18 +138,41 @@ def travel_p90(results: pd.DataFrame, persistence: pd.DataFrame, boundary: float
     return SE.summarise(results, persistence, boundary)[STRATUM].get(STATISTIC, float("nan"))
 
 
+def movement(results: pd.DataFrame, persistence: pd.DataFrame) -> float:
+    """
+    Median distance from persistence's prediction as a share of the animal's realised step.
+
+    Persistence predicts the last observed fix, so this is how far the model chose to move, and
+    persistence's own error is the step the animal actually took.
+    """
+    moved = geodesic_m(
+        persistence["pred_lon"].to_numpy(float),
+        persistence["pred_lat"].to_numpy(float),
+        results["pred_lon"].to_numpy(float),
+        results["pred_lat"].to_numpy(float),
+    )
+    step = persistence["error_m"].to_numpy(float)
+    return float(np.median(moved / np.maximum(step, 1e-9)))
+
+
 def seeded_arm_point(species: str, arm: str, persistence, boundary: float) -> dict | None:
     """
     Return a seeded arm's median travel p90 from its sealed predictions.
     """
-    values = []
+    values, moves = [], []
     for seed in T.SEEDS:
         results = load_predictions(SE.prediction_path(species, arm, seed))
         if results is not None:
             values.append(travel_p90(results, persistence, boundary))
+            moves.append(movement(results, persistence))
     if not values:
         return None
-    return {"n_seeds": len(values), "p90_m": float(median(values)), "per_seed": values}
+    return {
+        "n_seeds": len(values),
+        "p90_m": float(median(values)),
+        "per_seed": values,
+        "moves_share_of_step": float(median(moves)),
+    }
 
 
 def build_curve(species: str, profile_key: str) -> dict:
@@ -190,6 +215,7 @@ def build_curve(species: str, profile_key: str) -> dict:
                 {
                     "draw": finetune["draw"],
                     "p90_m": travel_p90(results, persistence, boundary),
+                    "moves_share_of_step": movement(results, persistence),
                     "n_individuals": finetune["n_individuals"],
                     "n_individuals_available": finetune["n_individuals_available"],
                     "n_windows": finetune["n_windows"],
@@ -201,6 +227,7 @@ def build_curve(species: str, profile_key: str) -> dict:
         if not draws:
             continue
         values = [row["p90_m"] for row in draws]
+        moves = [row["moves_share_of_step"] for row in draws]
         curve["points"].append(
             {
                 "k_percent": k_percent,
@@ -210,6 +237,7 @@ def build_curve(species: str, profile_key: str) -> dict:
                 "p90_m_min": float(min(values)),
                 "p90_m_max": float(max(values)),
                 "skill_median": skill(float(median(values))),
+                "moves_share_of_step": float(median(moves)),
                 "skill_min": skill(float(max(values))),
                 "skill_max": skill(float(min(values))),
                 "n_individuals": draws[0]["n_individuals"],
@@ -248,14 +276,15 @@ def write_markdown(payload: dict, path: Path) -> None:
             f"Regime boundary {curve['regime_boundary_m']:,.1f} m; persistence travel p90 "
             f"{reference:,.0f} m.",
             "",
-            "| point | individuals | windows | travel p90 | skill vs P | range across draws |",
-            "|---|---:|---:|---:|---:|---|",
+            "| point | individuals | windows | travel p90 | skill vs P | moves % of step | "
+            "range across draws |",
+            "|---|---:|---:|---:|---:|---:|---|",
         ]
         z = curve["references"].get("Z")
         if z:
             lines.append(
                 f"| **k = 0 (Z)** | 0 | 0 | {z['p90_m']:,.0f} m | {z['skill']:+.4f} | "
-                f"median of {z['n_seeds']} seeds |"
+                f"{z['moves_share_of_step'] * 100:.1f}% | median of {z['n_seeds']} seeds |"
             )
         for point in curve["points"]:
             label = f"k = {point['k_percent']}%"
@@ -273,14 +302,16 @@ def write_markdown(payload: dict, path: Path) -> None:
             )
             lines.append(
                 f"| {label} | {point['n_individuals']} | {window_cell} | "
-                f"{point['p90_m_median']:,.0f} m | {point['skill_median']:+.4f} | {spread} |"
+                f"{point['p90_m_median']:,.0f} m | {point['skill_median']:+.4f} | "
+                f"{point['moves_share_of_step'] * 100:.1f}% | {spread} |"
             )
         for arm, title in (("S", "S (asymptote)"), ("B", "B (no FM package)")):
             entry = curve["references"].get(arm)
             if entry:
                 lines.append(
                     f"| **{title}** | all | all | {entry['p90_m']:,.0f} m | "
-                    f"{entry['skill']:+.4f} | median of {entry['n_seeds']} seeds |"
+                    f"{entry['skill']:+.4f} | {entry['moves_share_of_step'] * 100:.1f}% | "
+                    f"median of {entry['n_seeds']} seeds |"
                 )
         lines.append("")
 
@@ -356,12 +387,18 @@ def main() -> None:
     for curve in payload["species"]:
         print(f"\n=== {curve['species']}   persistence travel p90 "
               f"{curve['persistence_travel_p90_m']:,.0f} m ===")
-        header = f"{'point':<26} {'inds':>5} {'travel p90':>13} {'skill':>9}  range across draws"
+        header = (
+            f"{'point':<26} {'inds':>5} {'travel p90':>13} {'skill':>9} {'moves':>8}"
+            "  range across draws"
+        )
         print(header)
         print("-" * (len(header) + 12))
         z = curve["references"].get("Z")
         if z:
-            print(f"{'k = 0 (Z)':<26} {0:>5} {z['p90_m']:>11,.0f} m {z['skill']:>+9.4f}")
+            print(
+                f"{'k = 0 (Z)':<26} {0:>5} {z['p90_m']:>11,.0f} m {z['skill']:>+9.4f} "
+                f"{z['moves_share_of_step'] * 100:>7.1f}%"
+            )
         for point in curve["points"]:
             label = f"k = {point['k_percent']}%" + (" [floored]" if point["raised_to_floor"] else "")
             spread = (
@@ -371,12 +408,16 @@ def main() -> None:
             )
             print(
                 f"{label:<26} {point['n_individuals']:>5} "
-                f"{point['p90_m_median']:>11,.0f} m {point['skill_median']:>+9.4f}{spread}"
+                f"{point['p90_m_median']:>11,.0f} m {point['skill_median']:>+9.4f} "
+                f"{point['moves_share_of_step'] * 100:>7.1f}%{spread}"
             )
         for arm, title in (("S", "S (asymptote)"), ("B", "B (package stripped)")):
             entry = curve["references"].get(arm)
             if entry:
-                print(f"{title:<26} {'all':>5} {entry['p90_m']:>11,.0f} m {entry['skill']:>+9.4f}")
+                print(
+                    f"{title:<26} {'all':>5} {entry['p90_m']:>11,.0f} m {entry['skill']:>+9.4f} "
+                    f"{entry['moves_share_of_step'] * 100:>7.1f}%"
+                )
 
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "tier2_finetune_curve.json").write_text(json.dumps(payload, indent=2) + "\n")
