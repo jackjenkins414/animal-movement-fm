@@ -137,7 +137,11 @@ class Run:
         """
         Return whether this arm may use validation data for checkpoint selection.
         """
-        return self.arm in {"S", "F"}
+        if self.arm in {"S", "F"}:
+            return True
+        # a Tier E arm may claim the same privilege when it exists to be compared against S; it is
+        # then scored on the individuals it selected on, and the evaluator flags it as optimistic
+        return bool(TIER_E_ARMS.get(self.arm, {}).get("validation_selection"))
 
 
 def build_plan() -> list[Run]:
@@ -190,6 +194,11 @@ del _plan_prefix
 # directories, keeping Tier E artefacts out of anything that reads our registered Tier 2 outputs
 TIER_E_RESULTS = REPO / "results" / "tier_e"
 TIER_E_CHECKPOINTS = REPO / "checkpoints" / "tier_e"
+
+# `RESULTS` is rebound to TIER_E_RESULTS by --tier-e, so it cannot be used to reach a registered
+# arm from inside a Tier E run. This name is never rebound and is what a Tier E arm initialising
+# from Z reads.
+TIER2_FINAL_RESULTS = REPO / "results" / "tier2_final"
 
 TIER_E_ARMS: dict[str, dict] = {
     # remove the masked reconstruction objective and keep everything else, so Z vs Zrecon differs in exactly one thing
@@ -286,6 +295,47 @@ TIER_E_ARMS: dict[str, dict] = {
         "lr": 1e-2,
         "scored_partition": "held_out_validation",
     },
+    # ---------------------------------------------------------------- the F budget confound
+    # A13(3): F100 and S are registered as differing only in whether the weights were pretrained,
+    # but as budgeted they also differ 10x in optimiser steps (2,000 against 20,000) and in
+    # checkpoint-selection resolution (two evaluations against twenty). These two arms take the
+    # confound apart. Both train on the held-out species' *full* training set, both initialise from
+    # Z at the matching seed, and both are scored on held-out VALIDATION because Tier E never opens
+    # a test partition -- so neither is comparable to the section 11 curve, which is on test.
+    #
+    # Flong holds F's learning rate and gives it S's budget: did F simply need longer?
+    "Flong": {
+        "description": (
+            "F at k = 100% with S's 20,000-step budget and F's 1e-4 peak rate; asks whether the "
+            "registered 2,000-step budget was the binding constraint"
+        ),
+        "use_fm_package": True,
+        "use_reconstruction_head": True,
+        "lr": 1e-4,
+        "init_from": "Z",
+        "init_from_dir": "tier2_final",
+        "per_species": True,
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "held_out_validation",
+    },
+    # Spre is S's recipe exactly -- same pool, same budget, same rate, same selection rule -- and
+    # differs from S in one thing only: it starts from Z instead of from a random initialisation.
+    # That is the comparison sec 3 wanted and the budget denied it.
+    "Spre": {
+        "description": (
+            "S's full recipe -- same pool, 20,000 steps, 1e-3, same selection rule -- initialised "
+            "from Z instead of randomly; isolates pretraining with everything else held constant"
+        ),
+        "use_fm_package": True,
+        "use_reconstruction_head": True,
+        "init_from": "Z",
+        "init_from_dir": "tier2_final",
+        "per_species": True,
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "held_out_validation",
+    },
 }
 
 # flags a Tier E arm may set on the model or the training loop. Anything else in a spec is bookkeeping for this script and must not 
@@ -303,9 +353,16 @@ TIER_E_CONFIG_FLAGS = (
 # ids are pinned here and checked at import; a reordering that would silently repoint a finished result at a different arm fails loudly 
 # instead
 TIER_E_FROZEN_PREFIX: tuple[str, ...] = tuple(
-    f"{arm}_s{seed}"
-    for arm in ("Zrecon", "Zfloor300", "Brecon", "Zfloor1000")
-    for seed in SEEDS
+    [
+        f"{arm}_s{seed}"
+        for arm in ("Zrecon", "Zfloor300", "Brecon", "Zfloor1000", "E1embed", "E1shuffle")
+        for seed in SEEDS
+    ]
+    + [
+        f"E2embed_{species}_s{seed}"
+        for species, *_ in HELD_OUT
+        for seed in SEEDS
+    ]
 )
 
 
@@ -362,7 +419,14 @@ def donor_state_dict(run: Run, grid_index: int) -> tuple[dict, str]:
     variant = TIER_E_ARMS.get(run.arm, {})
     donor_arm = variant["init_from"]
     donor_id = f"{donor_arm}_s{run.seed}"
-    path = TIER_E_RESULTS / f"{donor_id}_reported.pt"
+    # most Tier E arms start from another Tier E arm; the budget arms start from the registered Z,
+    # which lives in the Tier 2 directory
+    donor_dir = (
+        TIER2_FINAL_RESULTS
+        if variant.get("init_from_dir") == "tier2_final"
+        else TIER_E_RESULTS
+    )
+    path = donor_dir / f"{donor_id}_reported.pt"
     if not path.exists():
         raise SystemExit(
             f"FAIL: {run.arm} initialises from {donor_id}, but {path} does not exist. Train the "

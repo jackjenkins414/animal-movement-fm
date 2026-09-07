@@ -62,6 +62,10 @@ ARMS = (
     # S is the oracle reference E2 is read against
     ("S", T.RESULTS),
     ("E2embed", T.TIER_E_RESULTS),
+    # the two budget arms from A13(3); both select their checkpoint on these individuals, so both
+    # carry S's optimism and are flagged alongside it
+    ("Flong", T.TIER_E_RESULTS),
+    ("Spre", T.TIER_E_RESULTS),
 )
 
 # arms scored on source species validation individuals, where a species lookup has a row to read
@@ -78,7 +82,9 @@ SPECIES_ATTACHED_ARMS = frozenset({"Za", "S"}) | frozenset(
 )
 
 # S is scored on the individuals it selected its own checkpoint on
-OPTIMISTIC_ON_VALIDATION = frozenset({"S"})
+OPTIMISTIC_ON_VALIDATION = frozenset({"S"}) | frozenset(
+    arm for arm, spec in T.TIER_E_ARMS.items() if spec.get("validation_selection")
+)
 
 
 def geodesic_m(lon1, lat1, lon2, lat2) -> np.ndarray:
