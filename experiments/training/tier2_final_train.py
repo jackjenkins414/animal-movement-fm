@@ -451,8 +451,8 @@ def donor_state_dict(run: Run, grid_index: int) -> tuple[dict, str]:
     elif how != "random":
         raise SystemExit(f"FAIL: unknown embedding_init {how!r}; use 'random' or 'donor_mean'")
     # only say how the lookup was initialised when the arm actually has one; Flong and Spre carry no
-    # species table, and labelling their provenance "random embedding init" would describe a table
-    # that does not exist
+    # species table, and thus labelling their provenance "random embedding init" would describe a table
+    # that doesnt exist
     if not variant.get("species_embed_dim"):
         return weights, donor_id
     return weights, f"{donor_id} ({how} embedding init)"
