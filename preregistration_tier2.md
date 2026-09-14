@@ -459,6 +459,21 @@ Subpools: without stork, *Cervus* 76.406% / SOES 23.594%; without *Cervus*, stor
 
 **Status, stated precisely here since this amendment is later than the others.** Our choices in (1) and (2) were implemented on 31-08-2026 and every F run executed under them on 06-09-2026; they are recoverable from our code and the `finetune` block of each result file as of those dates. Our amendment text was done today (07-09-2026), after the F curve was computed and read. That is weaker than registering them in advance and is recorded as such. (3) was identified from the completed curve and is a limitation rather than a decision, so it could not have been registered earlier without the arm having run. We didn't open any sealed partition by this amendment, no registered constant is altered, and no result in sec 4 or the freeze is revised.
 
+### A14; 14-09-2026: Za scored on the sealed test partitions
+
+**What happened.** Za, the registered domain ablation for Secondary Prediction 5, was scored on all three held-out test species; which was 15 runs at our frozen config and seeds.
+
+This completes our deferral recorded in `preregistration_tier2_freeze.md` sec 5. F was completed on 07-09-2026; Za had yet to be scored on any test partition. The earlier Tier E validation analysis was exploratory and was never treated as a Tier 2 result.
+
+**Test access.** The sealed partitions were reopened only to score Za. The arm, configuration and seeds had been frozen on 26-08-2026, before any sealed result existed, so the decision to run Za was independent of its outcome. Existing prediction files were not recomputed, and all P, V, Z, B and S results remained unchanged. The frozen preregistration blob also remained unchanged.
+
+No metric, comparator, success band, species role or evaluation rule changed. The overall Tier 2 verdict still sadly remains **WEAK/NULL**.
+
+**Result.** Secondary Prediction 5 registered that Z should beat Za on travel regime p90 for at least two of the three held-out species. Z beats Za on all three, thus the prediction is **supported by our registered point estimate rule**.
+
+Note that the evidence is weak. No paired bootstrap interval excludes zero, seed variation is larger than the observed gaps, and the wolf difference is only 8m. Our earlier Tier E validation comparison also had the opposite sign for all three species, with both directions inside the +/- 0.05 noise scale. The appropriate conclusion is therefore that **Z versus Za is unresolved at this power**; these results do not establish that adding a matched domain source improves transfer as of now. 
+
+
 ## GenAI Reference 
 
 I initially used GenAI by giving it this preregistration, which I had written myself, and asking whether the success criteria seemed reasonable for the scope of my project (which I outlined in the chat). It agreed that the criteria was appropriate, but pointed out one issue I had overlooked; trait conditioning is not meaningfully testable in Tier 2 because the model sees only three source species, and therefore only three distinct trait vectors. At that scale, the traits are perfectly confounded with species identity, so the model could simply use them as a species lookup rather than learn a genuinely transferable relationship between biological traits and movement.
