@@ -204,6 +204,26 @@ def prediction_path(species: str, model: str, seed: int | None) -> Path:
     return PREDICTIONS / f"{species}__{tag}.parquet"
 
 
+def scored_arms(species: str | None = None) -> set[str]:
+    """
+    Return the arms with prediction files currently on disk.
+
+    Prediction files can come from both this script and `tier2_finetune_curve.py`, so completeness has to be checked from the directory itself 
+    rather than from only the files written in this run; F uses a k/draw filename rather than a seed suffix, but should still count as present.
+    """
+    pattern = "*__*.parquet" if species is None else f"{species}__*.parquet"
+
+    found: set[str] = set()
+    for path in PREDICTIONS.glob(pattern):
+        tag = path.name.split("__", 1)[1].removesuffix(".parquet")
+
+        for arm in (*UNTRAINED, *TRAINED, *SECONDARY_ONLY):
+            # keep the separator in the prefix check so `Za_s0` cannot match `Z`
+            if tag == arm or tag.startswith(f"{arm}_"):
+                found.add(arm)
+
+    return found
+
 # GenAI reference: I asked for GenAI to help with sealed run orchestration, comparator discovery, skip/overwrite handling, manifest 
 # writing and progress output around my evaluation protocol; I checked the below. 
 def run_predictions(device: torch.device, overwrite: bool = False) -> dict:
@@ -252,10 +272,8 @@ def run_predictions(device: torch.device, overwrite: bool = False) -> dict:
             print(f"  {out.name}  {len(results):,} windows  ({time.time() - started:.0f}s)", flush=True)
         manifest["species"][species] = written
 
-    missing = sorted(
-        arm for arm in (*TRAINED, *SECONDARY_ONLY)
-        if not any(f"__{arm}_s" in name for names in manifest["species"].values() for name in names)
-    )
+    on_disk = scored_arms()
+    missing = sorted(arm for arm in (*TRAINED, *SECONDARY_ONLY) if arm not in on_disk)
     manifest["deferred_or_missing_arms"] = missing
     if missing:
         print(
@@ -510,6 +528,8 @@ def build_report(floor: int = EVALUATION_FLOOR) -> dict:
         per_seed: dict[str, dict[int, dict]] = {}
         for path in sorted(PREDICTIONS.glob(f"{species}__*.parquet")):
             tag = path.stem.split("__", 1)[1]
+            if tag.startswith("F_"): # F is reported by `tier2_finetune_curve.py` against its own k/draw design
+                continue
             model, _, seed_text = tag.partition("_s")
             frame = pd.read_parquet(path)
             statistics = summarise(frame, persistence, boundary, floor)
@@ -524,6 +544,8 @@ def build_report(floor: int = EVALUATION_FLOOR) -> dict:
             "regime_boundary_m": boundary,
             "n_test_individuals": int(persistence["individual_id"].nunique()),
             "n_test_windows": int(len(persistence)),
+            # F is skipped above but is still scored, so the deferral list reads this rather than `comparators`.
+            "scored_arms": sorted(scored_arms(species)),
             "comparators": {},
             "floor_sensitivity": {},
         }
@@ -613,7 +635,7 @@ def apply_success_bands(report: dict) -> dict:
     deferred = []
     for species, entry in report["species"].items():
         comparators = entry["comparators"]
-        available = set(comparators)
+        available = set(entry.get("scored_arms") or comparators)
         for arm in ("Za", "F"):
             if arm not in available:
                 deferred.append(f"{arm}@{species}")

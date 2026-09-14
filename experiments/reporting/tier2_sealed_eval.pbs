@@ -1,0 +1,46 @@
+#!/bin/bash
+# Tier 2 sealed evaluation on a compute node
+#
+# Default: add any missing predictions, then rebuild the verdict/report
+# Re-report only:
+#   qsub -v REPORT_ONLY=1 -l walltime=00:15:00 experiments/reporting/tier2_sealed_eval.pbs
+#
+# Before extending the sealed results, snapshot the current verdict/report if you want a clean diff
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=00:30:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier2_sealed_eval
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+
+if [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/tier2_sealed_eval.py "${phase_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
