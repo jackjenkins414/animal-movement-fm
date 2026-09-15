@@ -58,6 +58,7 @@ import pandas as pd
 
 from animal_movement_fm.analysis.regime_profile import (
     DESCRIPTORS,
+    ThresholdDecision,
     apply_threshold_decision,
     coverage_distances,
     descriptor_standardisation,
@@ -69,6 +70,8 @@ from animal_movement_fm.data.split import load_split
 REPO = Path(__file__).resolve().parents[2]
 OUT_CSV = REPO / "results" / "regime_profiles.csv"
 OUT_DECISION = REPO / "results" / "regime_threshold_decision.json"
+# Tracked, unlike everything under results/. The A4 decision is made once and carried forward; see the file.
+FROZEN_DECISION = REPO / "registered" / "registered/tier2_regime_decision.json"
 OUT_STANDARDISATION = REPO / "results" / "regime_descriptor_standardisation.json"
 
 
@@ -107,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         help="modelling cadence; rho is NOT cadence invariant, so every species must share this",
     )
     p.add_argument("--group-col", default="segment_id")
+    p.add_argument(
+        "--reselect",
+        action="store_true",
+        help="re-run the A4 tree instead of applying the frozen decision; changes the boundary for every "
+             "species at once, including species whose evaluation is already sealed",
+    )
     p.add_argument(
         "--decide-threshold",
         action="store_true",
@@ -247,7 +256,24 @@ def main() -> None:
         if ready.empty:
             raise SystemExit("No training-only decision rows found in the accumulated CSV")
 
-        decision = select_threshold_rule(ready)
+        # A4's tree is re-run only on demand. sec 1 holds the metrics and protocol constant from Tier 2 into
+        # Tier 3, and the boundary formula is part of that, so once decided it is APPLIED to new species rather
+        # than re-selected over a table that keeps growing. Re-selecting on 15-09-2026 moved the universal rule
+        # from 0.1 x p50 to 0.00603816 x p90 because two bird candidates have a median step inside their own low
+        # displacement component, and that silently rewrote the strata a sealed evaluation had already used.
+        if FROZEN_DECISION.exists() and not args.reselect:
+            frozen = json.loads(FROZEN_DECISION.read_text())
+            decision = ThresholdDecision(
+                anchor_quantile=int(frozen["anchor_quantile"]),
+                multiplier=float(frozen["multiplier"]),
+                reference_species=str(frozen["reference_species"]),
+                reference_boundary_m=float(frozen["reference_boundary_m"]),
+                pooled_only_species=tuple(frozen["pooled_only_species"]),
+                reasons=tuple(frozen["reasons"]),
+            )
+            print(f"\napplying the frozen decision from {FROZEN_DECISION.name}; pass --reselect to re-run the tree")
+        else:
+            decision = select_threshold_rule(ready)
         decided = apply_threshold_decision(ready, decision)
         selected = decided.set_index("species")[
             [
@@ -265,11 +291,20 @@ def main() -> None:
         payload["rule_name"] = decision.rule_name
         OUT_DECISION.write_text(json.dumps(payload, indent=2) + "\n")
 
-        # Freeze descriptor standardisation at the same moment, over the same fixed species set, so
-        # regime distances stop moving as further candidates are profiled.
-        OUT_STANDARDISATION.write_text(
-            json.dumps(descriptor_standardisation(ready), indent=2) + "\n"
-        )
+        # A16; screening standardisation only, is recomputed over the current decision-ready species, so 
+        # distances can move as the candidate pool changes. Sealed Tier 2 results instead use the frozen
+        # `registered/tier2_descriptor_standardisation.json`.
+        screening = descriptor_standardisation(ready)
+        screening = {
+            "role": "screening",
+            "note": (
+                "Recomputed over the current decision-ready species. Sealed Tier 2 results use "
+                "registered/tier2_descriptor_standardisation.json instead (A16)."
+            ),
+            "n_species": len(screening["species"]),
+            **screening,
+        }
+        OUT_STANDARDISATION.write_text(json.dumps(screening, indent=2) + "\n")
 
         print(f"\nREGISTERED DECISION (amendment A4): {decision.rule_name}")
         for reason in decision.reasons:
@@ -277,7 +312,14 @@ def main() -> None:
         if decision.pooled_only_species:
             print(f"  pooled only: {', '.join(decision.pooled_only_species)}")
         print(f"decision -> {OUT_DECISION}")
-        print(f"frozen descriptor standardisation -> {OUT_STANDARDISATION}")
+        print(
+            f"screening descriptor standardisation ({len(screening['species'])} species) "
+            f"-> {OUT_STANDARDISATION}"
+        )
+        print(
+            "  this file moves with the candidate pool; sealed Tier 2 distances read "
+            "registered/tier2_descriptor_standardisation.json (A16)"
+        )
 
     print(f"\nprofiles -> {OUT_CSV}")
 

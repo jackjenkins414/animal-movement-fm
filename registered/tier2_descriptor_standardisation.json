@@ -1,0 +1,152 @@
+{
+  "_comment": [
+    "FROZEN Tier 2 descriptor standardisation (A10), pinned by amendment A16 on 15-09-2026.",
+    "These are the centres and scales the sealed Tier 2 secondary prediction 2 distances were",
+    "measured under: 3.2115 (L. fuscus), 2.4447 (C. lupus), 1.8777 (M. angustirostris).",
+    "",
+    "Why this file exists. results/regime_descriptor_standardisation.json is rewritten by",
+    "regime_profile.py --decide-threshold over whatever rows are in results/regime_profiles.csv",
+    "at that moment. Profiling the A9 QC rebuild (21 species, cleaned) moved it once; profiling",
+    "the 11 Tier 3 bird candidates (32 species) moved it again. Neither run touched the six role",
+    "species' raw descriptors, which A2 protects, but both moved the centre and scale, and the",
+    "distances move with them. The script's own drift guard could not see this because it",
+    "compared the standardisation file against the profile table, and the same branch rewrites",
+    "both, so the two always agreed. Nothing reported was wrong when reported; it simply stopped",
+    "being reproducible.",
+    "",
+    "Provenance: computed by descriptor_standardisation() over the 21 species in",
+    "results/regime_profiles_pre_qc.csv, which is the profile table as it stood at the Tier 2",
+    "freeze. results/regime_descriptor_standardisation.json continues to exist and continues to",
+    "move; it is a screening artefact for Tier 3/4 candidate comparison and no sealed script",
+    "reads it. Do not regenerate this file."
+  ],
+  "frozen_on": "2026-09-15",
+  "amendment": "A16",
+  "source_table": "results/regime_profiles_pre_qc.csv",
+  "descriptors": [
+    "log10_step_median_m",
+    "log10_step_p90_m",
+    "tail_ratio",
+    "step_cv",
+    "intermittency",
+    "rho",
+    "diel_amplitude",
+    "seasonal_amplitude"
+  ],
+  "transforms": {
+    "log10_step_median_m": "identity",
+    "log10_step_p90_m": "identity",
+    "tail_ratio": "log10",
+    "step_cv": "log10",
+    "intermittency": "logit",
+    "rho": "identity",
+    "diel_amplitude": "log10",
+    "seasonal_amplitude": "log10"
+  },
+  "centre": {
+    "log10_step_median_m": 3.6195746373648503,
+    "log10_step_p90_m": 4.225074944260151,
+    "tail_ratio": 1.0683625202883815,
+    "step_cv": 0.2952550869887592,
+    "intermittency": -2.57303383053522,
+    "rho": 0.1552897998791538,
+    "diel_amplitude": 0.04551605341627326,
+    "seasonal_amplitude": -0.23572868246335865
+  },
+  "scale": {
+    "log10_step_median_m": 0.7473215136063474,
+    "log10_step_p90_m": 0.7207772452639131,
+    "tail_ratio": 0.4057714272543465,
+    "step_cv": 0.32013801641874223,
+    "intermittency": 0.9482278355098462,
+    "rho": 0.3193786904914652,
+    "diel_amplitude": 0.35083816970303405,
+    "seasonal_amplitude": 0.3219753380855381
+  },
+  "species": [
+    "white_stork",
+    "larus_fuscus",
+    "cervus_elaphus",
+    "canis_lupus",
+    "ovis_dalli",
+    "canis_latrans",
+    "lynx_rufus",
+    "connochaetes_taurinus",
+    "bison_bison",
+    "pygoscelis_adeliae",
+    "leptonychotes_weddellii",
+    "diomedea_exulans",
+    "thalassarche_chrysostoma",
+    "thalassoica_antarctica",
+    "eudyptes_chrysolophus",
+    "odobenus_rosmarus",
+    "arctocephalus_gazella",
+    "lobodon_carcinophaga",
+    "aptenodytes_patagonicus",
+    "mirounga_leonina",
+    "mirounga_angustirostris"
+  ],
+  "_role_species_comment": "Transformed (pre-standardisation) descriptor vectors for the six Tier 2 role species, recorded so the guard in tier2_prediction2.py can verify that the raw profile rows the distances are computed from have not moved. A2 forbids rebuilding these six; a mismatch here means that happened.",
+  "role_species_transformed": {
+    "white_stork": {
+      "log10_step_median_m": 2.786068598470079,
+      "log10_step_p90_m": 4.003712342655963,
+      "tail_ratio": 2.3699903779976688,
+      "step_cv": 0.5606055886693853,
+      "intermittency": -0.7953387612938103,
+      "rho": -0.2211442844453257,
+      "diel_amplitude": 0.595161172927892,
+      "seasonal_amplitude": 0.24465647909096958
+    },
+    "larus_fuscus": {
+      "log10_step_median_m": 3.614318207182792,
+      "log10_step_p90_m": 4.478884631273413,
+      "tail_ratio": 1.4241970788691327,
+      "step_cv": 0.3145862943012946,
+      "intermittency": -0.9659462826542013,
+      "rho": -0.156135028173181,
+      "diel_amplitude": 0.13509527645838365,
+      "seasonal_amplitude": -0.049398910781111055
+    },
+    "cervus_elaphus": {
+      "log10_step_median_m": 2.693835578907636,
+      "log10_step_p90_m": 3.2054688025683684,
+      "tail_ratio": 0.8859481479334327,
+      "step_cv": 0.05089254735789063,
+      "intermittency": -2.888135982697761,
+      "rho": 0.025821901373477,
+      "diel_amplitude": -0.08397844168068905,
+      "seasonal_amplitude": -0.5684630371820883
+    },
+    "canis_lupus": {
+      "log10_step_median_m": 3.118272674495848,
+      "log10_step_p90_m": 3.8848932444116153,
+      "tail_ratio": 1.0671433843310671,
+      "step_cv": 0.11139701264021222,
+      "intermittency": -1.1002923861355896,
+      "rho": 0.1484416533840408,
+      "diel_amplitude": -0.01705712695418333,
+      "seasonal_amplitude": -0.2820251151734409
+    },
+    "mirounga_leonina": {
+      "log10_step_median_m": 4.139385790107286,
+      "log10_step_p90_m": 4.568043469810734,
+      "tail_ratio": 0.7503767696335167,
+      "step_cv": 0.19799793848388295,
+      "intermittency": -3.481342119162502,
+      "rho": 0.0407325822387174,
+      "diel_amplitude": -0.32064936435370267,
+      "seasonal_amplitude": -0.45137558014429013
+    },
+    "mirounga_angustirostris": {
+      "log10_step_median_m": 4.206674522138482,
+      "log10_step_p90_m": 4.547819289470055,
+      "tail_ratio": 0.654600700478243,
+      "step_cv": 0.0023183949069249064,
+      "intermittency": -4.345152851576623,
+      "rho": 0.4876253816729973,
+      "diel_amplitude": -0.22986496656501298,
+      "seasonal_amplitude": -0.29608592525955907
+    }
+  }
+}

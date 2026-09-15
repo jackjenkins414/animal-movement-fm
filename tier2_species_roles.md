@@ -20,7 +20,7 @@ Split manifests are `splits/stork_split_seed42.json` and the corresponding `laru
 
 ## 2. Pairwise distances
 
-Distances are Euclidean distances over the eight descriptors, each now transformed to its natural measurement scale under A10 and then standardised. The transform map, centres and scales are now all frozen together in `results/regime_descriptor_standardisation.json`. Raw descriptor values are in `results/regime_profiles.csv`.
+Distances are Euclidean distances over the eight descriptors, each now transformed to its natural measurement scale under A10 and then standardised. The transform map, centres and scales are frozen together in the tracked `registered/tier2_descriptor_standardisation.json`, over the twenty one species as they stood at the Tier 2 freeze. Raw descriptor values are in `results/regime_profiles.csv`. The similarly named file in `results/` is a screening artefact that is recomputed over the Tier 3 and Tier 4 candidate pool and moves with it; the distances below are not reproducible against it, which is what A16 corrects.
 
 |                  | stork | *L. fuscus* | *Cervus* | wolf | *M. leonina* | *M. ang.* |
 | ---------------- | ----: | ----------: | -------: | ---: | -----------: | --------: |

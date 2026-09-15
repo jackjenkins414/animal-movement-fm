@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "The A4 threshold decision as taken for Tier 2, frozen. preregistration_tier2.md sec 1 requires Tier 3 to",
+    "differ from Tier 2 in exactly one variable, the size and composition of the source pool, with the same",
+    "metrics and the same protocol. The regime boundary formula is part of that protocol, so it is decided",
+    "once and applied to every species thereafter rather than re-selected as the candidate table grows.",
+    "",
+    "This file exists because on 15-09-2026 profiling eleven Tier 3 bird candidates re-ran the A4 tree over the",
+    "whole accumulated table and moved the universal rule from 0.1 x p50 to 0.00603816 x p90. boundary_m() reads",
+    "selected_boundary_m live from results/regime_profiles.csv, which is gitignored, so that silently changed the",
+    "strata underneath a sealed evaluation: Larus fuscus 411.45 -> 181.88 m, Canis lupus 131.30 -> 46.32 m,",
+    "Mirounga angustirostris 1609.44 -> 213.17 m. Tracked here so the decision cannot move again unnoticed.",
+    "",
+    "Reproduce with: regime_profile.py --decide-threshold --reselect, which is the only path that re-selects."
+  ],
+  "frozen_on": "2026-09-15",
+  "registered_under": "preregistration_tier2.md A4, scope fixed by A16",
+  "anchor_quantile": 50,
+  "multiplier": 0.1,
+  "reference_species": "white_stork",
+  "reference_boundary_m": 60.9,
+  "pooled_only_species": [],
+  "reasons": [
+    "all species passed the median-anchor guards"
+  ]
+}

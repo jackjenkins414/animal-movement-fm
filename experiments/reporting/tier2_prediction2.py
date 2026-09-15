@@ -1,6 +1,8 @@
 # GenAI reference: I used GenAI write the main method and parts of the other functions from my spec; that being the reading definitions,
-# reporting every one instead of picking after seeing results, and the drift guard are mine. I reviewed the code, added the docstrings/
-# comments, and checked the distances and headline numbers against the sealed verdict
+# reporting every one instead of picking after seeing results, and the original drift guard are mine. I reviewed the code, added the
+# docstrings/comments, and checked the distances and headline numbers against the sealed verdict. The drift guard was later replaced
+# under A16 (15-09-2026); mine compared two files that are written by the same branch, so it could not fail; GenAI wrote the
+# replacement, which checks the role species' raw rows against constants frozen at the Tier 2 freeze.
 """
 Secondary preregistered prediction 2: does transfer track regime distance from the source pool?
 
@@ -13,7 +15,7 @@ come from the existing sealed verdict, so this is more of a rereport rather than
 
 Inputs:
     results/regime_profiles.csv
-    results/regime_descriptor_standardisation.json
+    registered/tier2_descriptor_standardisation.json  (frozen Tier 2 standardisation; A16)
     results/tier2_sealed/tier2_verdict.json
 
 Writes `results/tier2_sealed/tier2_prediction2.json` and prints the reporting tables.
@@ -35,6 +37,10 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results"
 
+# A16; the frozen Tier 2 standardisation used by sealed analyses; the results/copy is a moving screening artefact and must 
+# not be used here
+FROZEN_STANDARDISATION = REPO / "registered" / "registered/tier2_descriptor_standardisation.json"
+
 # profile keys only; the segment/split identifiers used elsewhere are not needed here
 SOURCES = ("white_stork", "cervus_elaphus", "mirounga_leonina")
 HELD_OUT = ("larus_fuscus", "canis_lupus", "mirounga_angustirostris")
@@ -51,7 +57,13 @@ READINGS = ("matching_domain", "nearest", "mean_to_pool", "centroid", "max_to_po
 
 def standardised_descriptors() -> pd.DataFrame:
     """Apply the frozen A10 transforms and standardisation to the descriptor table."""
-    std = json.loads((RESULTS / "regime_descriptor_standardisation.json").read_text())
+    if not FROZEN_STANDARDISATION.exists():
+        raise SystemExit(
+            f"FAIL: {FROZEN_STANDARDISATION.name} is missing. The sealed distances are only "
+            "reproducible against the frozen Tier 2 standardisation; the screening file in "
+            "results/ is not a substitute for it."
+        )
+    std = json.loads(FROZEN_STANDARDISATION.read_text())
     profiles = pd.read_csv(RESULTS / "regime_profiles.csv").set_index("species")
 
     frame = pd.DataFrame(index=profiles.index)
@@ -69,15 +81,30 @@ def standardised_descriptors() -> pd.DataFrame:
 
     centre = pd.Series(std["centre"])
     scale = pd.Series(std["scale"])
-    # refuse silent drift between the profile table and the frozen standardisation.
-    drift = max(
-        float(np.abs(frame.mean() - centre).max()),
-        float(np.abs(frame.std(ddof=0) - scale).max()),
-    )
-    if drift > 1e-9:
+
+    # A16: verify that the six frozen Tier 2 role species descriptor rows have not drifted; centres/scales are already frozen, 
+    # so the remaining risk is a changed profile row underneath them
+    recorded = std["role_species_transformed"]
+
+    missing = sorted(set(recorded) - set(frame.index))
+    if missing:
         raise SystemExit(
-            f"FAIL: regime_profiles.csv no longer reproduces the frozen standardisation (max drift {drift:.3e}). "
-            "The distances would not be the registered ones; regenerate under A10 before using this script."
+            f"FAIL: regime_profiles.csv has no row for {', '.join(missing)}; the sealed distances "
+            "cannot be recomputed without every role species."
+        )
+
+    drift = {
+        species: float(np.abs(frame.loc[species] - pd.Series(values)).max())
+        for species, values in recorded.items()
+    }
+
+    worst, value = max(drift.items(), key=lambda item: item[1])
+    if value > 1e-12:
+        raise SystemExit(
+            f"FAIL: {worst} no longer matches the descriptors frozen at the Tier 2 freeze "
+            f"(max drift {value:.3e}). A2 forbids rebuilding the role species, so either that "
+            "happened or the A10 transforms changed. The registered distances cannot be "
+            "reproduced from this table; do not report these numbers."
         )
     return (frame - centre) / scale
 
@@ -201,7 +228,7 @@ def main() -> None:
         "prediction": "preregistration_tier2.md section 5, secondary prediction 2",
         "statistic": "travel-regime p90 persistence skill, individual-weighted, floor F = 25",
         "seed_aggregation": "median across training seeds (A3)",
-        "descriptor_standardisation": "results/regime_descriptor_standardisation.json (A10)",
+        "descriptor_standardisation": "registered/tier2_descriptor_standardisation.json (A10, frozen under A16)",
         "opened_test_partition": False,
         "distances": json.loads(distances.to_json(orient="index")),
         "transfer": json.loads(transfer.to_json(orient="index")),
