@@ -474,6 +474,49 @@ No metric, comparator, success band, species role or evaluation rule changed. Th
 Note that the evidence is weak. No paired bootstrap interval excludes zero, seed variation is larger than the observed gaps, and the wolf difference is only 8m. Our earlier Tier E validation comparison also had the opposite sign for all three species, with both directions inside the +/- 0.05 noise scale. The appropriate conclusion is therefore that **Z versus Za is unresolved at this power**; these results do not establish that adding a matched domain source improves transfer as of now. 
 
 
+### A15; 15-09-2026: physical plausibility QC added to the Tier 3/4 candidate pool
+
+**Defect.** `extract_species_fixes.py` only ran `flag_speed` for species already listed in `SPEED_CEILINGS`. The 6 Tier 2 role species had bounds, but our Tier 3/4 candidates did not, so their physical plausibility flags had never actually been computed.
+
+**Correction.** Speed ceilings are now registered for 27 candidate species, with southern hemisphere latitude bounds added for seven RAATD species. Bounds follow locomotion rather than the `domain` label: terrestrial species inherit the *Canis lupus* bound, swimmers inherit *Mirounga leonina*, and flying birds use **220 km/h instantaneous / 180 km/h sustained**. The bird bound is higher because published records exceed the stork's 100 km/h sustained ceiling, including 141 km/h over multi hour Antarctic petrel flight and >110 km/h sustained grey headed albatross flight.
+
+**Effect.** Rebuilding the 15 existing candidates removed 0.14% of terrestrial fixes, 22.04% of swimmer fixes and 0.25% of flier fixes. The large marine tail ratios dropped substantially, while the flying seabirds were effectively unchanged, supporting our locomotion based grouping. Their unused split manifests were regenerated after QC.
+
+**Status.** No sealed partition was opened and none of the six Tier 2 role species was rebuilt. We kept our A4 decision of **`0.1 x p50`** with no pooled only species. No Tier 2 metric, comparator, success band, species role or result changed.
+
+### A16; 15-09-2026: Tier 2 A4 and A10 artefacts frozen; boundary sensitivity added
+
+**Defect.** Two quantities that should have remained fixed after the Tier 2 freeze were being recomputed whenever new candidate species were added to `regime_profiles.csv`; the A4 regime boundary decision and the A10 descriptor standardisation. This was caught before any Tier 2 result was recomputed from the changed values.
+
+**A4 boundary.** After the Tier 3 bird candidates were added, the A4 tree changed from the registered **`0.1 x p50`** rule to **`0.00603816 x p90`**. Because the sealed evaluator read the resulting boundaries live, a later re report could have silently changed which test windows counted as travel or low displacement.
+
+The registered decision is now frozen in `registered/tier2_regime_decision.json`. Normal candidate profiling applies that frozen decision; reselecting the rule requires an explicit `--reselect`. The three Tier 2 boundaries reproduce their original sealed values.
+
+**A10 standardisation.** The descriptor standardisation had the same problem: it was regenerated over the current candidate table, causing the regime distances used by Secondary Prediction 2 to move. For example, the *Larus fuscus* distance changed from **3.2115** at the freeze to **3.5228** and later **2.5617** as the candidate pool changed.
+
+Tier 2 now uses the frozen `registered/tier2_descriptor_standardisation.json`. The results side version is only a moving screening standardisation for Tier 3/4 candidate comparison. A replacement guard checks that the six Tier 2 role species descriptor rows still match their frozen values. With the frozen standardisation, the registered distances **3.2115, 2.4447 and 1.8777** are reproduced exactly.
+
+**Status.** No sealed partition was opened, no model retrained and no prediction file changed. This amendment here freezes quantities that were already supposed to be fixed; it does not revise any Tier 2 result.
+
+#### Post hoc boundary sensitivity
+
+The alternative **`0.00603816 × p90`** rule cannot replace the registered boundary because it was selected after the sealed results were known. It is therefore used only as a post hoc robustness check.
+
+The frozen prediction files were re reported under both boundaries. Nothing was retrained; only the travel/low-displacement label assigned to each window changed.
+
+**Finding.** The alternative boundary is much tighter: −55.8% for gull, −64.7% for wolf and −86.8% for NES. Despite that, the overall result is unchanged:
+
+* the success band remains **WEAK/NULL**;
+* all 12 success band checks have the same pass/fail outcome;
+* travel p90/p99 changes by at most 4.2%;
+* model ordering is unchanged; and
+* travel-regime persistence skill remains effectively unchanged.
+
+The low-displacement ratios become more extreme because lowering the boundary also lowers persistence error in that stratum. The trained models themselves change little, so the smaller persistence denominator makes their relative skill look worse. The underlying finding is unchanged: on very low-displacement windows, the trained models often predict substantial movement when the animal barely moves. For NES the tighter rule removes the low-displacement stratum entirely.
+
+**Interpretation.** The registered **`0.1 × p50`** analysis remains the Tier 2 result. The sensitivity analysis supports only the narrower conclusion that the **WEAK/NULL verdict, travel regime comparisons and low-displacement failure are robust to a substantially tighter regime boundary**.
+
+
 ## GenAI Reference 
 
 I initially used GenAI by giving it this preregistration, which I had written myself, and asking whether the success criteria seemed reasonable for the scope of my project (which I outlined in the chat). It agreed that the criteria was appropriate, but pointed out one issue I had overlooked; trait conditioning is not meaningfully testable in Tier 2 because the model sees only three source species, and therefore only three distinct trait vectors. At that scale, the traits are perfectly confounded with species identity, so the model could simply use them as a species lookup rather than learn a genuinely transferable relationship between biological traits and movement.

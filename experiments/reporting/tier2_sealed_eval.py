@@ -9,6 +9,10 @@ Sealed Tier 2 evaluation on the three held-out species' test partitions.
 metrics, bootstrap intervals, floor sensitivity and success band verdict without reopening the test partitions.
 
 This is the only script that will open held-out test data. It runs only after `preregistration_tier2_freeze.md` exists.
+
+`--boundary-sensitivity` is a post-hoc mode added under A16. It re-runs `--report` over the same frozen prediction files with the
+A4 regime boundary replaced by an alternative rule, writes to its own output names, and never touches the sealed ones. It is a
+sensitivity analysis, not a corrected result: the alternative rule was only discovered after the Tier 2 results had been seen.
 """
 
 from __future__ import annotations
@@ -56,6 +60,11 @@ FINAL = REPO / "results" / "tier2_final"
 SEALED = REPO / "results" / "tier2_sealed"
 PREDICTIONS = SEALED / "predictions"
 FREEZE = REPO / "preregistration_tier2_freeze.md"
+
+# A16 post hoc sensitivity outputs; specifically not named `tier2_verdict`/`tier2_results`; nothing
+# this mode writes is a Tier 2 result, and no filename should let it be mistaken for one
+SENSITIVITY_JSON = SEALED / "tier2_boundary_sensitivity.json"
+SENSITIVITY_MD = SEALED / "tier2_boundary_sensitivity.md"
 
 # registered evaluation statistics and A5 floor sensitivity
 QUANTILES = {"p50": 0.50, "p90": 0.90, "p99": 0.99}
@@ -497,11 +506,15 @@ def headline(
 
 # GenAI reference: I asked for it to help assemble saved predictions into the registered headline, skill, bootstrap and 
 # floor sensitivity report structure which it did; and I checked it
-def build_report(floor: int = EVALUATION_FLOOR) -> dict:
+def build_report(floor: int = EVALUATION_FLOOR, boundaries: dict[str, float] | None = None) -> dict:
     """Build the sealed report from saved prediction files.
     
     The report includes per-model headlines, persistence skill, paired bootstrap intervals, floor
     sensitivity and the registered success-band verdict without reopening the test partitions.
+
+    `boundaries` overrides the A4 per-species regime boundary, keyed on species. It exists only for the
+    A16 post-hoc sensitivity mode. It changes nothing but how windows are labelled travel or low
+    displacement: the prediction files are read unmodified and no model is re-run.
     """
     if not PREDICTIONS.exists():
         raise SystemExit(f"FAIL: {PREDICTIONS} does not exist; run --predict first")
@@ -518,7 +531,7 @@ def build_report(floor: int = EVALUATION_FLOOR) -> dict:
 
     for species, *_ in HELD_OUT:
         _, _, profile_key, domain, _ = held_out_entry(species)
-        boundary = boundary_m(profile_key)
+        boundary = boundary_m(profile_key) if boundaries is None else float(boundaries[species])
         persistence_path = prediction_path(species, "P", None)
         if not persistence_path.exists():
             raise SystemExit(f"FAIL: {persistence_path} is missing; P defines the strata and the skill")
@@ -622,6 +635,26 @@ def build_report(floor: int = EVALUATION_FLOOR) -> dict:
 
     report["verdict"] = apply_success_bands(report)
     return report
+
+
+def alternative_boundaries(anchor_quantile: int, multiplier: float) -> dict[str, float]:
+    """
+    Per-species boundaries under an A4 rule other than the registered one.
+
+    Same arithmetic `apply_threshold_decision` uses, read off the same frozen anchor columns, so the only
+    thing that differs from the registered run is the rule itself.
+    """
+    table = pd.read_csv(REPO / "results" / "regime_profiles.csv").set_index("species")
+    column = f"step_p{anchor_quantile}_m"
+    if column not in table.columns:
+        raise SystemExit(f"FAIL: results/regime_profiles.csv has no {column!r}")
+    out = {}
+    for species, *_ in HELD_OUT:
+        _, _, profile_key, _, _ = held_out_entry(species)
+        if profile_key not in table.index:
+            raise SystemExit(f"FAIL: {profile_key} has no row in results/regime_profiles.csv")
+        out[species] = float(table.loc[profile_key, column]) * multiplier
+    return out
 
 
 def apply_success_bands(report: dict) -> dict:
@@ -795,6 +828,138 @@ def write_markdown(report: dict, path: Path) -> None:
 def _m(value) -> str:
     return "—" if value is None or not np.isfinite(value) else f"{value:,.0f} m"
 
+# GenAI reference: I pasted this file into GenAI and asked it to add the A16 post hoc mode; boundary overrides,
+# the alternative boundaries, and a side by side report. GenAI wrote the two functions below; I only changed the 
+# docstring. The choice to show the registered result first and treat the post hoc rule as an extra comparison, 
+# not a correction, was mine.
+def _delta(registered, alternative) -> str:
+    """Signed percentage change, or an em dash when either side is unavailable."""
+    if registered is None or alternative is None:
+        return "—"
+    if not (np.isfinite(registered) and np.isfinite(alternative)) or registered == 0:
+        return "—"
+    return f"{100.0 * (alternative - registered) / registered:+.1f}%"
+
+
+def write_sensitivity_markdown(registered: dict, alternative: dict, rule: dict, path: Path) -> None:
+    """
+    Write the A16 post hoc regime boundary sensitivity comparison.
+
+    The registered result is printed first and in full on every table. The alternative is printed beside it, never in place of 
+    it, and every section that could be mistaken for a Tier 2 result says in words that it is not one.
+    """
+    reg_rule = f"{rule['registered_multiplier']} x p{rule['registered_anchor_quantile']}"
+    alt_rule = f"{rule['alternative_multiplier']} x p{rule['alternative_anchor_quantile']}"
+
+    lines = [
+        "# Tier 2 regime-boundary sensitivity (POST HOC, NOT A TIER 2 RESULT)",
+        "",
+        "## What this is, and what it is not",
+        "",
+        f"The registered Tier 2 result stands on the A4 rule selected before any Tier 2 result was seen, "
+        f"`{reg_rule}`. It is unchanged, it remains the primary analysis, and it is reported first in every "
+        "table below. `results/tier2_sealed/tier2_verdict.json` and `tier2_results.md` are its home and "
+        "nothing here overwrites them.",
+        "",
+        f"The alternative rule `{alt_rule}` is **not a correction**. It was produced by the A4 decision tree "
+        "firing again when eleven Tier 3 bird candidates were profiled into the same table, which was on "
+        f"{rule['discovered_on']} — after the Tier 2 sealed evaluation of {rule['sealed_on']}, and after its "
+        "results had been read. A rule chosen with knowledge of the outcome cannot replace a rule registered "
+        "without it, whichever produces the better-looking number. It is reported here to answer one question "
+        "only: how much of the Tier 2 conclusion rests on where the boundary happens to sit.",
+        "",
+        "Nothing was retrained. Both columns are computed from the same frozen prediction files in "
+        "`results/tier2_sealed/predictions/`; every model's per-window error is identical in both. The only "
+        "thing that changes is which windows are labelled travel and which low displacement.",
+        "",
+        "## Verdict",
+        "",
+        f"| | registered (`{reg_rule}`) | post hoc (`{alt_rule}`) |",
+        "|---|---|---|",
+        f"| **band** | **{registered['verdict']['band']}** | {alternative['verdict']['band']} |",
+        "",
+    ]
+
+    checks = ("Z_beats_P_travel_p90", "Z_beats_P_travel_p99",
+              "Z_within_25pc_of_S_travel_p90", "Z_beats_B_travel_p90")
+    lines += ["### Success-band checks", "",
+              "| species | check | registered | post hoc |", "|---|---|---|---|"]
+    for species in registered["species"]:
+        reg_checks = registered["verdict"]["per_species"][species]["checks"]
+        alt_checks = alternative["verdict"]["per_species"][species]["checks"]
+        for name in checks:
+            def mark(value):
+                return "pass" if value is True else ("fail" if value is False else "—")
+            lines.append(f"| {species} | `{name}` | {mark(reg_checks.get(name))} | {mark(alt_checks.get(name))} |")
+    lines.append("")
+
+    for species, reg_entry in registered["species"].items():
+        alt_entry = alternative["species"][species]
+        reg_b, alt_b = reg_entry["regime_boundary_m"], alt_entry["regime_boundary_m"]
+
+        def windows(entry, stratum):
+            return entry["comparators"]["P"]["headline"][stratum].get("n_windows") or 0
+
+        total = windows(reg_entry, "all")
+        lines += [
+            f"## {species} ({reg_entry['domain']})",
+            "",
+            f"Boundary **{reg_b:,.1f} m** registered vs **{alt_b:,.1f} m** post hoc "
+            f"({_delta(reg_b, alt_b)}). {reg_entry['n_test_individuals']} test individuals, "
+            f"{total:,} windows, identical in both.",
+            "",
+            "| stratum | registered windows | post hoc windows |",
+            "|---|---:|---:|",
+        ]
+        for stratum in ("travel", "low_displacement"):
+            rw, aw = windows(reg_entry, stratum), windows(alt_entry, stratum)
+            lines.append(
+                f"| {stratum} | {rw:,} ({100.0 * rw / total:.1f}%) | {aw:,} ({100.0 * aw / total:.1f}%) |"
+            )
+        lines.append("")
+
+        for stratum, title in (("travel", "Travel regime"), ("low_displacement", "Low displacement")):
+            lines += [
+                f"### {title}",
+                "",
+                "| model | p90 registered | p90 post hoc | Δ | p99 registered | p99 post hoc | Δ | "
+                "skill registered | skill post hoc |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+            for model in ("P", "Z", "B", "S"):
+                reg_rec = reg_entry["comparators"].get(model)
+                alt_rec = alt_entry["comparators"].get(model)
+                if reg_rec is None or alt_rec is None:
+                    continue
+                rv, av = reg_rec["headline"][stratum], alt_rec["headline"][stratum]
+                rs = reg_rec.get("persistence_skill", {}).get(f"{stratum}_p90_m")
+                as_ = alt_rec.get("persistence_skill", {}).get(f"{stratum}_p90_m")
+                lines.append(
+                    f"| {model} | {_m(rv.get('p90_m'))} | {_m(av.get('p90_m'))} | "
+                    f"{_delta(rv.get('p90_m'), av.get('p90_m'))} | "
+                    f"{_m(rv.get('p99_m_individual_weighted'))} | "
+                    f"{_m(av.get('p99_m_individual_weighted'))} | "
+                    f"{_delta(rv.get('p99_m_individual_weighted'), av.get('p99_m_individual_weighted'))} | "
+                    + (f"{rs:+.4f} | " if rs is not None else "— | ")
+                    + (f"{as_:+.4f} |" if as_ is not None else "— |")
+                )
+            lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "Δ is the post-hoc value against the registered one; a negative Δ on an error statistic means the "
+        "alternative boundary makes that number smaller. Skill is persistence skill on the stratum p90, "
+        "positive meaning better than persistence. Every statistic is individual-weighted under A5 and every "
+        "trained arm is the median across seeds under A3, exactly as in the registered run.",
+        "",
+        f"Written by `tier2_sealed_eval.py --boundary-sensitivity p{rule['alternative_anchor_quantile']}:"
+        f"{rule['alternative_multiplier']}` under amendment A16. Read the registered column for the Tier 2 "
+        "result. The post-hoc column supports statements about robustness and nothing else.",
+        "",
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
 
 # GenAI reference: helped here with CLI and output writing scaffolding for our 2 phase sealed evaluation; the evaluation 
 # protocol and registered criteria were specified separately.
@@ -821,10 +986,19 @@ def main() -> None:
         default=EVALUATION_FLOOR,
         help="primary evaluation window floor",
     )
+    parser.add_argument(
+        "--boundary-sensitivity",
+        metavar="pQ:MULTIPLIER",
+        help=(
+            "A16 post-hoc mode: re-report the frozen predictions under an alternative A4 boundary "
+            "(e.g. p90:0.00603816) and write the comparison to tier2_boundary_sensitivity.{json,md}. "
+            "Reads the sealed verdict for the registered column; writes to neither sealed file."
+        ),
+    )
     args = parser.parse_args()
 
-    if not (args.predict or args.report):
-        raise SystemExit("FAIL: pass --predict, --report, or both")
+    if not (args.predict or args.report or args.boundary_sensitivity):
+        raise SystemExit("FAIL: pass --predict, --report, --boundary-sensitivity, or a combination")
 
     if args.predict:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -849,6 +1023,63 @@ def main() -> None:
             )
         print(f"\nwrote {SEALED / 'tier2_verdict.json'}")
         print(f"wrote {SEALED / 'tier2_results.md'}")
+
+    if args.boundary_sensitivity:
+        anchor_text, _, multiplier_text = args.boundary_sensitivity.partition(":")
+        if not multiplier_text or not anchor_text.startswith("p"):
+            raise SystemExit("FAIL: --boundary-sensitivity takes pQ:MULTIPLIER, e.g. p90:0.00603816")
+        anchor_quantile, multiplier = int(anchor_text[1:]), float(multiplier_text)
+
+        registered_path = SEALED / "tier2_verdict.json"
+        if not registered_path.exists():
+            raise SystemExit(
+                f"FAIL: {registered_path.name} is missing. The registered result is the primary "
+                "column of this comparison and is not recomputed here."
+            )
+        registered = json.loads(registered_path.read_text())
+
+        boundaries = alternative_boundaries(anchor_quantile, multiplier)
+        # The registered boundaries come off the sealed verdict, never off regime_profiles.csv, so a
+        # later edit to that table cannot quietly restate what Tier 2 was registered under.
+        registered_rule = {
+            species: entry["regime_boundary_m"] for species, entry in registered["species"].items()
+        }
+        print("regime boundary, registered -> post hoc:")
+        for species, value in boundaries.items():
+            print(f"  {species:26s} {registered_rule[species]:10,.1f} m -> {value:10,.1f} m")
+
+        alternative = build_report(args.floor, boundaries=boundaries)
+        rule = {
+            "post_hoc": True,
+            "is_a_tier2_result": False,
+            "registered_anchor_quantile": 50,
+            "registered_multiplier": 0.1,
+            "alternative_anchor_quantile": anchor_quantile,
+            "alternative_multiplier": multiplier,
+            "registered_boundaries_m": registered_rule,
+            "alternative_boundaries_m": boundaries,
+            "sealed_on": "2026-08-26",
+            "discovered_on": "2026-09-15",
+            "provenance": (
+                "The alternative rule was returned by the A4 decision tree only after eleven Tier 3 "
+                "bird candidates were profiled into results/regime_profiles.csv, which happened after "
+                "the Tier 2 sealed evaluation and after its results had been read. It cannot replace "
+                "the registered primary analysis. Amendment A16."
+            ),
+            "models_retrained": 0,
+            "predictions_modified": False,
+        }
+        alternative["boundary_sensitivity"] = rule
+        SENSITIVITY_JSON.write_text(json.dumps(alternative, indent=2, default=float) + "\n")
+        write_sensitivity_markdown(registered, alternative, rule, SENSITIVITY_MD)
+
+        print(
+            f"\nregistered band: {registered['verdict']['band']}   "
+            f"post-hoc band: {alternative['verdict']['band']}"
+        )
+        print(f"wrote {SENSITIVITY_JSON}")
+        print(f"wrote {SENSITIVITY_MD}")
+        print("neither sealed file was written; the registered result is unchanged")
 
 
 if __name__ == "__main__":
