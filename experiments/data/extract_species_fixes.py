@@ -54,6 +54,67 @@ TIER2_AND_CANDIDATES = (
     "Bison bison",
 )
 
+# tier 2 role species. Their split manifests are frozen, so these extracts must not be rebuilt
+ROLE_SPECIES = frozenset(
+    {
+        "Ciconia ciconia",
+        "Larus fuscus",
+        "Cervus elaphus",
+        "Canis lupus",
+        "Mirounga leonina",
+        "Mirounga angustirostris",
+    }
+)
+
+# non Movebank species and their source parquet paths relative to --data-root
+NON_MOVEBANK_SOURCES: dict[str, str] = {
+    "Pygoscelis adeliae": "raatd_species/RAATD_ADPE.parquet",
+    "Arctocephalus gazella": "raatd_species/RAATD_ANFS.parquet",
+    "Leptonychotes weddellii": "raatd_species/RAATD_WESE.parquet",
+    "Lobodon carcinophaga": "raatd_species/RAATD_CRAS.parquet",
+    "Eudyptes chrysolophus": "raatd_species/RAATD_MAPE.parquet",
+    "Aptenodytes patagonicus": "raatd_species/RAATD_KIPE.parquet",
+    "Diomedea exulans": "raatd_species/RAATD_WAAL.parquet",
+    "Thalassarche chrysostoma": "raatd_species/RAATD_GHAL.parquet",
+    "Thalassoica antarctica": "raatd_species/RAATD_ANPE.parquet",
+    "Odobenus rosmarus": "argos_species/walrus.parquet",
+}
+
+# movebank bird candidates for Tier 3, these are first time extracts and exclude existing role species, the congeneric Larus argentatus, 
+# and species that fail our A7 eligibility gate
+TIER3_BIRDS: tuple[str, ...] = (
+    "Cathartes aura",
+    "Gyps himalayensis",
+    "Milvus milvus",
+    "Pernis apivorus",
+    "Falco naumanni",
+    "Corvus corone",
+    "Mycteria americana",
+    "Haematopus ostralegus",
+    "Branta canadensis",
+    "Anser albifrons",
+    "Anser caerulescens",
+)
+
+# existing Tier 3/4 candidates that have already been profiled and split; note their manifests have not been used so they can be rebuilt to 
+# apply our physical plausibility QC
+TIER3_CANDIDATES: tuple[str, ...] = (
+    "Lynx rufus",
+    "Ovis dalli",
+    "Canis latrans",
+    "Connochaetes taurinus",
+    "Bison bison",
+    "Leptonychotes weddellii",
+    "Odobenus rosmarus",
+    "Arctocephalus gazella",
+    "Lobodon carcinophaga",
+    "Pygoscelis adeliae",
+    "Eudyptes chrysolophus",
+    "Aptenodytes patagonicus",
+    "Diomedea exulans",
+    "Thalassarche chrysostoma",
+    "Thalassoica antarctica",
+)
 # GenAI refined this 
 SPECIES_SQL = """
 SELECT l.individual_id, l.deployment_id, l.study_id, l.timestamp,
@@ -250,6 +311,14 @@ def main() -> None:
     parser.add_argument("--species", nargs="*", help="taxon names to extract")
     parser.add_argument("--tier2", action="store_true",
                         help=f"extract the {len(TIER2_AND_CANDIDATES)} Movebank Tier-2 species and candidates")
+    parser.add_argument("--candidates", action="store_true",
+                        help=f"extract the {len(TIER3_CANDIDATES)} already-profiled Tier 3/4 candidates, each "
+                             "from its own corpus via NON_MOVEBANK_SOURCES")
+    parser.add_argument("--birds", action="store_true",
+                        help=f"extract the {len(TIER3_BIRDS)} Movebank birds queued as Tier 3 flying sources")
+    parser.add_argument("--allow-role-species", action="store_true",
+                        help="permit rebuilding a Tier 2 role species; refused by default because their split "
+                             "manifests are frozen and used (A2)")
     parser.add_argument("--out-dir", type=Path, default=PROCESSED)
     parser.add_argument("--source", type=Path, default=None,
                         help="a per-species fixes parquet from a non-Movebank corpus "
@@ -268,15 +337,31 @@ def main() -> None:
                         help="individuals per batch; lower it if memory is tight")
     args = parser.parse_args()
 
-    species = list(TIER2_AND_CANDIDATES) if args.tier2 else (args.species or [])
+    species = list(args.species or [])
+    if args.tier2:
+        species += [name for name in TIER2_AND_CANDIDATES if name not in species]
+    if args.candidates:
+        species += [name for name in TIER3_CANDIDATES if name not in species]
+    if args.birds:
+        species += [name for name in TIER3_BIRDS if name not in species]
     if not species:
-        raise SystemExit("give --species or --tier2")
+        raise SystemExit("give --species, --tier2, --candidates or --birds")
+
+    protected = sorted(ROLE_SPECIES.intersection(species))
+    if protected and not args.allow_role_species:
+        raise SystemExit(
+            f"FAIL: {', '.join(protected)} hold Tier 2 roles and their frozen split manifests have been used. "
+            "Rebuilding the extract moves the population underneath a sealed manifest, which A2 forbids. "
+            "Pass --allow-role-species only if that is genuinely what you mean."
+        )
 
     paths = {
         "locations": str(args.data_root / "locations_gps.parquet"),
         "individuals": str(args.data_root / "individuals.parquet"),
     }
-    if args.source is None:
+    # Only species without a per-species corpus need the full Movebank scan.
+    needs_movebank = args.source is None and any(name not in NON_MOVEBANK_SOURCES for name in species)
+    if needs_movebank:
         for p in paths.values():
             if not Path(p).exists():
                 raise SystemExit(f"FAIL: missing {p}")
@@ -291,9 +376,15 @@ def main() -> None:
         deployments = None
         if args.deployments is not None:
             deployments = pd.read_csv(args.deployments, low_memory=False)
+        # An explicit --source wins; otherwise a registered per-species corpus; otherwise the Movebank scan.
+        source_parquet = args.source
+        if source_parquet is None and name in NON_MOVEBANK_SOURCES:
+            source_parquet = args.data_root / NON_MOVEBANK_SOURCES[name]
+            if not source_parquet.exists():
+                raise SystemExit(f"FAIL: missing {source_parquet} for {name}")
         wrote, stats = extract(
             con, name, paths, path, batch=args.batch,
-            source_parquet=args.source, deployments=deployments,
+            source_parquet=source_parquet, deployments=deployments,
             drop_class_z=not args.keep_class_z,
             quality_col=args.quality_col, error_col=args.error_col,
         )

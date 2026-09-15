@@ -29,7 +29,18 @@ EVAL_INDIVIDUALS = 10
 GATE1_MIN_TOTAL = 40
 
 # A5 fixed the evaluation floor at 25 and requires sensitivity at these values
+EVALUATION_FLOOR = 25
 FLOOR_SENSITIVITY = (10, 25, 50, 100)
+
+
+def clears_gate1(n_eval_pool: int, n_train_pool: int) -> bool:
+    """
+    A7 gate 1: at least 2 x EVAL_INDIVIDUALS above the evaluation floor, and GATE1_MIN_TOTAL with any window.
+
+    Factored out so `rebuild_pool.py` can apply the same gate between building segments and writing a split manifest, 
+    rather than restating the arithmetic and letting the two drift.
+    """
+    return bool(n_eval_pool >= 2 * EVAL_INDIVIDUALS and n_train_pool >= GATE1_MIN_TOTAL)
 
 
 def audit(
@@ -62,7 +73,7 @@ def audit(
     n_val = min(EVAL_INDIVIDUALS, max(n_eval_pool - EVAL_INDIVIDUALS, 0))
     n_test = min(EVAL_INDIVIDUALS, max(n_eval_pool - n_val, 0))
     n_train = max(n_train_pool - n_val - n_test, 0)
-    clears_gate1 = bool(n_eval_pool >= 2 * EVAL_INDIVIDUALS and n_train_pool >= GATE1_MIN_TOTAL)
+    gate1 = clears_gate1(n_eval_pool, n_train_pool)
 
     # record device types because some species contain both PTT and GPS individuals
     segments = pd.read_parquet(path)
@@ -93,7 +104,7 @@ def audit(
         "split_train": n_train,
         "split_val": n_val,
         "split_test": n_test,
-        "clears_gate1": clears_gate1,
+        "clears_gate1": gate1,
         "device_mix": ", ".join(
             f"{device}:{count}"
             for device, count in sorted(device_counts.items())
@@ -136,7 +147,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-min-windows",
         type=int,
-        default=25,
+        default=EVALUATION_FLOOR,
         help="evaluation window floor F; A5 fixed this at 25",
     )
     parser.add_argument(

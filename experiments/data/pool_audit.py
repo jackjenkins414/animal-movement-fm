@@ -80,7 +80,10 @@ runs AS (
 SELECT study_id, individual_id, taxon,
        sum(greatest(length - 24, 0)) AS windows_c24,
        sum(greatest(length - 12, 0)) AS windows_c12,
-       sum(length) AS bins
+       sum(length) AS bins,
+       -- Run lengths show when large pools still lack a long enough contiguous run to form a window
+       median(length) AS run_len_median,
+       max(length) AS run_len_max
 FROM runs
 GROUP BY study_id, individual_id, taxon
 """
@@ -91,7 +94,7 @@ def gate_counts(frame: pd.DataFrame, column: str) -> dict[str, object]:
     windows = frame[column].to_numpy()
     ge1 = int((windows >= 1).sum())
     ge25 = int((windows >= 25).sum())
-    return {
+    counts = {
         "individuals": len(frame),
         "ge1": ge1,
         "ge25": ge25,
@@ -100,6 +103,11 @@ def gate_counts(frame: pd.DataFrame, column: str) -> dict[str, object]:
         # A7 gate; >=20 evaluable and >=40 trainable individuals
         "gate1_F25": bool(ge25 >= 20 and ge1 >= 40),
     }
+    if "run_len_median" in frame.columns:
+        # context independent so these repeat across the C=24 and C=12 rows; they are what explains a species failing the gate despite a large pool
+        counts["run_len_median"] = float(frame["run_len_median"].median())
+        counts["run_len_max"] = int(frame["run_len_max"].max())
+    return counts
 
 
 def by_study(frame: pd.DataFrame, species: str) -> pd.DataFrame:
