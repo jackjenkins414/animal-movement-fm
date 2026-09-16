@@ -30,6 +30,7 @@ from animal_movement_fm.analysis.regime_profile import (
     normalise_individual_ids,
     profile_species,
     restrict_to_individuals,
+    select_source_pool,
     select_threshold_rule,
 )
 from animal_movement_fm.data.resample import BIN_SECONDS
@@ -824,3 +825,68 @@ def test_the_a4_branch_cannot_move_when_a_descriptor_transform_changes():
     assert before.anchor_quantile == after.anchor_quantile == 50
     assert before.multiplier == after.multiplier
     assert before.pooled_only_species == after.pooled_only_species
+
+
+# GenAI reference (16-09-2026): the select_source_pool tests below were written by GenAI for preregistration_tier3.md sec 1
+def _line_distances(positions: dict[str, float]) -> pd.DataFrame:
+    names = list(positions)
+    x = np.array([positions[n] for n in names])
+    return pd.DataFrame(np.abs(x[:, None] - x[None, :]), index=names, columns=names)
+
+
+def test_select_source_pool_keeps_the_fixed_sources_and_adds_per_domain():
+    positions = {"F": 0.0, "T": 10.0, "f1": 1.0, "f2": 9.0, "f3": 5.0, "t1": 11.0, "t2": 20.0, "t3": 12.0}
+    fixed = {"F": "flying", "T": "terrestrial"}
+    candidates = {"f1": "flying", "f2": "flying", "f3": "flying", "t1": "terrestrial", "t2": "terrestrial", "t3": "terrestrial"}
+    windows = dict.fromkeys(positions, 5_000)
+    result = select_source_pool(_line_distances(positions), fixed, candidates, windows)
+    assert result["n_pools_scored"] == 9
+    assert set(fixed) <= set(result["pool"])
+    assert len(result["pool"]) == 6
+    assert sum(1 for n in result["pool"] if candidates.get(n) == "flying") == 2
+    assert sum(1 for n in result["pool"] if candidates.get(n) == "terrestrial") == 2
+
+
+def test_select_source_pool_maximises_mean_distance():
+    positions = {"F": 0.0, "f1": 1.0, "f2": 2.0, "f3": 50.0}
+    result = select_source_pool(
+        _line_distances(positions), {"F": "flying"}, {"f1": "flying", "f2": "flying", "f3": "flying"},
+        dict.fromkeys(positions, 1), per_domain=1,
+    )
+    assert result["pool"] == ["F", "f3"]
+    assert result["runners_up"][0]["pool"] == ["F", "f2"]
+
+
+def test_select_source_pool_breaks_mean_ties_on_minimum_then_windows_then_name():
+    names = ["F", "a", "b", "c", "d"]
+    d = pd.DataFrame(0.0, index=names, columns=names)
+    def put(i, j, v):
+        d.loc[i, j] = d.loc[j, i] = v
+    # pools {F,a,b} and {F,c,d} both have mean 2; {F,c,d} has the larger minimum
+    for i, j, v in [("F", "a", 1.0), ("F", "b", 2.0), ("a", "b", 3.0), ("F", "c", 2.0), ("F", "d", 2.0), ("c", "d", 2.0)]:
+        put(i, j, v)
+    for i, j in [("a", "c"), ("a", "d"), ("b", "c"), ("b", "d")]:
+        put(i, j, 0.1)
+    cands = dict.fromkeys(["a", "b", "c", "d"], "flying")
+    result = select_source_pool(d, {"F": "flying"}, cands, dict.fromkeys(names, 1))
+    assert result["pool"] == ["F", "c", "d"]
+    # equal mean and minimum: the larger training-window total wins, and names break a full tie
+    for i, j in [("F", "a"), ("F", "b"), ("a", "b")]:
+        put(i, j, 2.0)
+    more = {**dict.fromkeys(names, 1), "a": 10}
+    assert select_source_pool(d, {"F": "flying"}, cands, more)["pool"] == ["F", "a", "b"]
+    assert select_source_pool(d, {"F": "flying"}, cands, dict.fromkeys(names, 1))["pool"] == ["F", "a", "b"]
+
+
+def test_select_source_pool_rejects_bad_inputs():
+    positions = {"F": 0.0, "f1": 1.0, "f2": 2.0}
+    dist = _line_distances(positions)
+    windows = dict.fromkeys(positions, 1)
+    with pytest.raises(ValueError, match="both fixed and candidates"):
+        select_source_pool(dist, {"F": "flying"}, {"F": "flying", "f1": "flying"}, windows, per_domain=1)
+    with pytest.raises(ValueError, match="no fixed source"):
+        select_source_pool(dist, {"F": "flying"}, {"f1": "marine"}, windows, per_domain=1)
+    with pytest.raises(ValueError, match="fewer than 2 candidates"):
+        select_source_pool(dist, {"F": "flying"}, {"f1": "flying"}, windows)
+    with pytest.raises(ValueError, match="no distance row"):
+        select_source_pool(dist, {"F": "flying"}, {"f1": "flying", "x": "flying"}, windows, per_domain=1)

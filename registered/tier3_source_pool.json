@@ -1,0 +1,512 @@
+{
+  "_comment": [
+    "Tier 3 source pool selected mechanically under preregistration_tier3.md sec 1, with A8 draw",
+    "probabilities (alpha 0.5) over the selected nine. Written by source_pool_weights.py --tier3.",
+    "Sub-pools (Za, inner-loop folds) are not included; they depend on choices the Tier 3 prereg has not fixed yet."
+  ],
+  "rule": "preregistration_tier3.md sec 1",
+  "context_length": 12,
+  "alpha": 0.5,
+  "min_train_windows": 2000,
+  "standardisation": "registered/tier2_descriptor_standardisation.json",
+  "fixed": {
+    "ciconia_ciconia": "flying",
+    "cervus_elaphus": "terrestrial",
+    "mirounga_leonina": "marine"
+  },
+  "candidate_table": [
+    {
+      "species": "anser_albifrons",
+      "domain": "flying",
+      "train_windows": 79873,
+      "reason": "candidate"
+    },
+    {
+      "species": "anser_caerulescens",
+      "domain": "flying",
+      "train_windows": 199754,
+      "reason": "candidate"
+    },
+    {
+      "species": "aptenodytes_patagonicus",
+      "domain": "marine",
+      "train_windows": 1170,
+      "reason": "below 2000 training windows"
+    },
+    {
+      "species": "arctocephalus_gazella",
+      "domain": "marine",
+      "train_windows": 3389,
+      "reason": "candidate"
+    },
+    {
+      "species": "bison_bison",
+      "domain": "terrestrial",
+      "train_windows": 37729,
+      "reason": "candidate"
+    },
+    {
+      "species": "branta_canadensis",
+      "domain": "flying",
+      "train_windows": 99724,
+      "reason": "candidate"
+    },
+    {
+      "species": "canis_latrans",
+      "domain": "terrestrial",
+      "train_windows": 37253,
+      "reason": "candidate"
+    },
+    {
+      "species": "cathartes_aura",
+      "domain": "flying",
+      "train_windows": 210939,
+      "reason": "candidate"
+    },
+    {
+      "species": "connochaetes_taurinus",
+      "domain": "terrestrial",
+      "train_windows": 51417,
+      "reason": "candidate"
+    },
+    {
+      "species": "corvus_corone",
+      "domain": "flying",
+      "train_windows": 111895,
+      "reason": "candidate"
+    },
+    {
+      "species": "diomedea_exulans",
+      "domain": "flying",
+      "train_windows": 2971,
+      "reason": "candidate"
+    },
+    {
+      "species": "eudyptes_chrysolophus",
+      "domain": "marine",
+      "train_windows": 2818,
+      "reason": "candidate"
+    },
+    {
+      "species": "falco_naumanni",
+      "domain": "flying",
+      "train_windows": 31995,
+      "reason": "candidate"
+    },
+    {
+      "species": "gyps_himalayensis",
+      "domain": "flying",
+      "train_windows": 9621,
+      "reason": "candidate"
+    },
+    {
+      "species": "haematopus_ostralegus",
+      "domain": "flying",
+      "train_windows": 127354,
+      "reason": "candidate"
+    },
+    {
+      "species": "leptonychotes_weddellii",
+      "domain": "marine",
+      "train_windows": 7718,
+      "reason": "candidate"
+    },
+    {
+      "species": "lobodon_carcinophaga",
+      "domain": "marine",
+      "train_windows": 2286,
+      "reason": "candidate"
+    },
+    {
+      "species": "lynx_rufus",
+      "domain": "terrestrial",
+      "train_windows": 20206,
+      "reason": "candidate"
+    },
+    {
+      "species": "milvus_milvus",
+      "domain": "flying",
+      "train_windows": 25234,
+      "reason": "candidate"
+    },
+    {
+      "species": "mycteria_americana",
+      "domain": "flying",
+      "train_windows": 137954,
+      "reason": "candidate"
+    },
+    {
+      "species": "odobenus_rosmarus",
+      "domain": "marine",
+      "train_windows": 2460,
+      "reason": "candidate"
+    },
+    {
+      "species": "ovis_dalli",
+      "domain": "terrestrial",
+      "train_windows": 45071,
+      "reason": "candidate"
+    },
+    {
+      "species": "pernis_apivorus",
+      "domain": "flying",
+      "train_windows": 22509,
+      "reason": "candidate"
+    },
+    {
+      "species": "pygoscelis_adeliae",
+      "domain": "marine",
+      "train_windows": 5988,
+      "reason": "candidate"
+    },
+    {
+      "species": "thalassarche_chrysostoma",
+      "domain": "flying",
+      "train_windows": 1995,
+      "reason": "below 2000 training windows"
+    },
+    {
+      "species": "thalassoica_antarctica",
+      "domain": "flying",
+      "train_windows": 2490,
+      "reason": "candidate"
+    }
+  ],
+  "pool": [
+    "arctocephalus_gazella",
+    "bison_bison",
+    "branta_canadensis",
+    "canis_latrans",
+    "cervus_elaphus",
+    "ciconia_ciconia",
+    "eudyptes_chrysolophus",
+    "mirounga_leonina",
+    "thalassoica_antarctica"
+  ],
+  "added": {
+    "flying": [
+      "branta_canadensis",
+      "thalassoica_antarctica"
+    ],
+    "marine": [
+      "arctocephalus_gazella",
+      "eudyptes_chrysolophus"
+    ],
+    "terrestrial": [
+      "bison_bison",
+      "canis_latrans"
+    ]
+  },
+  "mean_distance": 5.013340853190772,
+  "min_distance": 2.2148670909587893,
+  "train_windows": 1599653,
+  "n_pools_scored": 11700,
+  "n_tied_on_mean": 1,
+  "candidates_per_domain": {
+    "flying": [
+      "anser_albifrons",
+      "anser_caerulescens",
+      "branta_canadensis",
+      "cathartes_aura",
+      "corvus_corone",
+      "diomedea_exulans",
+      "falco_naumanni",
+      "gyps_himalayensis",
+      "haematopus_ostralegus",
+      "milvus_milvus",
+      "mycteria_americana",
+      "pernis_apivorus",
+      "thalassoica_antarctica"
+    ],
+    "marine": [
+      "arctocephalus_gazella",
+      "eudyptes_chrysolophus",
+      "leptonychotes_weddellii",
+      "lobodon_carcinophaga",
+      "odobenus_rosmarus",
+      "pygoscelis_adeliae"
+    ],
+    "terrestrial": [
+      "bison_bison",
+      "canis_latrans",
+      "connochaetes_taurinus",
+      "lynx_rufus",
+      "ovis_dalli"
+    ]
+  },
+  "distance_matrix": {
+    "arctocephalus_gazella": {
+      "arctocephalus_gazella": 0.0,
+      "bison_bison": 4.357273,
+      "branta_canadensis": 6.835738,
+      "canis_latrans": 4.415828,
+      "cervus_elaphus": 3.436987,
+      "ciconia_ciconia": 6.079926,
+      "eudyptes_chrysolophus": 2.523188,
+      "mirounga_leonina": 2.514577,
+      "thalassoica_antarctica": 4.051387
+    },
+    "bison_bison": {
+      "arctocephalus_gazella": 4.357273,
+      "bison_bison": 0.0,
+      "branta_canadensis": 4.861424,
+      "canis_latrans": 4.005662,
+      "cervus_elaphus": 3.335097,
+      "ciconia_ciconia": 4.92142,
+      "eudyptes_chrysolophus": 5.678364,
+      "mirounga_leonina": 4.455534,
+      "thalassoica_antarctica": 6.944413
+    },
+    "branta_canadensis": {
+      "arctocephalus_gazella": 6.835738,
+      "bison_bison": 4.861424,
+      "branta_canadensis": 0.0,
+      "canis_latrans": 6.337066,
+      "cervus_elaphus": 6.52631,
+      "ciconia_ciconia": 2.359334,
+      "eudyptes_chrysolophus": 8.587992,
+      "mirounga_leonina": 7.397379,
+      "thalassoica_antarctica": 9.52533
+    },
+    "canis_latrans": {
+      "arctocephalus_gazella": 4.415828,
+      "bison_bison": 4.005662,
+      "branta_canadensis": 6.337066,
+      "canis_latrans": 0.0,
+      "cervus_elaphus": 2.214867,
+      "ciconia_ciconia": 5.529871,
+      "eudyptes_chrysolophus": 4.661679,
+      "mirounga_leonina": 3.783454,
+      "thalassoica_antarctica": 5.766248
+    },
+    "cervus_elaphus": {
+      "arctocephalus_gazella": 3.436987,
+      "bison_bison": 3.335097,
+      "branta_canadensis": 6.52631,
+      "canis_latrans": 2.214867,
+      "cervus_elaphus": 0.0,
+      "ciconia_ciconia": 5.72248,
+      "eudyptes_chrysolophus": 3.77662,
+      "mirounga_leonina": 2.935794,
+      "thalassoica_antarctica": 5.05061
+    },
+    "ciconia_ciconia": {
+      "arctocephalus_gazella": 6.079926,
+      "bison_bison": 4.92142,
+      "branta_canadensis": 2.359334,
+      "canis_latrans": 5.529871,
+      "cervus_elaphus": 5.72248,
+      "ciconia_ciconia": 0.0,
+      "eudyptes_chrysolophus": 7.870888,
+      "mirounga_leonina": 6.42575,
+      "thalassoica_antarctica": 8.088192
+    },
+    "eudyptes_chrysolophus": {
+      "arctocephalus_gazella": 2.523188,
+      "bison_bison": 5.678364,
+      "branta_canadensis": 8.587992,
+      "canis_latrans": 4.661679,
+      "cervus_elaphus": 3.77662,
+      "ciconia_ciconia": 7.870888,
+      "eudyptes_chrysolophus": 0.0,
+      "mirounga_leonina": 2.824651,
+      "thalassoica_antarctica": 3.469773
+    },
+    "mirounga_leonina": {
+      "arctocephalus_gazella": 2.514577,
+      "bison_bison": 4.455534,
+      "branta_canadensis": 7.397379,
+      "canis_latrans": 3.783454,
+      "cervus_elaphus": 2.935794,
+      "ciconia_ciconia": 6.42575,
+      "eudyptes_chrysolophus": 2.824651,
+      "mirounga_leonina": 0.0,
+      "thalassoica_antarctica": 3.209164
+    },
+    "thalassoica_antarctica": {
+      "arctocephalus_gazella": 4.051387,
+      "bison_bison": 6.944413,
+      "branta_canadensis": 9.52533,
+      "canis_latrans": 5.766248,
+      "cervus_elaphus": 5.05061,
+      "ciconia_ciconia": 8.088192,
+      "eudyptes_chrysolophus": 3.469773,
+      "mirounga_leonina": 3.209164,
+      "thalassoica_antarctica": 0.0
+    }
+  },
+  "runners_up": [
+    {
+      "pool": [
+        "anser_caerulescens",
+        "arctocephalus_gazella",
+        "bison_bison",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "mirounga_leonina",
+        "thalassoica_antarctica"
+      ],
+      "added": {
+        "flying": [
+          "anser_caerulescens",
+          "thalassoica_antarctica"
+        ],
+        "marine": [
+          "arctocephalus_gazella",
+          "eudyptes_chrysolophus"
+        ],
+        "terrestrial": [
+          "bison_bison",
+          "canis_latrans"
+        ]
+      },
+      "mean_distance": 5.005024643374157,
+      "min_distance": 2.2148670909587893,
+      "train_windows": 1699683
+    },
+    {
+      "pool": [
+        "arctocephalus_gazella",
+        "bison_bison",
+        "branta_canadensis",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "mirounga_leonina",
+        "pernis_apivorus"
+      ],
+      "added": {
+        "flying": [
+          "branta_canadensis",
+          "pernis_apivorus"
+        ],
+        "marine": [
+          "arctocephalus_gazella",
+          "eudyptes_chrysolophus"
+        ],
+        "terrestrial": [
+          "bison_bison",
+          "canis_latrans"
+        ]
+      },
+      "mean_distance": 4.989552658029279,
+      "min_distance": 2.214447760752311,
+      "train_windows": 1619672
+    },
+    {
+      "pool": [
+        "anser_caerulescens",
+        "arctocephalus_gazella",
+        "bison_bison",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "mirounga_leonina",
+        "pernis_apivorus"
+      ],
+      "added": {
+        "flying": [
+          "anser_caerulescens",
+          "pernis_apivorus"
+        ],
+        "marine": [
+          "arctocephalus_gazella",
+          "eudyptes_chrysolophus"
+        ],
+        "terrestrial": [
+          "bison_bison",
+          "canis_latrans"
+        ]
+      },
+      "mean_distance": 4.984780043867492,
+      "min_distance": 2.214447760752311,
+      "train_windows": 1719702
+    },
+    {
+      "pool": [
+        "anser_caerulescens",
+        "bison_bison",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "leptonychotes_weddellii",
+        "mirounga_leonina",
+        "thalassoica_antarctica"
+      ],
+      "added": {
+        "flying": [
+          "anser_caerulescens",
+          "thalassoica_antarctica"
+        ],
+        "marine": [
+          "eudyptes_chrysolophus",
+          "leptonychotes_weddellii"
+        ],
+        "terrestrial": [
+          "bison_bison",
+          "canis_latrans"
+        ]
+      },
+      "mean_distance": 4.9779318890252044,
+      "min_distance": 1.95236534366067,
+      "train_windows": 1704012
+    },
+    {
+      "pool": [
+        "anser_caerulescens",
+        "arctocephalus_gazella",
+        "bison_bison",
+        "branta_canadensis",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "mirounga_leonina"
+      ],
+      "added": {
+        "flying": [
+          "anser_caerulescens",
+          "branta_canadensis"
+        ],
+        "marine": [
+          "arctocephalus_gazella",
+          "eudyptes_chrysolophus"
+        ],
+        "terrestrial": [
+          "bison_bison",
+          "canis_latrans"
+        ]
+      },
+      "mean_distance": 4.973624881404773,
+      "min_distance": 1.7364660229977331,
+      "train_windows": 1796917
+    }
+  ],
+  "train_window_counts": {
+    "arctocephalus_gazella": 3389,
+    "bison_bison": 37729,
+    "branta_canadensis": 99724,
+    "canis_latrans": 37253,
+    "cervus_elaphus": 556579,
+    "ciconia_ciconia": 806595,
+    "eudyptes_chrysolophus": 2818,
+    "mirounga_leonina": 53076,
+    "thalassoica_antarctica": 2490
+  },
+  "source_pool": {
+    "arctocephalus_gazella": 0.02125592234598693,
+    "bison_bison": 0.07092213773234742,
+    "branta_canadensis": 0.11530390489329623,
+    "canis_latrans": 0.07047333054531593,
+    "cervus_elaphus": 0.2724002980720601,
+    "ciconia_ciconia": 0.32792304129097255,
+    "eudyptes_chrysolophus": 0.019382717443615003,
+    "mirounga_leonina": 0.08411883766865773,
+    "thalassoica_antarctica": 0.018219810007748055
+  }
+}

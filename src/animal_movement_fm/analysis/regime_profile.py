@@ -44,6 +44,7 @@ Displacements use a local equirectangular approximation; see `local_en_metres`.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -903,6 +904,85 @@ def coverage_distances(
         index=names,
         columns=names,
     )
+
+
+# GenAI (16-09-2026): select_source_pool was written by GenAI to implement preregistration_tier3.md sec 1 as I specified it.
+def select_source_pool(
+    distances: pd.DataFrame,
+    fixed: dict[str, str],
+    candidates: dict[str, str],
+    train_windows: dict[str, int],
+    *,
+    per_domain: int = 2,
+    tie_tolerance: float = 1e-9,
+    n_runners_up: int = 5,
+) -> dict:
+    """
+    Choose a nested source pool by maximum mean pairwise descriptor distance.
+
+    `fixed` and `candidates` map species to domain. Every fixed species is kept and exactly `per_domain` candidates are
+    added in each fixed domain; every such pool is scored. The winner has the largest mean pairwise distance, with
+    ties (within `tie_tolerance`) broken by the larger minimum pairwise distance, then the larger total training-window
+    count, then the alphabetically first sorted species list. `distances` must hold every fixed and candidate species
+    and nothing is read for anyone else, so held-out species cannot enter the choice unless a caller passes them in.
+    """
+    overlap = set(fixed) & set(candidates)
+    if overlap:
+        raise ValueError(f"species are both fixed and candidates: {sorted(overlap)}")
+    domains = sorted(set(fixed.values()))
+    stray = sorted({d for d in candidates.values() if d not in domains})
+    if stray:
+        raise ValueError(f"candidate domains {stray} have no fixed source")
+    species = list(fixed) + list(candidates)
+    missing = [name for name in species if name not in distances.index or name not in train_windows]
+    if missing:
+        raise ValueError(f"no distance row or training-window count for {missing}")
+
+    per = {d: sorted(name for name, dom in candidates.items() if dom == d) for d in domains}
+    short = {d: len(names) for d, names in per.items() if len(names) < per_domain}
+    if short:
+        raise ValueError(f"fewer than {per_domain} candidates in {short}")
+
+    matrix = distances.loc[species, species].to_numpy(dtype=float)
+    position = {name: i for i, name in enumerate(species)}
+    fixed_idx = [position[name] for name in fixed]
+
+    scored = []
+    for choice in itertools.product(*(itertools.combinations(per[d], per_domain) for d in domains)):
+        members = sorted(fixed) + sorted(name for block in choice for name in block)
+        idx = fixed_idx + [position[name] for block in choice for name in block]
+        pairs = matrix[np.ix_(idx, idx)][np.triu_indices(len(idx), k=1)]
+        scored.append(
+            {
+                "pool": sorted(members),
+                "added": {d: list(block) for d, block in zip(domains, choice)},
+                "mean_distance": float(pairs.mean()),
+                "min_distance": float(pairs.min()),
+                "train_windows": int(sum(train_windows[name] for name in members)),
+            }
+        )
+
+    best_mean = max(item["mean_distance"] for item in scored)
+    tied = [item for item in scored if best_mean - item["mean_distance"] <= tie_tolerance]
+    best_min = max(item["min_distance"] for item in tied)
+    tied = [item for item in tied if best_min - item["min_distance"] <= tie_tolerance]
+    most = max(item["train_windows"] for item in tied)
+    tied = [item for item in tied if item["train_windows"] == most]
+    selected = min(tied, key=lambda item: item["pool"])
+
+    ranked = sorted(
+        scored, key=lambda item: (-item["mean_distance"], -item["min_distance"], -item["train_windows"], item["pool"])
+    )
+    runners_up = [item for item in ranked if item["pool"] != selected["pool"]][:n_runners_up]
+    members = selected["pool"]
+    return {
+        **selected,
+        "n_pools_scored": len(scored),
+        "n_tied_on_mean": sum(1 for item in scored if best_mean - item["mean_distance"] <= tie_tolerance),
+        "candidates_per_domain": per,
+        "distance_matrix": distances.loc[members, members].round(6).to_dict(),
+        "runners_up": runners_up,
+    }
 
 # GenAI reference: I implemented the original regime profiling pipeline, which included the descriptor set, exact one bin cadence rule, local
 # east/north displacement calculation, training individual only profiling, low displacement boundary, species summaries and pairwise descriptor

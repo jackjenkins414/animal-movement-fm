@@ -106,6 +106,101 @@ def check_guards(table: pd.DataFrame) -> list[str]:
     return failures
 
 
+# GenAI (16-09-2026): the Tier 3 mode below was written by GenAI to apply preregistration_tier3.md sec 1 mechanically
+TIER3_FIXED = {"ciconia_ciconia": "flying", "cervus_elaphus": "terrestrial", "mirounga_leonina": "marine"}
+TIER3_PROFILE_KEY = {"ciconia_ciconia": "white_stork"}  # the stork's profile row predates the binomial stems
+TIER3_MIN_TRAIN_WINDOWS = 2_000  # preregistration_tier3.md sec 1, candidate condition 4
+TIER3_OUT = REPO / "registered" / "tier3_source_pool.json"
+
+
+def tier3(args: argparse.Namespace) -> None:
+    """Select the nine Tier 3 sources under preregistration_tier3.md sec 1 and weight them under A8."""
+    from animal_movement_fm.analysis.regime_profile import DESCRIPTORS, coverage_distances, select_source_pool
+
+    role_stems = {stem for stem, *_ in ROLES}
+    eligibility = pd.read_csv(RESULTS / "species_eligibility.csv")
+    passing = set(eligibility.loc[eligibility["clears_gate1"].astype(bool), "species"])
+    profiles = pd.read_csv(RESULTS / "regime_profiles.csv")
+    complete = profiles[profiles[DESCRIPTORS].notna().all(axis=1)].set_index("species")
+
+    counts: dict[str, int] = {}
+    for stem in TIER3_FIXED:
+        split_stem = next(split for seg, split, *_ in ROLES if seg == stem)
+        counts[stem] = species_window_counts(stem, split_stem)["train"]
+        if counts[stem] != GUARDS[stem]["train"]:
+            raise SystemExit(f"FAIL: {stem} has {counts[stem]} training windows, registered {GUARDS[stem]['train']}")
+
+    table = []
+    candidates: dict[str, str] = {}
+    for stem in sorted(complete.index):
+        if stem in role_stems or stem in TIER3_PROFILE_KEY.values() or stem == "stork":
+            continue
+        manifest = SPLITS / f"{stem}_split_seed42.json"
+        if stem not in passing or not manifest.exists():
+            table.append({"species": stem, "domain": complete.loc[stem, "domain"], "reason": "fails A7 gate 1"})
+            continue
+        counts[stem] = species_window_counts(stem, stem)["train"]
+        ok = counts[stem] >= TIER3_MIN_TRAIN_WINDOWS
+        table.append({"species": stem, "domain": complete.loc[stem, "domain"], "train_windows": counts[stem],
+                      "reason": "candidate" if ok else f"below {TIER3_MIN_TRAIN_WINDOWS} training windows"})
+        if ok:
+            candidates[stem] = str(complete.loc[stem, "domain"])
+
+    keyed = complete.rename(index={v: k for k, v in TIER3_PROFILE_KEY.items()})
+    rows = keyed.loc[list(TIER3_FIXED) + sorted(candidates)].reset_index()
+    frozen = json.loads((REPO / "registered" / "tier2_descriptor_standardisation.json").read_text())
+    distances = coverage_distances(rows, standardisation=frozen)
+
+    result = select_source_pool(distances, TIER3_FIXED, candidates, counts)
+    pool = result["pool"]
+    weights = draw_probabilities({name: counts[name] for name in pool})
+
+    print("candidates: " + ", ".join(f"{d} {sum(1 for v in candidates.values() if v == d)}"
+                                      for d in ("flying", "terrestrial", "marine")))
+    print(f"pools scored: {result['n_pools_scored']:,}; tied on mean: {result['n_tied_on_mean']}")
+    print(f"selected, mean {result['mean_distance']:.4f}, min {result['min_distance']:.4f}:")
+    domain_of = {**TIER3_FIXED, **candidates}
+    for name in sorted(pool, key=lambda n: (domain_of[n], n)):
+        print(f"  {domain_of[name]:12s} {name:26s} n={counts[name]:9,d}  p={weights[name] * 100:7.3f}%")
+    print("runners up:")
+    for item in result["runners_up"]:
+        print(f"  mean {item['mean_distance']:.4f} min {item['min_distance']:.4f}  added {item['added']}")
+
+    payload = {
+        "_comment": [
+            "Tier 3 source pool selected mechanically under preregistration_tier3.md sec 1, with A8 draw",
+            "probabilities (alpha 0.5) over the selected nine. Written by source_pool_weights.py --tier3.",
+            "Sub-pools (Za, inner-loop folds) are not included; they depend on choices the Tier 3 prereg has not fixed yet.",
+        ],
+        "rule": "preregistration_tier3.md sec 1",
+        "context_length": CONTEXT_LENGTH,
+        "alpha": ALPHA,
+        "min_train_windows": TIER3_MIN_TRAIN_WINDOWS,
+        "standardisation": "registered/tier2_descriptor_standardisation.json",
+        "fixed": TIER3_FIXED,
+        "candidate_table": table,
+        **{k: result[k] for k in ("pool", "added", "mean_distance", "min_distance", "train_windows",
+                                  "n_pools_scored", "n_tied_on_mean", "candidates_per_domain",
+                                  "distance_matrix", "runners_up")},
+        "train_window_counts": {name: counts[name] for name in pool},
+        "source_pool": weights,
+    }
+
+    if TIER3_OUT.exists():
+        previous = json.loads(TIER3_OUT.read_text())
+        same = previous["pool"] == pool and all(
+            abs(previous["source_pool"][k] - weights[k]) <= 1e-12 for k in pool
+        )
+        if not same:
+            raise SystemExit(f"FAIL: {TIER3_OUT.name} already holds a different selection; the rule is run once")
+        print(f"reproduced {TIER3_OUT.relative_to(REPO)}")
+        return
+    if args.no_write:
+        return
+    TIER3_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"wrote {TIER3_OUT.relative_to(REPO)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -113,7 +208,15 @@ def main() -> None:
         action="store_true",
         help="print only; do not write results",
     )
+    parser.add_argument(
+        "--tier3",
+        action="store_true",
+        help="select the nine Tier 3 sources (preregistration_tier3.md sec 1) and write registered/tier3_source_pool.json",
+    )
     args = parser.parse_args()
+    if args.tier3:
+        tier3(args)
+        return
 
     rows = []
     for segments_stem, split_stem, domain, role in ROLES:
@@ -165,6 +268,20 @@ def main() -> None:
         print(f"  {name:32s} {inner}")
 
     print(f"\nguards: {sum(len(v) for v in GUARDS.values())} passed")
+
+    # GenAI catch: the training scripts now read the tracked registered/tier2_source_pool_weights.json, not
+    # the file this script writes; the recomputed weights must still reproduce it exactly
+    registered = json.loads((REPO / "registered" / "tier2_source_pool_weights.json").read_text())
+    drift = [
+        f"{pool}.{species}: {value!r} vs registered {registered_pool[species]!r}"
+        for pool, computed_pool, registered_pool in [("source_pool", full, registered["source_pool"])]
+        + [(f"sub_pools.{k}", v, registered["sub_pools"][k]) for k, v in sub_pools.items()]
+        for species, value in computed_pool.items()
+        if abs(value - registered_pool[species]) > 1e-12
+    ]
+    if drift:
+        raise SystemExit("FAIL: recomputed weights differ from the registered file\n  " + "\n  ".join(drift))
+    print("matches registered/tier2_source_pool_weights.json")
 
     if args.no_write:
         return
