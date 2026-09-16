@@ -247,3 +247,20 @@ def test_the_predictor_applies_the_row_it_was_given():
     second = MovementFMPredictor(model, device="cpu", species_index=1).predict_batch(history, stamps)
     assert first.shape == (3, 2)
     assert not np.allclose(first, second)
+
+def test_domain_rows_read_the_matching_source_row_and_nothing_else():
+    from types import SimpleNamespace
+
+    from experiments.reporting.tier_e_eval import species_row
+
+    with_table = SimpleNamespace(species_embed=object())
+    pool = ["cervus_elaphus", "ciconia_ciconia", "mirounga_leonina"]
+    assert species_row(with_table, pool, "ciconia_ciconia", "E1embed") == 1
+    assert species_row(with_table, pool, "larus_fuscus", "E1embed", "ciconia_ciconia") == 1
+    assert species_row(with_table, pool, "canis_lupus", "E1embed", "cervus_elaphus") == 0
+    with pytest.raises(LookupError):
+        species_row(with_table, pool, "larus_fuscus", "E1embed")
+    with pytest.raises(LookupError):
+        species_row(with_table, pool, "larus_fuscus", "E1embed", "not_in_pool")
+    assert species_row(SimpleNamespace(species_embed=None), pool, "larus_fuscus", "Z", "ciconia_ciconia") is None
+    assert species_row(with_table, ["larus_fuscus"], "larus_fuscus", "E2embed", "ciconia_ciconia") == 0

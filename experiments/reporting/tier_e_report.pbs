@@ -10,6 +10,8 @@
 #     qsub -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
 #   source-species validation (E1embed / E1shuffle, which only have rows for source species):
 #     qsub -v SOURCES=1 -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
+#   held-out species with E1's rows read by domain (Ana's flying/terrestrial/marine label):
+#     qsub -v DOMAIN=1 -l walltime=00:30:00 experiments/reporting/tier_e_report.pbs
 #   one species only, when a rerun does not need the whole table:
 #     qsub -v SOURCES=1,SPECIES=cervus_elaphus -l walltime=00:30:00 experiments/reporting/tier_e_report.pbs
 #
@@ -40,6 +42,9 @@ export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
 cd /g/data/um09/$USER/animal-movement-fm
 
 extra_args=()
+if [ "${DOMAIN:-0}" = "1" ]; then
+  extra_args+=(--domain-rows)
+fi
 if [ "${SOURCES:-0}" = "1" ]; then
   extra_args+=(--sources)
 elif [ "${SOURCES:-0}" != "0" ]; then

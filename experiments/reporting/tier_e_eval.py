@@ -76,6 +76,16 @@ SOURCE_ARMS = (
     ("E1shuffle", T.TIER_E_RESULTS),
 )
 
+# Ana's suggestion of telling the model "flying / terrestrial / marine" 
+DOMAIN_ROW_ARMS = (
+    ("Z", T.RESULTS),
+    ("B", T.RESULTS),
+    ("E1embed", T.TIER_E_RESULTS),
+    ("E1shuffle", T.TIER_E_RESULTS),
+    ("E2embed", T.TIER_E_RESULTS),
+    ("S", T.RESULTS),
+)
+
 # arms trained once per attached species rather than once overall
 SPECIES_ATTACHED_ARMS = frozenset({"Za", "S"}) | frozenset(
     arm for arm, spec in T.TIER_E_ARMS.items() if spec.get("per_species")
@@ -134,7 +144,9 @@ def load_reported_model(results_dir: Path, arm: str, species: str, seed: int):
     return model.eval(), sigma, pool_species
 
 
-def species_row(model, pool_species: list[str], stem: str, arm: str) -> int | None:
+def species_row(
+    model, pool_species: list[str], stem: str, arm: str, domain_source: str | None = None
+) -> int | None:
     """
     Return the lookup row this species should be scored under, or None for an arm with no lookup.
 
@@ -148,6 +160,9 @@ def species_row(model, pool_species: list[str], stem: str, arm: str) -> int | No
     if len(pool_species) == 1:
         # per species arm trains one row on its own attached species; the pool names it
         return 0
+    if domain_source is not None and domain_source in pool_species:
+        # --domain-rows: the unseen species reads the row learned for its domain's source species
+        return pool_species.index(domain_source)
     raise LookupError(
         f"{arm} has no embedding row for {stem} (table covers {pool_species}); this arm is not "
         "zero-shot on that species"
@@ -167,7 +182,9 @@ def quantile_by_individual(frame: pd.DataFrame, mask: np.ndarray, q: float) -> f
     return float(per_individual.mean())
 
 
-def score_species(stem: str, frame: pd.DataFrame, boundary: float, arms, device) -> dict:
+def score_species(
+    stem: str, frame: pd.DataFrame, boundary: float, arms, device, domain_source: str | None = None
+) -> dict:
     """
     Score every arm on one species' validation individuals against persistence.
 
@@ -208,7 +225,7 @@ def score_species(stem: str, frame: pd.DataFrame, boundary: float, arms, device)
                 continue
             model, sigma, pool_species = loaded
             try:
-                row = species_row(model, pool_species, stem, arm)
+                row = species_row(model, pool_species, stem, arm, domain_source)
             except LookupError as error:
                 skipped = str(error)
                 break
@@ -287,7 +304,17 @@ def main() -> None:
             "information is usable, not whether it transfers."
         ),
     )
+    parser.add_argument(
+        "--domain-rows",
+        action="store_true",
+        help=(
+            "score held-out species with any species lookup read at the row of the source species from "
+            "the same domain (gull -> stork, wolf -> red deer, NES -> SOES): a zero-shot domain label"
+        ),
+    )
     args = parser.parse_args()
+    if args.sources and args.domain_rows:
+        raise SystemExit("FAIL: --sources and --domain-rows score different partitions; pick one")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device           : {device}")
@@ -318,7 +345,9 @@ def main() -> None:
                     "species. HELD_OUT was unpacked in the wrong order."
                 )
         fold_of = None
-        arms, mode = ARMS, "held_out_validation"
+        arms, mode = (DOMAIN_ROW_ARMS, "held_out_validation_domain_rows") if args.domain_rows else (
+            ARMS, "held_out_validation"
+        )
 
     if not wanted:
         raise SystemExit(f"FAIL: {args.species!r} is not a species in this mode")
@@ -338,12 +367,15 @@ def main() -> None:
             if fold_of is not None
             else T.validation_frame(stem)
         )
+        domain_source = T.held_out_entry(stem)[4] if args.domain_rows else None
         payload["species"][stem] = score_species(
-            stem, frame, T.boundary_m(profile_key), arms, device
+            stem, frame, T.boundary_m(profile_key), arms, device, domain_source
         )
+        if domain_source is not None:
+            payload["species"][stem]["domain_row_from"] = domain_source
 
     OUT.mkdir(parents=True, exist_ok=True)
-    suffix = "_sources" if args.sources else ""
+    suffix = "_sources" if args.sources else ("_domain_rows" if args.domain_rows else "")
     path = OUT / f"tier_e_validation_metrics{suffix}.json"
     path.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote {path}")
