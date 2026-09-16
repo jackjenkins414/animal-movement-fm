@@ -43,6 +43,7 @@ import pandas as pd
 
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import (
+    ROLE_STEMS,
     make_split,
     make_split_specific,
     save_split,
@@ -125,6 +126,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="overwrite the output file if it already exists",
     )
+    p.add_argument(
+        "--allow-role-species",
+        action="store_true",
+        help="permit --force on a Tier 2 role species' manifest; refused by default under A2",
+    )
     return p.parse_args()
 
 
@@ -137,6 +143,13 @@ def main() -> None:
         raise SystemExit(f"Segments file not found: {segments}")
 
     out = REPO / "splits" / f"{args.name}_split_seed{args.seed}.json"
+
+    # GenAI bug find addition: A2 forbids regenerating a used role manifest, and --force alone used to allow it
+    if out.exists() and args.name in ROLE_STEMS and not args.allow_role_species:
+        raise SystemExit(
+            f"FAIL: {out.name} is a Tier 2 role manifest that a sealed evaluation has used; A2 forbids "
+            "regenerating it. Pass --allow-role-species together with --force only if that is genuinely meant."
+        )
 
     if out.exists() and not args.force:
         raise SystemExit(

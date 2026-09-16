@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "The A8 sampling weights, revised by A9, frozen 16-09-2026 (A16 follow-up). Previously read from the gitignored",
+    "results/source_pool_weights.json, which experiments/data/source_pool_weights.py rewrites. Copied unchanged;",
+    "tier2_inner_loop.load_source_pool checks every draw probability against the A9 percentages before use.",
+    "Tier 3 weights must be written under a different name, never over this file."
+  ],
+  "frozen_on": "2026-09-16",
+  "registered_by": "preregistration_tier2.md amendment A8",
+  "context_length": 12,
+  "alpha": 0.5,
+  "tunable": false,
+  "counts": [
+    {
+      "species": "ciconia_ciconia",
+      "domain": "flying",
+      "role": "source",
+      "n_train": 630,
+      "train": 806595,
+      "val": 146603,
+      "test": 110897,
+      "all": 1064095
+    },
+    {
+      "species": "larus_fuscus",
+      "domain": "flying",
+      "role": "held-out",
+      "n_train": 332,
+      "train": 597407,
+      "val": 10400,
+      "test": 29817,
+      "all": 637624
+    },
+    {
+      "species": "cervus_elaphus",
+      "domain": "terrestrial",
+      "role": "source",
+      "n_train": 306,
+      "train": 556579,
+      "val": 18189,
+      "test": 19106,
+      "all": 593874
+    },
+    {
+      "species": "canis_lupus",
+      "domain": "terrestrial",
+      "role": "held-out",
+      "n_train": 99,
+      "train": 47136,
+      "val": 7258,
+      "test": 7619,
+      "all": 62013
+    },
+    {
+      "species": "mirounga_leonina",
+      "domain": "marine",
+      "role": "source",
+      "n_train": 397,
+      "train": 53076,
+      "val": 1248,
+      "test": 1498,
+      "all": 55822
+    },
+    {
+      "species": "mirounga_angustirostris",
+      "domain": "marine",
+      "role": "held-out",
+      "n_train": 331,
+      "train": 43815,
+      "val": 2338,
+      "test": 2434,
+      "all": 48587
+    }
+  ],
+  "source_pool": {
+    "ciconia_ciconia": 0.4791099267335031,
+    "cervus_elaphus": 0.3979887669304863,
+    "mirounga_leonina": 0.12290130633601053
+  },
+  "sub_pools": {
+    "without_ciconia_ciconia": {
+      "cervus_elaphus": 0.7640551958203051,
+      "mirounga_leonina": 0.2359448041796949
+    },
+    "without_cervus_elaphus": {
+      "ciconia_ciconia": 0.7958488154625195,
+      "mirounga_leonina": 0.20415118453748063
+    },
+    "without_mirounga_leonina": {
+      "ciconia_ciconia": 0.546244031822771,
+      "cervus_elaphus": 0.453755968177229
+    }
+  }
+}

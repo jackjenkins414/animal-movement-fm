@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
 
 from tier2_inner_loop import ( # type: ignore
     GRID,
-    RESULTS as INNER_LOOP_RESULTS,
+    REGISTERED_SELECTION,
     SOURCES,
     boundary_m,
     checkpoint_path,
@@ -167,7 +167,7 @@ def main() -> None:
     elif args.grid_index is not None:
         indices = [args.grid_index]
     else:
-        decision = INNER_LOOP_RESULTS / "tier2_selection.json"
+        decision = REGISTERED_SELECTION
         if not decision.exists():
             raise SystemExit(f"FAIL: {decision} does not exist; pass --grid-index")
         indices = [int(json.loads(decision.read_text())["selected_grid_index"])]

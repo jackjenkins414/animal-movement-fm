@@ -4,7 +4,7 @@
 """
 Tier 2 ingest utilities for building per species window indices and sampling our registered multi-species source pool. 
 Windows follow our A2 continuity rule, and the source species draws use the fixed probabilities stored in 
-results/source_pool_weights.json.
+registered/tier2_source_pool_weights.json (moved from results/ on 16-09-2026, A16 follow-up).
 """
 
 from __future__ import annotations

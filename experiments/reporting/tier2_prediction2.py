@@ -39,7 +39,7 @@ RESULTS = REPO / "results"
 
 # A16; the frozen Tier 2 standardisation used by sealed analyses; the results/copy is a moving screening artefact and must 
 # not be used here
-FROZEN_STANDARDISATION = REPO / "registered" / "registered/tier2_descriptor_standardisation.json"
+FROZEN_STANDARDISATION = REPO / "registered" / "tier2_descriptor_standardisation.json"
 
 # profile keys only; the segment/split identifiers used elsewhere are not needed here
 SOURCES = ("white_stork", "cervus_elaphus", "mirounga_leonina")

@@ -19,6 +19,7 @@ import pandas as pd
 
 from animal_movement_fm.data.build_segments import segments_from_fixes
 from animal_movement_fm.data.resample import BIN_SECONDS
+from animal_movement_fm.data.split import ROLE_STEMS
 
 
 # per individual metadata to keep in the segment file
@@ -63,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="individuals resampled per batch; lower it if memory is tight to avoid the before",
+    )
+    parser.add_argument(
+        "--allow-role-species",
+        action="store_true",
+        help="permit rewriting a Tier 2 role species' segments; refused by default because their split manifests "
+             "are frozen and used (A2)",
     )
     parser.add_argument(
         "--min-segment-bins",
@@ -181,6 +188,15 @@ def main() -> None:
 
     if args.input.resolve() == args.output.resolve():
         raise SystemExit("Input and output paths must differ")
+
+    # GenAI bug find: same A2 refusal extract_species_fixes.py already applies one step upstream
+    stem = args.output.name.removesuffix(".parquet").removesuffix("_segments")
+    if stem in ROLE_STEMS and not args.allow_role_species:
+        raise SystemExit(
+            f"FAIL: {stem} holds a Tier 2 role and its frozen split manifest has been used. Rewriting its segments "
+            "moves the population underneath a sealed manifest, which A2 forbids. Pass --allow-role-species only "
+            "if that is genuinely what you mean."
+        )
 
     segments, stats = build(args)
 

@@ -30,7 +30,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tier2_inner_loop import GRID, SOURCES  # single source of truth for the registered grid order
+# single source of truth for the registered grid order, the registered Tier 2 artefacts and the A4 boundary
+from tier2_inner_loop import GRID, REGISTERED_SELECTION, SOURCES, boundary_m, load_source_pool
 
 from animal_movement_fm.data.benchmark import load_split_frame
 from animal_movement_fm.data.multispecies import SourcePool, SpeciesWindows
@@ -48,10 +49,11 @@ from animal_movement_fm.train.pool import PreparedPool
 REPO = Path(__file__).resolve().parents[2]
 PROCESSED = REPO / "data" / "processed"
 SPLITS = REPO / "splits"
-WEIGHTS = REPO / "results" / "source_pool_weights.json"
-INNER_LOOP_RESULTS = REPO / "results" / "tier2_inner_loop"
 RESULTS = REPO / "results" / "tier2_final"
 CHECKPOINTS = REPO / "checkpoints" / "tier2_final"
+
+# the configuration the registered rule selected (preregistration_tier2_freeze.md sec 1); the selection file must name it
+REGISTERED_GRID_INDEX = 11
 
 # Tier 1 multi-seed sweep  reused unchanged across all trained arms
 SEEDS: tuple[int, ...] = (0, 1, 2, 3, 4)
@@ -584,7 +586,7 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
         stem: _load_species_windows(stem, split_stem, "train")
         for stem, split_stem, *_ in wanted
     }
-    pool = SourcePool.from_registered_weights(species, WEIGHTS, pool=node)
+    pool = load_source_pool(species, pool=node)
     return (
         PreparedPool.from_source_pool(pool, device=device, sigma=tier_e_scale_floor(run)),
         node,
@@ -675,17 +677,19 @@ def selected_grid_index(explicit: int | None) -> tuple[int, str]:
         )
         return explicit, "explicit_cli"
 
-    path = INNER_LOOP_RESULTS / "tier2_selection.json"
+    path = REGISTERED_SELECTION
     if not path.exists():
         raise SystemExit(
-            f"FAIL: {path} does not exist, so no configuration has been selected by the registered "
-            "rule. Run `tier2_inner_loop.py --select` over the 36 grid results first, or pass "
+            f"FAIL: {path} does not exist. It is the tracked copy of the selection "
+            "`tier2_inner_loop.py --select` made over the 36 grid results; restore it from git, or pass "
             "--grid-index explicitly if you are deliberately reproducing one cell."
         )
     decision = json.loads(path.read_text())
     index = int(decision["selected_grid_index"])
-    if not 0 <= index < len(GRID):
-        raise SystemExit(f"{path} names grid index {index}, which is outside the registered grid")
+    if index != REGISTERED_GRID_INDEX:
+        raise SystemExit(
+            f"FAIL: {path} names grid index {index}; the freeze registers {REGISTERED_GRID_INDEX}"
+        )
     return index, path.name
 
 
@@ -703,13 +707,6 @@ def validation_frame(species: str) -> pd.DataFrame:
     return frame[
         ["individual_id", "bin_index", "timestamp", "lon", "lat"]
     ].reset_index(drop=True)
-
-
-def boundary_m(profile_key: str) -> float:
-    table = pd.read_csv(REPO / "results" / "regime_profiles.csv").set_index("species")
-    if profile_key not in table.index:
-        raise SystemExit(f"{profile_key} has no row in results/regime_profiles.csv")
-    return float(table.loc[profile_key, "selected_boundary_m"])
 
 
 def apply_evaluation_floor(

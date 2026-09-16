@@ -11,7 +11,14 @@
     "strata underneath a sealed evaluation: Larus fuscus 411.45 -> 181.88 m, Canis lupus 131.30 -> 46.32 m,",
     "Mirounga angustirostris 1609.44 -> 213.17 m. Tracked here so the decision cannot move again unnoticed.",
     "",
-    "Reproduce with: regime_profile.py --decide-threshold --reselect, which is the only path that re-selects."
+    "Reproduce with: regime_profile.py --decide-threshold --reselect, which is the only path that re-selects.",
+    "",
+    "tier2_boundaries_m added 16-09-2026 (A16 follow-up): A16 froze the rule but not the numbers, and boundary_m()",
+    "still read selected_boundary_m from the gitignored CSV, so re-profiling a role species could move a boundary",
+    "under the same rule. These are the six values every stored Tier 2 output was computed with; the three",
+    "held-out values equal regime_boundary_m in results/tier2_sealed/tier2_verdict.json. boundary_m() now returns",
+    "these for role species and fails if the CSV disagrees. Stork is 61.10 m here; the 60.9 m in A1/A4 is",
+    "reference_boundary_m, the calibration constant for the p75/p90 branches, and is unused under 0.1 x p50."
   ],
   "frozen_on": "2026-09-15",
   "registered_under": "preregistration_tier2.md A4, scope fixed by A16",
@@ -22,5 +29,13 @@
   "pooled_only_species": [],
   "reasons": [
     "all species passed the median-anchor guards"
-  ]
+  ],
+  "tier2_boundaries_m": {
+    "white_stork": 61.10385331506313,
+    "larus_fuscus": 411.451080530957,
+    "cervus_elaphus": 49.41235795670227,
+    "canis_lupus": 131.3024030590991,
+    "mirounga_leonina": 1378.4334076444622,
+    "mirounga_angustirostris": 1609.4390043586309
+  }
 }

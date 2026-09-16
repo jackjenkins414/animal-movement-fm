@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import asdict
 
@@ -71,7 +72,7 @@ REPO = Path(__file__).resolve().parents[2]
 OUT_CSV = REPO / "results" / "regime_profiles.csv"
 OUT_DECISION = REPO / "results" / "regime_threshold_decision.json"
 # Tracked, unlike everything under results/. The A4 decision is made once and carried forward; see the file.
-FROZEN_DECISION = REPO / "registered" / "registered/tier2_regime_decision.json"
+FROZEN_DECISION = REPO / "registered" / "tier2_regime_decision.json"
 OUT_STANDARDISATION = REPO / "results" / "regime_descriptor_standardisation.json"
 
 
@@ -261,7 +262,15 @@ def main() -> None:
         # than re-selected over a table that keeps growing. Re-selecting on 15-09-2026 moved the universal rule
         # from 0.1 x p50 to 0.00603816 x p90 because two bird candidates have a median step inside their own low
         # displacement component, and that silently rewrote the strata a sealed evaluation had already used.
-        if FROZEN_DECISION.exists() and not args.reselect:
+        # GenAI catch: a missing frozen file used to fall through to re selection silently, which is how a
+        # doubled path in FROZEN_DECISION switched A16 off without anyone noticing; GenAI changed to be a hard 
+        # failure.
+        if not args.reselect and not FROZEN_DECISION.exists():
+            raise SystemExit(
+                f"FAIL: {FROZEN_DECISION} is missing. The A4 decision is frozen and only --reselect may re-run "
+                "the tree; restore the file from git rather than letting the tree re-select."
+            )
+        if not args.reselect:
             frozen = json.loads(FROZEN_DECISION.read_text())
             decision = ThresholdDecision(
                 anchor_quantile=int(frozen["anchor_quantile"]),
@@ -275,6 +284,17 @@ def main() -> None:
         else:
             decision = select_threshold_rule(ready)
         decided = apply_threshold_decision(ready, decision)
+        if not args.reselect:
+            # the frozen rule must also reproduce the frozen Tier 2 numbers before anything is written
+            applied = decided.set_index("species")["selected_boundary_m"]
+            for species, value in frozen["tier2_boundaries_m"].items():
+                if species in applied.index and not math.isclose(
+                    float(applied[species]), float(value), rel_tol=1e-9, abs_tol=1e-9
+                ):
+                    raise SystemExit(
+                        f"FAIL: the frozen rule now gives {species} {float(applied[species])!r} m against the "
+                        f"registered {float(value)!r} m, so its profile row has changed. Nothing was written."
+                    )
         selected = decided.set_index("species")[
             [
                 "selected_anchor_quantile",

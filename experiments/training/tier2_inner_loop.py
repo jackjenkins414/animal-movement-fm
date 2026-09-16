@@ -56,6 +56,23 @@ CHECKPOINTS = REPO / "checkpoints" / "tier2_inner_loop"
 # than relying on a name filter.
 DIAGNOSTICS = REPO / "results" / "tier2_diagnostics"
 
+# Registered Tier 2 artefacts. Tracked in git, never rewritten by a script; anything a sealed or registered
+# computation reads lives here rather than in the gitignored results/ (A16).
+REGISTERED = REPO / "registered"
+REGISTERED_DECISION = REGISTERED / "tier2_regime_decision.json"
+REGISTERED_WEIGHTS = REGISTERED / "tier2_source_pool_weights.json"
+REGISTERED_SELECTION = REGISTERED / "tier2_selection.json"
+PROFILES_CSV = REPO / "results" / "regime_profiles.csv"
+
+# A9 draw probabilities in percent, to the three decimals the amendment states. Checked against the registered
+# weights file on every load, so the guard compares against constants rather than against another written file.
+REGISTERED_DRAW_PERCENT: dict[str, dict[str, float]] = {
+    "source_pool": {"ciconia_ciconia": 47.911, "cervus_elaphus": 39.799, "mirounga_leonina": 12.290},
+    "sub_pools.without_ciconia_ciconia": {"cervus_elaphus": 76.406, "mirounga_leonina": 23.594},
+    "sub_pools.without_cervus_elaphus": {"ciconia_ciconia": 79.585, "mirounga_leonina": 20.415},
+    "sub_pools.without_mirounga_leonina": {"ciconia_ciconia": 54.624, "cervus_elaphus": 45.376},
+}
+
 # (segments stem, split manifest stem, profile row key)
 SOURCES: tuple[tuple[str, str, str], ...] = (
     ("ciconia_ciconia", "stork", "white_stork"),
@@ -331,11 +348,63 @@ def checkpoint_path(
     return CHECKPOINTS / f"{identifier}_registered_fullfm_{mode}_{target_steps}.pt"
 
 
-def boundary_m(profile_key: str) -> float:
-    table = pd.read_csv(REPO / "results" / "regime_profiles.csv").set_index("species")
+# GenAI reference catch: boundary_m, load_source_pool and the registered constants above were written by GenAI
+# during my A16 follow up audit, replacing my original boundary_m (which read the CSV column directly) and the
+# inline weights path in training_pool
+def boundary_m(
+    profile_key: str,
+    *,
+    registered: Path = REGISTERED_DECISION,
+    profiles: Path = PROFILES_CSV,
+) -> float:
+    """
+    Return the A4 regime boundary for one species.
+
+    Tier 2 role species get the frozen value from `registered/tier2_regime_decision.json`, and the run fails if the
+    profile CSV has since drifted from it, since a moved boundary silently restratifies sealed windows. Species with
+    no Tier 2 role get the CSV value, which is where Tier 3/4 candidates live until they are registered.
+    """
+    frozen = json.loads(Path(registered).read_text())["tier2_boundaries_m"]
+    table = pd.read_csv(profiles).set_index("species")
+    if profile_key in frozen:
+        value = float(frozen[profile_key])
+        if profile_key in table.index:
+            live = float(table.loc[profile_key, "selected_boundary_m"])
+            if not math.isclose(live, value, rel_tol=1e-9, abs_tol=1e-9):
+                raise SystemExit(
+                    f"FAIL: {profile_key} boundary is {value!r} m in {Path(registered).name} but {live!r} m in "
+                    f"{Path(profiles).name}. The registered value governs; something rewrote the profile table."
+                )
+        return value
     if profile_key not in table.index:
-        raise SystemExit(f"{profile_key} has no row in results/regime_profiles.csv")
+        raise SystemExit(f"{profile_key} has no row in {Path(profiles).name} and no registered boundary")
     return float(table.loc[profile_key, "selected_boundary_m"])
+
+# GenAI bug catch; I added this function it suggested in chat
+def check_registered_weights(payload: dict) -> None:
+    """
+    Fail unless every registered pool in `payload` reproduces the A9 draw percentages to three decimals.
+    """
+    for pool, expected in REGISTERED_DRAW_PERCENT.items():
+        node = payload
+        for part in pool.split("."):
+            node = node[part]
+        got = {name: round(100.0 * float(p), 3) for name, p in node.items()}
+        if got != expected:
+            raise SystemExit(f"FAIL: registered weights for {pool} are {got}, A9 registers {expected}")
+
+# GenAI bug catch; I added this function it suggested in chat 
+def load_source_pool(
+    species: dict[str, SpeciesWindows],
+    pool: str = "source_pool",
+    *,
+    weights: Path = REGISTERED_WEIGHTS,
+) -> SourcePool:
+    """
+    Build a registered source pool or leave-one-out sub-pool after checking the weights against A9.
+    """
+    check_registered_weights(json.loads(Path(weights).read_text()))
+    return SourcePool.from_registered_weights(species, weights, pool=pool)
 
 
 def training_pool(fold_index: int, device: torch.device) -> PreparedPool:
@@ -356,11 +425,7 @@ def training_pool(fold_index: int, device: torch.device) -> PreparedPool:
             context_length=CONTEXT_LENGTH,
             name=segments_stem,
         )
-    pool = SourcePool.from_registered_weights(
-        species,
-        REPO / "results" / "source_pool_weights.json",
-        pool=f"sub_pools.without_{held_out}",
-    )
+    pool = load_source_pool(species, pool=f"sub_pools.without_{held_out}")
     return PreparedPool.from_source_pool(pool, device=device)
 
 

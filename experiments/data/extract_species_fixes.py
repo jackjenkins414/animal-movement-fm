@@ -26,6 +26,7 @@ from animal_movement_fm.data.inclusion import (
     policy_report,
 )
 from animal_movement_fm.data.qc import SPEED_CEILINGS, flag_speed, structural_qc
+from animal_movement_fm.data.split import ROLE_SPECIES
 
 REPO = Path(__file__).resolve().parents[2]
 PROCESSED = REPO / "data" / "processed"
@@ -54,17 +55,8 @@ TIER2_AND_CANDIDATES = (
     "Bison bison",
 )
 
-# tier 2 role species. Their split manifests are frozen, so these extracts must not be rebuilt
-ROLE_SPECIES = frozenset(
-    {
-        "Ciconia ciconia",
-        "Larus fuscus",
-        "Cervus elaphus",
-        "Canis lupus",
-        "Mirounga leonina",
-        "Mirounga angustirostris",
-    }
-)
+# tier 2 role species (ROLE_SPECIES, imported from data.split); their split manifests are frozen, so these extracts
+# must not be rebuilt
 
 # non Movebank species and their source parquet paths relative to --data-root
 NON_MOVEBANK_SOURCES: dict[str, str] = {

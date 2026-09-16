@@ -122,3 +122,88 @@ def test_probe_report_validates_three_full_fm_folds_and_writes_decision(tmp_path
         "fewer_steps",
     ]
     assert len(decision["source_files"]) == 3
+
+
+# GenAI ref: I gave it this test file to expand on; the registered-artefact tests below were written by GenAI during the A16 follow up
+# audit, after a doubled path (registered/registered/...) had silently switched the A16 freeze off with every test green
+
+import pandas as pd
+
+import experiments.training.tier2_final_train as final_train
+from animal_movement_fm.data.split import ROLE_STEMS
+from experiments.data import regime_profile as regime_profile_script
+from experiments.reporting import tier2_prediction2
+
+SEALED_BOUNDARIES_M = {
+    "larus_fuscus": 411.451080530957,
+    "canis_lupus": 131.3024030590991,
+    "mirounga_angustirostris": 1609.4390043586309,
+}
+
+
+def test_every_registered_path_the_code_reads_exists():
+    paths = (
+        inner_loop.REGISTERED_DECISION,
+        inner_loop.REGISTERED_WEIGHTS,
+        inner_loop.REGISTERED_SELECTION,
+        regime_profile_script.FROZEN_DECISION,
+        tier2_prediction2.FROZEN_STANDARDISATION,
+    )
+    for path in paths:
+        assert path.parent == inner_loop.REGISTERED, path
+        assert path.exists(), path
+
+
+def test_registered_weights_reproduce_the_a9_percentages():
+    inner_loop.check_registered_weights(json.loads(inner_loop.REGISTERED_WEIGHTS.read_text()))
+
+
+def test_the_weight_check_fires_on_a_small_drift():
+    payload = json.loads(inner_loop.REGISTERED_WEIGHTS.read_text())
+    payload["source_pool"]["ciconia_ciconia"] += 1e-4  # one hundredth of a percentage point
+    with pytest.raises(SystemExit, match="A9 registers"):
+        inner_loop.check_registered_weights(payload)
+
+
+def test_registered_selection_names_grid_11():
+    decision = json.loads(inner_loop.REGISTERED_SELECTION.read_text())
+    assert decision["selected_grid_index"] == final_train.REGISTERED_GRID_INDEX == 11
+    assert final_train.selected_grid_index(None) == (11, "tier2_selection.json")
+
+
+def test_registered_boundaries_hold_the_frozen_rule_and_the_sealed_values():
+    decision = json.loads(inner_loop.REGISTERED_DECISION.read_text())
+    assert (decision["anchor_quantile"], decision["multiplier"]) == (50, 0.1)
+    frozen = decision["tier2_boundaries_m"]
+    assert {key: frozen[key] for key in SEALED_BOUNDARIES_M} == SEALED_BOUNDARIES_M
+    assert set(frozen) == {source[2] for source in inner_loop.SOURCES} | set(SEALED_BOUNDARIES_M)
+
+
+def _profiles(tmp_path, rows):
+    path = tmp_path / "profiles.csv"
+    pd.DataFrame(rows, columns=["species", "selected_boundary_m"]).to_csv(path, index=False)
+    return path
+
+
+def test_boundary_m_returns_registered_values_for_roles_and_the_csv_for_candidates(tmp_path):
+    profiles = _profiles(tmp_path, [("larus_fuscus", SEALED_BOUNDARIES_M["larus_fuscus"]), ("new_bird", 12.5)])
+    assert inner_loop.boundary_m("larus_fuscus", profiles=profiles) == SEALED_BOUNDARIES_M["larus_fuscus"]
+    assert inner_loop.boundary_m("new_bird", profiles=profiles) == 12.5
+
+
+def test_boundary_m_fails_when_the_profile_table_has_moved(tmp_path):
+    # the value the 15-09 re-selection wrote for L. fuscus
+    profiles = _profiles(tmp_path, [("larus_fuscus", 181.88180190237625)])
+    with pytest.raises(SystemExit, match="registered value governs"):
+        inner_loop.boundary_m("larus_fuscus", profiles=profiles)
+
+
+def test_final_train_uses_the_shared_boundary_function():
+    assert final_train.boundary_m.__module__ == "tier2_inner_loop"
+    assert final_train.boundary_m.__name__ == "boundary_m"
+
+
+def test_role_stems_cover_every_tier2_role_file():
+    stems = {s[0] for s in inner_loop.SOURCES} | {s[1] for s in inner_loop.SOURCES}
+    stems |= {h[0] for h in final_train.HELD_OUT} | {h[1] for h in final_train.HELD_OUT}
+    assert stems <= ROLE_STEMS

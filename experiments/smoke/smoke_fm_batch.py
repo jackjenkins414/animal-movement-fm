@@ -21,7 +21,7 @@ from animal_movement_fm.train.loss import normalised_huber
 REPO = Path(__file__).resolve().parents[2]
 PROCESSED = REPO / "data" / "processed"
 SPLITS = REPO / "splits"
-WEIGHTS = REPO / "results" / "source_pool_weights.json"
+WEIGHTS = REPO / "registered" / "tier2_source_pool_weights.json"  # tracked copy (A16 follow up, 16-09-2026)
 
 # Segments stem, split manifest stem, registered training partition windows (A9)
 SOURCES = (

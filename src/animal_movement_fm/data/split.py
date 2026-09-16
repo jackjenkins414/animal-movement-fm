@@ -427,6 +427,23 @@ def stork_split(repo_root: str | Path | None = None) -> Split:
         )
     return load_split(path)
 
+
+# Tier 2 role species. Their split manifests have been used by a sealed evaluation, so A2 forbids rebuilding the
+# extract, the segments or the manifest underneath them. Stems are the lowercase binomial used for
+# `data/processed/<stem>_segments.parquet` and `splits/<stem>_split_seed42.json`, plus the Tier 1 name "stork".
+# (Moved here from experiments/data/extract_species_fixes.py on 16-09-2026 so every writer shares one set; GenAI.)
+ROLE_SPECIES = frozenset(
+    {
+        "Ciconia ciconia",
+        "Larus fuscus",
+        "Cervus elaphus",
+        "Canis lupus",
+        "Mirounga leonina",
+        "Mirounga angustirostris",
+    }
+)
+ROLE_STEMS = frozenset({"stork"} | {name.lower().replace(" ", "_") for name in ROLE_SPECIES})
+
 # GenAI ref: GenAI was used to help draft the summary code and the `__main__` summary printout (I had to be somewhere
 # and just wanted the rest of the file finsihed before then; I could have written it since it is straightforward, just
 # tedious). We did validate the output by checking the reported individual/window counts against the `counts` table,
