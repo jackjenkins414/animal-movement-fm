@@ -517,6 +517,16 @@ The low-displacement ratios become more extreme because lowering the boundary al
 **Interpretation.** The registered **`0.1 × p50`** analysis remains the Tier 2 result. The sensitivity analysis supports only the narrower conclusion that the **WEAK/NULL verdict, travel regime comparisons and low-displacement failure are robust to a substantially tighter regime boundary**.
 
 
+### A17; 16-09-2026: trait conditioning deferred past Tier 3; A9's scope stated exactly; the A16 freeze repaired
+
+**Trait conditioning.** Sec 5.1 registered trait conditioning as a Tier 3 prediction, because nine source species give the first pool with enough distinct conditioning vectors to test it. It is **not** run in Tier 3. Tier 3 keeps Tier 2's FM package unchanged, so that the source pool is the only difference between the tiers (`preregistration_tier3.md`). We will move trait conditioning to a later and separately registered ablation on the Tier 3 and Tier 4 pools. 
+
+**A9's scope.** In our A9 said we said correct for a GPS corpus, where every species flags zero fixes; but that is inaccurate. We only rebuilt the two marine role species under A9. The four GPS role species' extracts predate it and still hold fixes carrying the speed flags we dropped in A9; that being *C. ciconia* at 110,909 of 161.5M, *L. fuscus* 4,625, *C. elaphus* 47, *C. lupus* 45 (counted from the extract files). After resampling to one fix per bin, 2,166 of 1.25M stork segment rows (0.17%) were flagged, 82 for *L. fuscus* (one in its test individuals), 22 for *C. elaphus*, and 1 for *C. lupus* (none in its test individuals). A2 forbids rebuilding them, so we instead declare this as a limitation. 
+
+**The A16 freeze was not in force.** The committed paths to both A16 artefacts both read `registered/registered/...` (an error GenAI found). As a result, `regime_profile.py --decide-threshold` silently fell back to just re selecting our previous A4 rule, and `tier2_prediction2.py` could not run. We've now fixed the paths, so a missing frozen file is now a hard failure, and the six Tier 2 boundaries, the A8/A9 weights and the grid 11 selection are now tracked under `registered/` and checked against constants on load. Before the repair, the profile table still held `0.1 x p50` and the sealed boundaries. After it, `tier2_prediction2.py` reproduces 3.2115 / 2.4447 / 1.8777.
+
+**Status.** No sealed partition was opened, no model was trained, and no Tier 2 number changed.
+
 ## GenAI Reference 
 
 I initially used GenAI by giving it this preregistration, which I had written myself, and asking whether the success criteria seemed reasonable for the scope of my project (which I outlined in the chat). It agreed that the criteria was appropriate, but pointed out one issue I had overlooked; trait conditioning is not meaningfully testable in Tier 2 because the model sees only three source species, and therefore only three distinct trait vectors. At that scale, the traits are perfectly confounded with species identity, so the model could simply use them as a species lookup rather than learn a genuinely transferable relationship between biological traits and movement.

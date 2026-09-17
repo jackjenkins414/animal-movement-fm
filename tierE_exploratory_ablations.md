@@ -25,3 +25,22 @@ Rough order of what I want to do (and hence what made me want to add this file t
 5. **Trait conditioning**, descriptively.
 
 Not exhaustive; I'll keep adding things as I go and this file is timestamped unlike my ideas in `notes.md` (gitignored) so it is legit. 
+
+## 17-09-2026: single species architecture ablations (John, 09-09)
+
+Written before any of these runs. John's feedback from a recent meeting was essentially: "ablation studies on the single species may tell you what is missing in the foundation model." Nothing in the study yet asks whether the FM package helps *within* one species. If it doesn't, the Tier 2 failure isn't a transfer failure, and adding source species can't fix it.
+
+- **Arms:** the architecture 2x2 trained on one species' own training individuals with S's recipe (20,000 steps, selected rate, random initialisation, checkpoint selection on that species' validation individuals).
+  - `SB`: plain trunk.
+  - `SBrecon`: plus reconstruction.
+  - `SZrecon`: plus conditioning.
+  - Full package: `SZ` on stork, and the registered `S` on the held-out species.
+- **Species:** white stork (well powered; 105 validation individuals) plus the three held-out species (10 each; noisy, but NES carries the only strong signal).
+- **Runs:** Tier E plan indices 75-139, 65 runs. Scored with `tier_e_eval.py --single-species`.
+- **Reading, fixed now:** on each species, compare the four cells against persistence and against each other.
+  - If `SZ`/`S` does not beat `SB` on stork, the package adds nothing even with ample single species data.
+  - If `SBrecon` beats `SB` within a species, the reconstruction gain seen in pooled Brecon on NES is not a transfer effect.
+  - Gaps inside the +/- 0.05 noise scale are unresolved.
+- Validation only, as always here. The stork validation individuals were already read by the Tier 2 inner loop.
+
+The 40,000 step budget check for the nine-source pool is built with the Tier 3 code instead, because it needs that pool.
