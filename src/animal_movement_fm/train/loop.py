@@ -170,6 +170,8 @@ class TrainConfig:
     random_species_labels: bool = False
     # E2: everything except the species lookup is held fixed, so the only thing fitted is identity
     freeze_except_species_embedding: bool = False
+    # Tier 3 baseline ladder (17-09-2026): the sequence encoder; configurations written before this field rebuild as transformers
+    trunk: str = "transformer"
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -200,6 +202,7 @@ class TrainConfig:
             use_context_conditioning=self.use_context_conditioning,
             n_species=self.n_species,
             species_embed_dim=self.species_embed_dim,
+            trunk=self.trunk,
         )
 
 

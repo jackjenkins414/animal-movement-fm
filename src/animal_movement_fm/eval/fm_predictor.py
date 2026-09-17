@@ -118,23 +118,7 @@ class MovementFMPredictor:
                 device=self.device,
             )
 
-        with torch.no_grad():
-            output = self.model(
-                torch.as_tensor(
-                    features,
-                    dtype=torch.float32,
-                    device=self.device,
-                ),
-                species=species,
-            )
-
-        # only the forecast output is scored if the reconstruction head is enabled
-        prediction = output[0] if isinstance(output, tuple) else output
-
-        step_m = unscale_prediction(
-            prediction.cpu().numpy().astype(float),
-            scale,
-        )
+        step_m = unscale_prediction(self._forward(features, species), scale)
 
         anchor = history[:, -1, :]
         lon, lat = enu_to_lonlat(
@@ -144,6 +128,19 @@ class MovementFMPredictor:
             anchor[:, 1],
         )
         return np.stack([lon, lat], axis=-1)
+
+    def _forward(self, features: np.ndarray, species) -> np.ndarray:
+        """
+        Return normalised `(east, north)` predictions for encoded windows of shape `(B, C-1, N_FEATURES)`.
+        """
+        with torch.no_grad():
+            output = self.model(
+                torch.as_tensor(features, dtype=torch.float32, device=self.device),
+                species=species,
+            )
+        # only the forecast output is scored if the reconstruction head is enabled
+        prediction = output[0] if isinstance(output, tuple) else output
+        return prediction.cpu().numpy().astype(float)
 
     def predict(self, context) -> np.ndarray:
         """
@@ -167,6 +164,24 @@ class MovementFMPredictor:
             history[None, ...],
             timestamps[None, ...],
         )[0]
+
+
+# GenAI reference: I hadn't thought to add this adapter; GenAI said I missed it when I paste the file; it so any model with `predict(features)` 
+# can use the same evaluation path
+class WindowModelPredictor(MovementFMPredictor):
+    """
+    Wrap any model exposing `predict(features) -> (B, 2)` on encoded windows, in normalised ENU units.
+    """
+
+    def __init__(self, model, *, name: str | None = None, sigma: float = SCALE_FLOOR_M) -> None:
+        self.model = model
+        self.name = name or getattr(model, "name", "window_model")
+        self.sigma = float(sigma)
+        self.species_index = None
+        self.device = None
+
+    def _forward(self, features: np.ndarray, species) -> np.ndarray:
+        return np.asarray(self.model.predict(features), dtype=float)
 
 
 def evaluate_batched(

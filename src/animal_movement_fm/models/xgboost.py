@@ -601,3 +601,91 @@ class XGBoost:
         next_pos[0] += dlon_hat
         next_pos[1] += dlat_hat
         return next_pos
+
+# GenAI reference: WindowXGBoost was written by GenAI for the Tier 3 baseline ladder just due to time contraints. I checked the code and tested it. 
+class WindowXGBoost:
+    """
+    Will complete this later. 
+    """
+
+    def __init__(
+        self,
+        *,
+        n_estimators: int = 200,
+        max_depth: int = 6,
+        learning_rate: float = 0.1,
+        huber_slope: float = 1.0,
+        random_state: int = 0,
+        n_jobs: int | None = None,
+        name: str = "window_xgboost",
+    ) -> None:
+        self.params = {
+            "n_estimators": int(n_estimators),
+            "max_depth": int(max_depth),
+            "learning_rate": float(learning_rate),
+            "objective": "reg:pseudohubererror",
+            "huber_slope": float(huber_slope),
+            "tree_method": "hist",
+            "random_state": int(random_state),
+            "n_jobs": n_jobs,
+        }
+        self.name = name
+        self.models_: list[XGBRegressor] | None = None
+        self.n_features_: int | None = None
+
+    @staticmethod
+    def _flatten(features: np.ndarray) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float32)
+        if features.ndim != 3:
+            raise ValueError(f"features must be (N, tokens, channels); got {features.shape}")
+        return features.reshape(features.shape[0], -1)
+
+    def fit(self, features: np.ndarray, targets: np.ndarray) -> "WindowXGBoost":
+        x = self._flatten(features)
+        y = np.asarray(targets, dtype=np.float32)
+        if y.shape != (x.shape[0], 2):
+            raise ValueError(f"targets must be (N, 2) normalised displacements; got {y.shape}")
+        if not (np.isfinite(x).all() and np.isfinite(y).all()):
+            raise ValueError("non-finite features or targets; the registered encoding should never produce them")
+        self.models_ = [XGBRegressor(**self.params).fit(x, y[:, axis]) for axis in (0, 1)]
+        self.n_features_ = x.shape[1]
+        return self
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        if self.models_ is None:
+            raise RuntimeError("fit or load the model before predicting")
+        x = self._flatten(features)
+        if x.shape[1] != self.n_features_:
+            raise ValueError(f"expected {self.n_features_} flattened features, got {x.shape[1]}")
+        return np.stack([model.predict(x) for model in self.models_], axis=-1).astype(float)
+
+    def save(self, stem) -> None:
+        """Write `<stem>_east.ubj`, `<stem>_north.ubj` and `<stem>_meta.json`."""
+        import json
+        from pathlib import Path
+
+        if self.models_ is None:
+            raise RuntimeError("nothing to save; the model is not fitted")
+        stem = Path(stem)
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        for axis, model in zip(("east", "north"), self.models_):
+            model.save_model(f"{stem}_{axis}.ubj")
+        Path(f"{stem}_meta.json").write_text(
+            json.dumps({"params": self.params, "n_features": self.n_features_, "name": self.name}, indent=2) + "\n"
+        )
+
+    @classmethod
+    def load(cls, stem) -> "WindowXGBoost":
+        import json
+        from pathlib import Path
+
+        meta = json.loads(Path(f"{stem}_meta.json").read_text())
+        params = {k: v for k, v in meta["params"].items() if k not in ("objective", "tree_method")}
+        model = cls(**params, name=meta["name"])
+        model.models_ = []
+        for axis in ("east", "north"):
+            regressor = XGBRegressor()
+            regressor.load_model(f"{stem}_{axis}.ubj")
+            model.models_.append(regressor)
+        model.n_features_ = int(meta["n_features"])
+        return model

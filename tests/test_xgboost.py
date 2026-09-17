@@ -583,3 +583,27 @@ class TestSeasonFeatures:
         history = yearlong_df.loc[yearlong_df.individual_id == "ind_0", ["lon", "lat"]].to_numpy()[:10]
         pred = model.predict(PredictionContext(history=history))
         assert pred.shape == (2,) and np.all(np.isfinite(pred))
+
+
+# tests for WindowXGBoost the Tier 3 XGBoost rung on the registered windows.
+def test_window_xgboost_fits_saves_and_reloads(tmp_path):
+    from animal_movement_fm.models.xgboost import WindowXGBoost
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(1500, 11, 12)).astype(np.float32)
+    y = np.stack([0.8 * x[:, -1, 0], -0.5 * x[:, -1, 1]], axis=-1)
+    model = WindowXGBoost(n_estimators=40).fit(x, y)
+    pred = model.predict(x[:50])
+    assert pred.shape == (50, 2)
+    assert np.corrcoef(pred[:, 0], y[:50, 0])[0, 1] > 0.9
+    model.save(tmp_path / "rung")
+    np.testing.assert_allclose(WindowXGBoost.load(tmp_path / "rung").predict(x[:50]), pred)
+
+
+def test_window_xgboost_rejects_bad_shapes():
+    from animal_movement_fm.models.xgboost import WindowXGBoost
+
+    with pytest.raises(ValueError):
+        WindowXGBoost().fit(np.zeros((10, 132)), np.zeros((10, 2)))
+    with pytest.raises(ValueError):
+        WindowXGBoost().fit(np.zeros((10, 11, 12)), np.zeros((10, 3)))

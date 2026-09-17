@@ -203,3 +203,51 @@ def test_model_is_deterministic_in_eval_mode():
     features, _ = _batch()
     with torch.no_grad():
         assert torch.allclose(model(features), model(features))
+
+
+# tests for the Tier 3 LSTM trunk and the window model predictor 
+def test_lstm_trunk_forward_and_backward():
+    model = MovementFM(d_model=16, num_layers=1, use_fm_package=False, trunk="lstm")
+    features, _ = _batch()
+    out = model(features)
+    assert out.shape == (features.shape[0], 2)
+    out.sum().backward()
+    assert all(p.grad is not None for p in model.parameters())
+    assert model.pos_encoder is None and isinstance(model.encoder, torch.nn.LSTM)
+
+
+def test_lstm_trunk_refuses_the_fm_package():
+    with pytest.raises(ValueError):
+        MovementFM(d_model=16, num_layers=1, use_fm_package=True, trunk="lstm")
+    with pytest.raises(ValueError):
+        MovementFM(d_model=16, num_layers=1, use_fm_package=False, use_reconstruction_head=True, trunk="lstm")
+    with pytest.raises(ValueError):
+        MovementFM(d_model=16, num_layers=1, trunk="gru")
+
+
+def test_train_config_carries_the_trunk_and_old_configs_rebuild_as_transformers():
+    from animal_movement_fm.train.loop import TrainConfig
+
+    lstm = TrainConfig(d_model=16, num_layers=1, lr=1e-3, steps=10, use_fm_package=False, trunk="lstm").build()
+    assert lstm.trunk == "lstm"
+    old = TrainConfig(d_model=16, num_layers=1, lr=1e-3, steps=10).build()
+    assert old.trunk == "transformer"
+
+
+def test_window_model_predictor_matches_the_fm_path_for_a_zero_model():
+    from animal_movement_fm.eval.fm_predictor import WindowModelPredictor
+
+    class Zero:
+        name = "zero"
+
+        def predict(self, features):
+            return np.zeros((features.shape[0], 2))
+
+    rng = np.random.default_rng(3)
+    lon = 10 + np.cumsum(rng.normal(scale=0.01, size=(4, SEQ + 1)), axis=1)
+    lat = 50 + np.cumsum(rng.normal(scale=0.01, size=(4, SEQ + 1)), axis=1)
+    history = np.stack([lon, lat], axis=-1)
+    stamps = (np.arange(SEQ + 1) * BIN_SECONDS)[None, :].repeat(4, axis=0).astype("datetime64[s]")
+    pred = WindowModelPredictor(Zero()).predict_batch(history, stamps)
+    # a zero displacement is persistence: the last observed fix
+    np.testing.assert_allclose(pred, history[:, -1, :])

@@ -87,8 +87,16 @@ class MovementFM(nn.Module):
         use_context_conditioning: bool = True,
         n_species: int = 0,
         species_embed_dim: int = 0,
+        trunk: str = "transformer",
     ) -> None:
         super().__init__()
+        # `trunk="lstm"` is our Tier 3 baseline-ladder rung; we reuse the whole Tier 2 pipeline (representation, pools, loss, schedule, selection, 
+        # predictor) and swap only the sequence encoder. It is a plain trunk, B style: no conditioning path and no reconstruction head.
+        if trunk not in ("transformer", "lstm"):
+            raise ValueError(f"unknown trunk {trunk!r}; use 'transformer' or 'lstm'")
+        if trunk == "lstm" and (use_fm_package or use_reconstruction_head):
+            raise ValueError("the LSTM trunk is a plain baseline rung; switch the FM package and reconstruction head off")
+        self.trunk = trunk
         self.d_model = int(d_model)
         self.use_fm_package = bool(use_fm_package)
         self.external_cond_dim = int(external_cond_dim)
@@ -102,16 +110,26 @@ class MovementFM(nn.Module):
 
         # continuous token features use a linear projection rather than an embedding lookup
         self.input_proj = nn.Linear(input_dim, d_model)
-        self.pos_encoder = _PositionalEncoding(d_model)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        if trunk == "lstm":
+            # recurrence carries order, so there is no positional encoding
+            self.pos_encoder = None
+            self.encoder = nn.LSTM(
+                d_model,
+                d_model,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0.0,
+            )
+        else:
+            self.pos_encoder = _PositionalEncoding(d_model)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # A learned per-species lookup; it exists only for species that were trained on, so an arm carrying it is not zero-shot on a species 
         # with no row; that is the whole point of the Tier E experiment it was added for, and it is why nothing registered uses it
@@ -196,6 +214,10 @@ class MovementFM(nn.Module):
         `token_mask marks tokens hidden for the auxiliary reconstruction objective. Their projected embeddings are replaced by a learned mask \
         token, while conditioning is still computed from the original unmasked window statistics.
         """
+        if self.trunk == "lstm":
+            # no sqrt(d_model) scaling; that pairs with the additive positional encoding, and the LSTM's tanh gates would saturate on it
+            out, _ = self.encoder(self.input_proj(features))
+            return out
         x = self.input_proj(features) * math.sqrt(self.d_model)
         if token_mask is not None:
             if token_mask.dtype != torch.bool:
