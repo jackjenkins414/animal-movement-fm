@@ -19,7 +19,7 @@
 #   qsub -v STEPS=2000,PBS_ARRAY_INDEX=60 -l walltime=00:30:00 experiments/training/tier2_final.pbs
 # (the last is a single element; PBS refuses a one element array, so pass the index through -v)
 #
-# The configuration comes from results/tier2_inner_loop/tier2_selection.json; GRID_INDEX=<n> overrides
+# The configuration comes from registered/tier2_selection.json; GRID_INDEX=<n> overrides
 # it and is recorded in every result file as unregistered.
 #
 # Exploratory Tier E variants run against their own plan (`--tier-e --list`) and write to
@@ -37,6 +37,13 @@
 #   E1 block must be complete first, and its budget is a different number from E1's:
 #     qsub -v STEPS=2000,TIER_E=1 -J 30-39 experiments/training/tier2_final.pbs
 #     qsub -v STEPS=2000,TIER_E=1 -J 40-44 experiments/training/tier2_final.pbs
+#
+#   Flong 45-59 and Spre 60-74 (trained), then the single species architecture ablations ,
+#   20,000 steps, species order stork, gull, wolf, NES within each arm:
+#   SB 75-94, SBrecon 95-114, SZrecon 115-134, SZ 135-139 (stork only).
+#     qsub -v STEPS=20000,TIER_E=1 -J 75-84   experiments/training/tier2_final.pbs
+#     ... in blocks of ten to 134, then
+#     qsub -v STEPS=20000,TIER_E=1 -J 135-139 experiments/training/tier2_final.pbs
 
 #PBS -P um09
 #PBS -q gpuhopper

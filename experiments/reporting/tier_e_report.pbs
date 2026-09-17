@@ -12,6 +12,8 @@
 #     qsub -v SOURCES=1 -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
 #   held-out species with E1's rows read by domain (Ana's flying/terrestrial/marine label):
 #     qsub -v DOMAIN=1 -l walltime=00:30:00 experiments/reporting/tier_e_report.pbs
+#   single species architecture 2x2 on stork and the held-out species (after Tier E plan 75-139 trains):
+#     qsub -v SINGLE=1 -l walltime=01:00:00 experiments/reporting/tier_e_report.pbs
 #   one species only, when a rerun does not need the whole table:
 #     qsub -v SOURCES=1,SPECIES=cervus_elaphus -l walltime=00:30:00 experiments/reporting/tier_e_report.pbs
 #
@@ -44,6 +46,9 @@ cd /g/data/um09/$USER/animal-movement-fm
 extra_args=()
 if [ "${DOMAIN:-0}" = "1" ]; then
   extra_args+=(--domain-rows)
+fi
+if [ "${SINGLE:-0}" = "1" ]; then
+  extra_args+=(--single-species)
 fi
 if [ "${SOURCES:-0}" = "1" ]; then
   extra_args+=(--sources)

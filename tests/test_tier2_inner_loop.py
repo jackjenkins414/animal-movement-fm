@@ -207,3 +207,39 @@ def test_role_stems_cover_every_tier2_role_file():
     stems = {s[0] for s in inner_loop.SOURCES} | {s[1] for s in inner_loop.SOURCES}
     stems |= {h[0] for h in final_train.HELD_OUT} | {h[1] for h in final_train.HELD_OUT}
     assert stems <= ROLE_STEMS
+
+
+# GenAI reference: asked it to add single species Tier E ablation tests
+def test_single_species_ablations_are_appended_at_the_documented_indices():
+    ids = [run.run_id for run in final_train.TIER_E_PLAN]
+    assert len(ids) == 140
+    assert ids[74] == "Spre_mirounga_angustirostris_s4"
+    assert ids[75] == "SB_ciconia_ciconia_s0"
+    assert ids[80] == "SB_larus_fuscus_s0"
+    assert ids[95] == "SBrecon_ciconia_ciconia_s0"
+    assert ids[115] == "SZrecon_ciconia_ciconia_s0"
+    assert ids[134] == "SZrecon_mirounga_angustirostris_s4"
+    assert ids[135:] == [f"SZ_ciconia_ciconia_s{seed}" for seed in final_train.SEEDS]
+
+
+def test_single_species_arms_use_s_recipe_and_their_own_species():
+    for arm in ("SB", "SBrecon", "SZrecon", "SZ"):
+        spec = final_train.TIER_E_ARMS[arm]
+        assert spec["validation_selection"] is True
+        assert spec["training_pool"] == "attached_species_train"
+        assert "init_from" not in spec and "lr" not in spec
+    assert final_train.attached_entry("ciconia_ciconia") == ("ciconia_ciconia", "stork", "white_stork")
+    assert final_train.attached_entry("canis_lupus") == ("canis_lupus", "canis_lupus", "canis_lupus")
+    with pytest.raises(SystemExit):
+        final_train.attached_entry("cervus_elaphus")
+
+
+def test_single_species_configs_are_the_2x2():
+    grid = final_train.REGISTERED_GRID_INDEX
+    cells = {}
+    for arm in ("SB", "SBrecon", "SZrecon", "SZ"):
+        run = final_train.Run(arm, "ciconia_ciconia", 0)
+        config = final_train.build_config(run, grid, 20_000)
+        cells[arm] = (config.use_fm_package, config.use_reconstruction_head)
+        assert config.lr == final_train.GRID[grid][2]
+    assert cells == {"SB": (False, False), "SBrecon": (False, True), "SZrecon": (True, False), "SZ": (True, True)}

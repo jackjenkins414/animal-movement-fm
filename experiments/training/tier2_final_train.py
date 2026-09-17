@@ -338,6 +338,47 @@ TIER_E_ARMS: dict[str, dict] = {
         "validation_selection": True,
         "scored_partition": "held_out_validation",
     },
+    # ---------------------------------------------------------------- single species architecture ablations
+    "SB": {
+        "description": "single-species B: the plain trunk trained on one species only, with S's recipe",
+        "use_fm_package": False,
+        "use_reconstruction_head": False,
+        "per_species": True,
+        "attach_to": ("ciconia_ciconia", "larus_fuscus", "canis_lupus", "mirounga_angustirostris"),
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "attached_species_validation",
+    },
+    "SBrecon": {
+        "description": "single-species Brecon: plain trunk plus the masked reconstruction objective, one species only",
+        "use_fm_package": False,
+        "use_reconstruction_head": True,
+        "per_species": True,
+        "attach_to": ("ciconia_ciconia", "larus_fuscus", "canis_lupus", "mirounga_angustirostris"),
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "attached_species_validation",
+    },
+    "SZrecon": {
+        "description": "single-species Zrecon: conditioning path on, reconstruction off, one species only",
+        "use_fm_package": True,
+        "use_reconstruction_head": False,
+        "per_species": True,
+        "attach_to": ("ciconia_ciconia", "larus_fuscus", "canis_lupus", "mirounga_angustirostris"),
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "attached_species_validation",
+    },
+    "SZ": {
+        "description": "S's full recipe on white stork, the one species with no registered specialist",
+        "use_fm_package": True,
+        "use_reconstruction_head": True,
+        "per_species": True,
+        "attach_to": ("ciconia_ciconia",),
+        "training_pool": "attached_species_train",
+        "validation_selection": True,
+        "scored_partition": "attached_species_validation",
+    },
 }
 
 # flags a Tier E arm may set on the model or the training loop. Anything else in a spec is bookkeeping for this script and must not 
@@ -365,6 +406,13 @@ TIER_E_FROZEN_PREFIX: tuple[str, ...] = tuple(
         for species, *_ in HELD_OUT
         for seed in SEEDS
     ]
+    # Flong and Spre, trained 08-09-2026 
+    + [
+        f"{arm}_{species}_s{seed}"
+        for arm in ("Flong", "Spre")
+        for species, *_ in HELD_OUT
+        for seed in SEEDS
+    ]
 )
 
 
@@ -386,7 +434,8 @@ def build_tier_e_plan() -> list[Run]:
     plan: list[Run] = []
     for arm, spec in TIER_E_ARMS.items():
         if spec.get("per_species"):
-            for species, *_ in HELD_OUT:
+            attached = spec.get("attach_to") or tuple(species for species, *_ in HELD_OUT)
+            for species in attached:
                 plan += [Run(arm, species, seed) for seed in SEEDS]
         else:
             plan += [Run(arm, "", seed) for seed in SEEDS]
@@ -458,6 +507,21 @@ def donor_state_dict(run: Run, grid_index: int) -> tuple[dict, str]:
     if not variant.get("species_embed_dim"):
         return weights, donor_id
     return weights, f"{donor_id} ({how} embedding init)"
+
+
+def attached_entry(species: str) -> tuple[str, str, str]:
+    """
+    Return (segments stem, split stem, profile key) for a species a single species arm may train on.
+
+    Held-out species and white stork only. Stork is a source species, we therefore allow it here for the Tier E single species
+    ablations and nowhere else
+    """
+    if species in HELD_OUT_STEMS:
+        stem, split_stem, profile_key, _, _ = held_out_entry(species)
+        return stem, split_stem, profile_key
+    if species == "ciconia_ciconia":
+        return next(source for source in SOURCES if source[0] == species)
+    raise SystemExit(f"{species} cannot be the attached species of a single-species arm")
 
 
 def held_out_entry(species: str) -> tuple[str, str, str, str, str]:
@@ -564,7 +628,7 @@ def training_pool(run: Run, device: torch.device) -> tuple[PreparedPool, str]:
 
     variant = TIER_E_ARMS.get(run.arm, {})
     if run.arm == "S" or variant.get("training_pool") == "attached_species_train":
-        stem, split_stem, _, _, _ = held_out_entry(run.species)
+        stem, split_stem, _ = attached_entry(run.species)
         windows = _load_species_windows(stem, split_stem, "train")
         pool = SourcePool({stem: windows}, {stem: 1.0})
         node = f"specialist:{stem}" if run.arm == "S" else f"attached_species_train:{stem}"
@@ -696,9 +760,10 @@ def selected_grid_index(explicit: int | None) -> tuple[int, str]:
 # validation scoring used only by arms with registered validation access;
 def validation_frame(species: str) -> pd.DataFrame:
     """
-    Load one held-out species' validation individuals without touching test data.
+    Load one held-out species' (or, for the single-species ablations, white stork's) validation individuals without
+    touching test data.
     """
-    stem, split_stem, _, _, _ = held_out_entry(species)
+    stem, split_stem, _ = attached_entry(species)
     split = load_split(SPLITS / f"{split_stem}_split_seed42.json")
     frame = load_split_frame(
         PROCESSED / f"{stem}_segments.parquet",
@@ -1054,7 +1119,7 @@ def _make_monitor(
         selection["rule"] = "final_checkpoint"
         return {}, selection
 
-    stem, _, profile_key, _, _ = held_out_entry(run.species)
+    stem, _, profile_key = attached_entry(run.species)
     identity = {
         "run_id": run.run_id,
         "grid_index": grid_index,

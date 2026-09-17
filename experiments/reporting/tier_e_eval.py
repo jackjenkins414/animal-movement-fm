@@ -86,6 +86,20 @@ DOMAIN_ROW_ARMS = (
     ("S", T.RESULTS),
 )
 
+# `--single-species` scores the single species 2x2 John suggested (SB / SBrecon / SZrecon, with SZ on stork and the registered S on the held-out species 
+# as the full-package cell) on each attached species' own validation individuals. Pooled B and Z are shown for reference; on stork they are in
+# distribution, on the others zero-shot.
+SINGLE_SPECIES_ARMS = (
+    ("SB", T.TIER_E_RESULTS),
+    ("SBrecon", T.TIER_E_RESULTS),
+    ("SZrecon", T.TIER_E_RESULTS),
+    ("SZ", T.TIER_E_RESULTS),
+    ("S", T.RESULTS),
+    ("B", T.RESULTS),
+    ("Z", T.RESULTS),
+)
+SINGLE_SPECIES = ("ciconia_ciconia", "larus_fuscus", "canis_lupus", "mirounga_angustirostris")
+
 # arms trained once per attached species rather than once overall
 SPECIES_ATTACHED_ARMS = frozenset({"Za", "S"}) | frozenset(
     arm for arm, spec in T.TIER_E_ARMS.items() if spec.get("per_species")
@@ -312,15 +326,28 @@ def main() -> None:
             "the same domain (gull -> stork, wolf -> red deer, NES -> SOES): a zero-shot domain label"
         ),
     )
+    parser.add_argument(
+        "--single-species",
+        action="store_true",
+        help="score the single-species architecture 2x2 on stork and the three held-out species' validation individuals",
+    )
     args = parser.parse_args()
-    if args.sources and args.domain_rows:
-        raise SystemExit("FAIL: --sources and --domain-rows score different partitions; pick one")
+    if sum([args.sources, args.domain_rows, args.single_species]) > 1:
+        raise SystemExit("FAIL: --sources, --domain-rows and --single-species are separate modes; pick one")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device           : {device}")
     print("partition        : validation individuals only; no test partition is opened\n")
 
-    if args.sources:
+    if args.single_species:
+        wanted = [
+            (stem, T.attached_entry(stem)[2])
+            for stem in SINGLE_SPECIES
+            if args.species in (None, stem)
+        ]
+        fold_of = None
+        arms, mode = SINGLE_SPECIES_ARMS, "attached_species_validation"
+    elif args.sources:
         wanted = [
             (stem, profile_key)
             for stem, _, profile_key in IL.SOURCES
@@ -375,7 +402,12 @@ def main() -> None:
             payload["species"][stem]["domain_row_from"] = domain_source
 
     OUT.mkdir(parents=True, exist_ok=True)
-    suffix = "_sources" if args.sources else ("_domain_rows" if args.domain_rows else "")
+    suffix = (
+        "_sources" if args.sources
+        else "_domain_rows" if args.domain_rows
+        else "_single_species" if args.single_species
+        else ""
+    )
     path = OUT / f"tier_e_validation_metrics{suffix}.json"
     path.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"wrote {path}")
