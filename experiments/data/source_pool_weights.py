@@ -113,6 +113,26 @@ TIER3_MIN_TRAIN_WINDOWS = 2_000  # preregistration_tier3.md sec 1, candidate con
 TIER3_OUT = REPO / "registered" / "tier3_source_pool.json"
 
 
+def tier3_sub_pools(payload: dict) -> dict:
+    """
+    A8 draw probabilities for the Tier 3 sub pools, which we recompute from the registered counts alone.
+
+    `without_<domain>` is Za9s pool (the 6 sources outside that domain); `domain_<domain>` is Zd3's (the three inside it). Zd1 is a single 
+    species and needs no entry.
+    """
+    counts = payload["train_window_counts"]
+    domain_of = dict(payload["fixed"])
+    for domain, added in payload["added"].items():
+        domain_of.update({name: domain for name in added})
+    pools = {}
+    for domain in sorted(set(domain_of.values())):
+        outside = [n for n in payload["pool"] if domain_of[n] != domain]
+        inside = [n for n in payload["pool"] if domain_of[n] == domain]
+        pools[f"without_{domain}"] = draw_probabilities({n: counts[n] for n in outside})
+        pools[f"domain_{domain}"] = draw_probabilities({n: counts[n] for n in inside})
+    return pools
+
+
 def tier3(args: argparse.Namespace) -> None:
     """Select the nine Tier 3 sources under preregistration_tier3.md sec 1 and weight them under A8."""
     from animal_movement_fm.analysis.regime_profile import DESCRIPTORS, coverage_distances, select_source_pool
@@ -194,6 +214,27 @@ def tier3(args: argparse.Namespace) -> None:
         if not same:
             raise SystemExit(f"FAIL: {TIER3_OUT.name} already holds a different selection; the rule is run once")
         print(f"reproduced {TIER3_OUT.relative_to(REPO)}")
+        # GenAI reference: I wrote this originally, GenAI cleaned it; sub pools for Za9 and Zd3, added once to the registered file and verified thereafter
+        sub_pools = tier3_sub_pools(previous)
+        if "sub_pools" not in previous:
+            if args.no_write:
+                print("sub-pools not yet registered; rerun without --no-write to add them")
+                return
+            previous["sub_pools"] = sub_pools
+            TIER3_OUT.write_text(json.dumps(previous, indent=2) + "\n")
+            print(f"added {len(sub_pools)} sub-pools to {TIER3_OUT.relative_to(REPO)}")
+        else:
+            drift = [
+                f"{pool}.{name}"
+                for pool, probs in sub_pools.items()
+                for name, value in probs.items()
+                if abs(previous["sub_pools"].get(pool, {}).get(name, float("nan")) - value) > 1e-12
+            ]
+            if drift or set(previous["sub_pools"]) != set(sub_pools):
+                raise SystemExit(f"FAIL: registered sub-pools no longer reproduce: {drift or 'pool names differ'}")
+            print("sub-pools reproduced")
+        for pool, probs in sub_pools.items():
+            print(f"  {pool:22s} " + ", ".join(f"{n} {v * 100:.3f}%" for n, v in probs.items()))
         return
     if args.no_write:
         return

@@ -172,8 +172,20 @@ class TrainConfig:
     freeze_except_species_embedding: bool = False
     # Tier 3 baseline ladder (17-09-2026): the sequence encoder; configurations written before this field rebuild as transformers
     trunk: str = "transformer"
+    # Tier 3 B9dom: pool species index -> lookup row, so nine species can share three domain rows; empty means the row is the species itself, which 
+    # is every arm before this field existed
+    species_label_map: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
+        # this dataclass is frozen, so normalisation goes through object.__setattr__. The map is stored as a tuple
+        # so a configuration rebuilt from a saved JSON record, where it is a list, equals the one that was saved.
+        object.__setattr__(self, "species_label_map", tuple(int(row) for row in self.species_label_map))
+        if self.species_label_map and not self.species_embed_dim:
+            raise ValueError("species_label_map routes species to lookup rows and needs a species embedding")
+        if self.species_label_map and not all(0 <= row < self.n_species for row in self.species_label_map):
+            raise ValueError(f"species_label_map rows must lie in 0..{self.n_species - 1}")
+        if self.species_label_map and self.random_species_labels:
+            raise ValueError("a label map and random labels are two different arms; pick one")
         if self.steps < 1:
             raise ValueError("steps must be at least 1")
         if not 0.0 < self.mask_ratio < 1.0:
@@ -484,6 +496,14 @@ def train(
     applied = start_step
     max_attempts = MAX_ATTEMPT_MULTIPLIER * config.steps
     # the pin covers every attempt, including the backward pass, which is where #125674 bites
+    label_map = None
+    if config.species_label_map:
+        if len(config.species_label_map) != len(pool.names):
+            raise ValueError(
+                f"species_label_map has {len(config.species_label_map)} entries for a pool of {len(pool.names)} species"
+            )
+        label_map = torch.as_tensor(config.species_label_map, dtype=torch.long, device=device)
+
     with sdpa_context(sdpa_backend):
         while applied < config.steps and attempted < max_attempts:
             step = attempted  # attempt index, so a diagnostic record points at the batch that failed
@@ -503,7 +523,7 @@ def train(
                         device=device,
                     )
                     if config.random_species_labels
-                    else species
+                    else (label_map[species] if label_map is not None else species)
                 )
 
             optimiser.zero_grad(set_to_none=True)
