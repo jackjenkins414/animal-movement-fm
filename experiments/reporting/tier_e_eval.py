@@ -38,8 +38,8 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "experiments" / "training"))
 
-import tier2_final_train as T  # noqa: E402
-import tier2_inner_loop as IL  # noqa: E402
+import tier2_final_train as T  # type: ignore # noqa: E402
+import tier2_inner_loop as IL  # type: ignore # noqa: E402
 from animal_movement_fm.data.resample import CONTEXT_LENGTH  # noqa: E402
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched  # noqa: E402
 from animal_movement_fm.eval.harness import evaluate  # noqa: E402
