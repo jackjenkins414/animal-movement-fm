@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# Tier 3 training, one model per PBS subjob. Run plan: `tier3_train.py --list` (158 runs).
+#   0-4     Z9
+#   5-9     B9
+#   10-24   Za9      (gull 10-14, wolf 15-19, NES 20-24)
+#   25-39   Zd3
+#   40-54   Zd1
+#   55-59   B9dom
+#   60-74   LSTMS    (validation selection)
+#   75-79   LSTMB3
+#   80-84   LSTMB9
+#   85-102  Sk       (gull 85-90, wolf 91-96, NES 97-102)
+#   103-123 F3c      (gull 103-109, wolf 110-116, NES 117-123)
+#   124-144 F9       (gull 124-130, wolf 131-137, NES 138-144)
+#   145-147 XGBS
+#   148-152 XGBB3
+#   153-157 XGBB9
+#
+# Neural runs use STEPS=20000. XGBoost ignores STEPS, but the CLI still requires it.
+# Submit in blocks of at most 10 array jobs.
+#
+# F9 fine-tunes Z9_s0, so run 0 must finish first. F3c fine-tunes Tier 2 Z_s0.
+#
+# Exploratory Tier E: Z9long, seeds 0-4, 40,000 steps.
+#   qsub -v STEPS=40000,TIER_E=1 -J 0-4 -l walltime=08:00:00 experiments/training/tier3_train.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier3_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+extra_args=()
+
+if [ "${TIER_E:-0}" = "1" ]; then
+  extra_args+=(--tier-e)
+elif [ "${TIER_E:-0}" != "0" ]; then
+  echo "FAIL: TIER_E must be 1 when enabled; got '$TIER_E'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/tier3_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
