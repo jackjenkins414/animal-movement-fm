@@ -2,7 +2,8 @@
   "_comment": [
     "Tier 3 source pool selected mechanically under preregistration_tier3.md sec 1, with A8 draw",
     "probabilities (alpha 0.5) over the selected nine. Written by source_pool_weights.py --tier3.",
-    "Sub-pools (Za, inner-loop folds) are not included; they depend on choices the Tier 3 prereg has not fixed yet."
+    "Sub-pools are included: without_<domain> is Za9's six-source pool, domain_<domain> is Zd3's three,",
+    "each weighted under A8 from the same counts. Written once, then verified on every later run."
   ],
   "rule": "preregistration_tier3.md sec 1",
   "context_length": 12,
@@ -36,7 +37,7 @@
     {
       "species": "arctocephalus_gazella",
       "domain": "marine",
-      "train_windows": 3389,
+      "train_windows": 5414,
       "reason": "candidate"
     },
     {
@@ -78,7 +79,7 @@
     {
       "species": "diomedea_exulans",
       "domain": "flying",
-      "train_windows": 2971,
+      "train_windows": 3393,
       "reason": "candidate"
     },
     {
@@ -162,13 +163,13 @@
     {
       "species": "thalassarche_chrysostoma",
       "domain": "flying",
-      "train_windows": 1995,
-      "reason": "below 2000 training windows"
+      "train_windows": 2645,
+      "reason": "candidate"
     },
     {
       "species": "thalassoica_antarctica",
       "domain": "flying",
-      "train_windows": 2490,
+      "train_windows": 2564,
       "reason": "candidate"
     }
   ],
@@ -199,8 +200,8 @@
   },
   "mean_distance": 5.013340853190772,
   "min_distance": 2.2148670909587893,
-  "train_windows": 1599653,
-  "n_pools_scored": 11700,
+  "train_windows": 1601752,
+  "n_pools_scored": 13650,
   "n_tied_on_mean": 1,
   "candidates_per_domain": {
     "flying": [
@@ -216,6 +217,7 @@
       "milvus_milvus",
       "mycteria_americana",
       "pernis_apivorus",
+      "thalassarche_chrysostoma",
       "thalassoica_antarctica"
     ],
     "marine": [
@@ -364,7 +366,7 @@
       },
       "mean_distance": 5.005024643374157,
       "min_distance": 2.2148670909587893,
-      "train_windows": 1699683
+      "train_windows": 1701782
     },
     {
       "pool": [
@@ -394,7 +396,7 @@
       },
       "mean_distance": 4.989552658029279,
       "min_distance": 2.214447760752311,
-      "train_windows": 1619672
+      "train_windows": 1621697
     },
     {
       "pool": [
@@ -424,7 +426,7 @@
       },
       "mean_distance": 4.984780043867492,
       "min_distance": 2.214447760752311,
-      "train_windows": 1719702
+      "train_windows": 1721727
     },
     {
       "pool": [
@@ -454,7 +456,7 @@
       },
       "mean_distance": 4.9779318890252044,
       "min_distance": 1.95236534366067,
-      "train_windows": 1704012
+      "train_windows": 1704086
     },
     {
       "pool": [
@@ -484,11 +486,11 @@
       },
       "mean_distance": 4.973624881404773,
       "min_distance": 1.7364660229977331,
-      "train_windows": 1796917
+      "train_windows": 1798942
     }
   ],
   "train_window_counts": {
-    "arctocephalus_gazella": 3389,
+    "arctocephalus_gazella": 5414,
     "bison_bison": 37729,
     "branta_canadensis": 99724,
     "canis_latrans": 37253,
@@ -496,53 +498,133 @@
     "ciconia_ciconia": 806595,
     "eudyptes_chrysolophus": 2818,
     "mirounga_leonina": 53076,
-    "thalassoica_antarctica": 2490
+    "thalassoica_antarctica": 2564
   },
   "source_pool": {
-    "arctocephalus_gazella": 0.02125592234598693,
-    "bison_bison": 0.07092213773234742,
-    "branta_canadensis": 0.11530390489329623,
-    "canis_latrans": 0.07047333054531593,
-    "cervus_elaphus": 0.2724002980720601,
-    "ciconia_ciconia": 0.32792304129097255,
-    "eudyptes_chrysolophus": 0.019382717443615003,
-    "mirounga_leonina": 0.08411883766865773,
-    "thalassoica_antarctica": 0.018219810007748055
+    "arctocephalus_gazella": 0.026708999489685848,
+    "bison_bison": 0.07050763397684882,
+    "branta_canadensis": 0.11463001232420457,
+    "canis_latrans": 0.07006144983912842,
+    "cervus_elaphus": 0.27080825713590106,
+    "ciconia_ciconia": 0.32600649821323013,
+    "eudyptes_chrysolophus": 0.019269435336940966,
+    "mirounga_leonina": 0.08362720592662788,
+    "thalassoica_antarctica": 0.018380507757432347
+  },
+  "regenerated": {
+    "date": "2026-09-20",
+    "reason": "training window counts were matched to parquet ids as plain strings rather than through id_key, undercounting n_s and wrongly excluding T. chrysostoma by the 2,000-window floor",
+    "supersedes": {
+      "pool": [
+        "arctocephalus_gazella",
+        "bison_bison",
+        "branta_canadensis",
+        "canis_latrans",
+        "cervus_elaphus",
+        "ciconia_ciconia",
+        "eudyptes_chrysolophus",
+        "mirounga_leonina",
+        "thalassoica_antarctica"
+      ],
+      "source_pool": {
+        "arctocephalus_gazella": 0.02125592234598693,
+        "bison_bison": 0.07092213773234742,
+        "branta_canadensis": 0.11530390489329623,
+        "canis_latrans": 0.07047333054531593,
+        "cervus_elaphus": 0.2724002980720601,
+        "ciconia_ciconia": 0.32792304129097255,
+        "eudyptes_chrysolophus": 0.019382717443615003,
+        "mirounga_leonina": 0.08411883766865773,
+        "thalassoica_antarctica": 0.018219810007748055
+      },
+      "train_window_counts": {
+        "arctocephalus_gazella": 3389,
+        "bison_bison": 37729,
+        "branta_canadensis": 99724,
+        "canis_latrans": 37253,
+        "cervus_elaphus": 556579,
+        "ciconia_ciconia": 806595,
+        "eudyptes_chrysolophus": 2818,
+        "mirounga_leonina": 53076,
+        "thalassoica_antarctica": 2490
+      },
+      "sub_pools": {
+        "without_flying": {
+          "arctocephalus_gazella": 0.03946856246875669,
+          "bison_bison": 0.13169011336905834,
+          "canis_latrans": 0.13085675623642262,
+          "cervus_elaphus": 0.5058001250646673,
+          "eudyptes_chrysolophus": 0.03599034573919632,
+          "mirounga_leonina": 0.15619409712189877
+        },
+        "domain_flying": {
+          "branta_canadensis": 0.24987477611678358,
+          "ciconia_ciconia": 0.710641123576384,
+          "thalassoica_antarctica": 0.03948410030683246
+        },
+        "without_marine": {
+          "bison_bison": 0.08103141232944967,
+          "branta_canadensis": 0.1317393772853368,
+          "canis_latrans": 0.08051863195661298,
+          "cervus_elaphus": 0.31122836363228606,
+          "ciconia_ciconia": 0.3746653445706346,
+          "thalassoica_antarctica": 0.020816870225679823
+        },
+        "domain_marine": {
+          "arctocephalus_gazella": 0.1703779427016594,
+          "eudyptes_chrysolophus": 0.15536317212008324,
+          "mirounga_leonina": 0.6742588851782574
+        },
+        "without_terrestrial": {
+          "arctocephalus_gazella": 0.0362602675412747,
+          "branta_canadensis": 0.19669579009230656,
+          "ciconia_ciconia": 0.5594006703926471,
+          "eudyptes_chrysolophus": 0.033064785839091254,
+          "mirounga_leonina": 0.14349749258010677,
+          "thalassoica_antarctica": 0.031080993554573697
+        },
+        "domain_terrestrial": {
+          "bison_bison": 0.1713940632065503,
+          "canis_latrans": 0.17030945281773308,
+          "cervus_elaphus": 0.6582964839757166
+        }
+      }
+    }
   },
   "sub_pools": {
     "without_flying": {
-      "arctocephalus_gazella": 0.03946856246875669,
-      "bison_bison": 0.13169011336905834,
-      "canis_latrans": 0.13085675623642262,
-      "cervus_elaphus": 0.5058001250646673,
-      "eudyptes_chrysolophus": 0.03599034573919632,
-      "mirounga_leonina": 0.15619409712189877
+      "arctocephalus_gazella": 0.049371237900130094,
+      "bison_bison": 0.13033244364659063,
+      "canis_latrans": 0.12950767807575128,
+      "cervus_elaphus": 0.5005855383515692,
+      "eudyptes_chrysolophus": 0.035619300400551085,
+      "mirounga_leonina": 0.15458380162540777
     },
     "domain_flying": {
-      "branta_canadensis": 0.24987477611678358,
-      "ciconia_ciconia": 0.710641123576384,
-      "thalassoica_antarctica": 0.03948410030683246
+      "branta_canadensis": 0.24972932975345072,
+      "ciconia_ciconia": 0.7102274757137816,
+      "thalassoica_antarctica": 0.04004319453276769
     },
     "without_marine": {
-      "bison_bison": 0.08103141232944967,
-      "branta_canadensis": 0.1317393772853368,
-      "canis_latrans": 0.08051863195661298,
-      "cervus_elaphus": 0.31122836363228606,
-      "ciconia_ciconia": 0.3746653445706346,
-      "thalassoica_antarctica": 0.020816870225679823
+      "bison_bison": 0.08100653827521052,
+      "branta_canadensis": 0.1316989375062212,
+      "canis_latrans": 0.08049391530956247,
+      "cervus_elaphus": 0.3111328264699042,
+      "ciconia_ciconia": 0.3745503342822234,
+      "thalassoica_antarctica": 0.021117448156878178
     },
     "domain_marine": {
-      "arctocephalus_gazella": 0.1703779427016594,
-      "eudyptes_chrysolophus": 0.15536317212008324,
-      "mirounga_leonina": 0.6742588851782574
+      "arctocephalus_gazella": 0.20607898957526757,
+      "eudyptes_chrysolophus": 0.14867744355067405,
+      "mirounga_leonina": 0.6452435668740584
     },
     "without_terrestrial": {
-      "arctocephalus_gazella": 0.0362602675412747,
-      "branta_canadensis": 0.19669579009230656,
-      "ciconia_ciconia": 0.5594006703926471,
-      "eudyptes_chrysolophus": 0.033064785839091254,
-      "mirounga_leonina": 0.14349749258010677,
-      "thalassoica_antarctica": 0.031080993554573697
+      "arctocephalus_gazella": 0.04537541849455426,
+      "branta_canadensis": 0.19474277886205738,
+      "ciconia_ciconia": 0.5538463278672017,
+      "eudyptes_chrysolophus": 0.03273648243188958,
+      "mirounga_leonina": 0.14207269231168196,
+      "thalassoica_antarctica": 0.031226300032615093
     },
     "domain_terrestrial": {
       "bison_bison": 0.1713940632065503,

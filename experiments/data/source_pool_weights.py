@@ -13,12 +13,13 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
 
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
-from animal_movement_fm.data.split import window_counts_per_individual
+from animal_movement_fm.data.split import id_key, window_counts_per_individual
 
 REPO = Path(__file__).resolve().parents[2]
 PROCESSED = REPO / "data" / "processed"
@@ -54,7 +55,12 @@ def species_window_counts(segments_stem: str, split_stem: str) -> dict[str, int]
         str(PROCESSED / f"{segments_stem}_segments.parquet"),
         context_length=CONTEXT_LENGTH,
     )
-    counts["individual_id"] = counts["individual_id"].astype(str)
+    # GenAI reference: Match manifest ids to parquet ids through id_key, which is what SpeciesWindows.build uses when it 
+    # assembles the training pool. Plain string equality silently scores a miss as zero windows, and the two spellings do 
+    # differ: canonical_manifest_ids writes an id through a float parse, and Python reads underscores inside digits as
+    # separators, so the RAATD id "146_2160" is written to the manifest as "1462160". Counted strictly, every such
+    # individual disappeared from n_s. Corrected 20-09-2026; see preregistration_tier3.md sec 1.
+    counts["individual_id"] = counts["individual_id"].map(id_key)
     per_individual = counts.set_index("individual_id")["n_windows"]
 
     manifest_path = SPLITS / f"{split_stem}_split_seed42.json"
@@ -63,7 +69,7 @@ def species_window_counts(segments_stem: str, split_stem: str) -> dict[str, int]
     out: dict[str, int] = {}
 
     for split in ("train", "val", "test"):
-        ids = [str(i) for i in manifest[split]]
+        ids = [id_key(i) for i in manifest[split]]
         windows = per_individual.reindex(ids).fillna(0)
 
         out[split] = int(windows.sum())
@@ -190,7 +196,8 @@ def tier3(args: argparse.Namespace) -> None:
         "_comment": [
             "Tier 3 source pool selected mechanically under preregistration_tier3.md sec 1, with A8 draw",
             "probabilities (alpha 0.5) over the selected nine. Written by source_pool_weights.py --tier3.",
-            "Sub-pools (Za, inner-loop folds) are not included; they depend on choices the Tier 3 prereg has not fixed yet.",
+            "Sub-pools are included: without_<domain> is Za9's six-source pool, domain_<domain> is Zd3's three,",
+            "each weighted under A8 from the same counts. Written once, then verified on every later run.",
         ],
         "rule": "preregistration_tier3.md sec 1",
         "context_length": CONTEXT_LENGTH,
@@ -211,8 +218,31 @@ def tier3(args: argparse.Namespace) -> None:
         same = previous["pool"] == pool and all(
             abs(previous["source_pool"][k] - weights[k]) <= 1e-12 for k in pool
         )
+        if not same and not args.regenerate:
+            raise SystemExit(
+                f"FAIL: {TIER3_OUT.name} already holds a different selection; the rule is run once. Pass "
+                "--regenerate only to correct a defect in the rule's inputs, and record it in the preregistration."
+            )
         if not same:
-            raise SystemExit(f"FAIL: {TIER3_OUT.name} already holds a different selection; the rule is run once")
+            payload["regenerated"] = {
+                "date": time.strftime("%Y-%m-%d"),
+                "reason": args.regenerate,
+                "supersedes": {
+                    "pool": previous["pool"],
+                    "source_pool": previous["source_pool"],
+                    "train_window_counts": previous.get("train_window_counts"),
+                    "sub_pools": previous.get("sub_pools"),
+                },
+            }
+            payload["sub_pools"] = tier3_sub_pools(payload)
+            if args.no_write:
+                print("would regenerate; rerun without --no-write to write it")
+                return
+            TIER3_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+            print(f"REGENERATED {TIER3_OUT.relative_to(REPO)}; the superseded selection is recorded inside it")
+            for name, probs in payload["sub_pools"].items():
+                print(f"  {name:22s} " + ", ".join(f"{n} {v * 100:.3f}%" for n, v in probs.items()))
+            return
         print(f"reproduced {TIER3_OUT.relative_to(REPO)}")
         # GenAI reference: I wrote this originally, GenAI cleaned it; sub pools for Za9 and Zd3, added once to the registered file and verified thereafter
         sub_pools = tier3_sub_pools(previous)
@@ -244,6 +274,15 @@ def tier3(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--regenerate",
+        metavar="REASON",
+        default=None,
+        help=(
+            "rewrite an existing registered selection because its inputs were wrong. The reason is stored in the "
+            "file beside the selection it supersedes; the preregistration must record the correction too."
+        ),
+    )
     parser.add_argument(
         "--no-write",
         action="store_true",
