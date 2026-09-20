@@ -46,18 +46,19 @@ TIER_E_LONG_STEPS = 40_000  # the budget check, Tier E only
 SEEDS = T.SEEDS
 DOMAINS = ("flying", "marine", "terrestrial")  # lookup-row order for B9dom
 
-# preregistration_tier3.md sec 1.1: the nine sources and their A8 draw probabilities in percent, to three decimals.
-# Checked against the registered file on every load, so the guard compares against constants, not another written file.
+# preregistration_tier3.md sec 1.1 as corrected 20-09-2026: the nine sources and their A8 draw probabilities
+# in percent, to three decimals; checked against the registered file on every load, so the guard compares against constants, 
+# not another written file
 REGISTERED_SOURCE_PERCENT = {
-    "ciconia_ciconia": 32.792,
-    "branta_canadensis": 11.530,
-    "thalassoica_antarctica": 1.822,
-    "cervus_elaphus": 27.240,
-    "bison_bison": 7.092,
-    "canis_latrans": 7.047,
-    "mirounga_leonina": 8.412,
-    "arctocephalus_gazella": 2.126,
-    "eudyptes_chrysolophus": 1.938,
+    "ciconia_ciconia": 32.601,
+    "branta_canadensis": 11.463,
+    "thalassoica_antarctica": 1.838,
+    "cervus_elaphus": 27.081,
+    "bison_bison": 7.051,
+    "canis_latrans": 7.006,
+    "mirounga_leonina": 8.363,
+    "arctocephalus_gazella": 2.671,
+    "eudyptes_chrysolophus": 1.927,
 }
 # preregistration_tier3.md sec 2: withheld from every Tier 3 and Tier 4 run
 RESERVED = frozenset({"anser_albifrons", "ovis_dalli", "pygoscelis_adeliae"})
