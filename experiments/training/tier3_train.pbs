@@ -22,6 +22,10 @@
 #
 # F9 fine-tunes Z9_s0, so run 0 must finish first. F3c fine-tunes Tier 2 Z_s0.
 #
+# Check the data side first in one short job: builds the nine source pool and every sub pool then eports window counts,
+# trains nothing.
+#   qsub -v DRY_RUN=1 -l walltime=00:20:00 experiments/training/tier3_train.pbs
+#
 # Exploratory Tier E: Z9long, seeds 0-4, 40,000 steps.
 #   qsub -v STEPS=40000,TIER_E=1 -J 0-4 -l walltime=08:00:00 experiments/training/tier3_train.pbs
 
@@ -46,12 +50,22 @@ export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
 
 cd /g/data/um09/$USER/animal-movement-fm
 
+extra_args=()
+
+# DRY_RUN builds the registered pools and exits without training, so it needs no step budget
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
 if [ -z "${STEPS:-}" ]; then
   echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
   exit 1
 fi
 
-extra_args=()
 
 if [ "${TIER_E:-0}" = "1" ]; then
   extra_args+=(--tier-e)

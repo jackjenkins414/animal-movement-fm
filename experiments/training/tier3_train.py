@@ -283,6 +283,46 @@ def initial_state(run: Run, grid_index: int) -> tuple[dict, str | None]:
     return {"init_state_dict": donor["model"]}, f"{where}:{donor_id}"
 
 
+# Dry run.
+def dry_run(payload: dict) -> None:
+    """
+    Build every registered Tier 3 pool and stop before training.
+
+    A missing or misnamed segments file or split manifest is otherwise found inside the first queued job, after the
+    queue wait. This checks the files, builds the nine-source pool and each sub-pool from the registered weights and
+    reports the window counts, so the data side of a 158-run submission is verified in one short job.
+    """
+    wanted = [(stem, SPLIT_STEM.get(stem, stem)) for stem in sorted(REGISTERED_SOURCE_PERCENT)]
+    held_out = [(stem, split_stem) for stem, split_stem, *_ in T.HELD_OUT]
+    missing = [
+        str(path)
+        for stem, split_stem in wanted + held_out
+        for path in (IL.PROCESSED / f"{stem}_segments.parquet", IL.SPLITS / f"{split_stem}_split_seed42.json")
+        if not path.exists()
+    ]
+    if missing:
+        raise SystemExit("FAIL: missing input files:\n  " + "\n  ".join(missing))
+    print(f"files            : {len(wanted + held_out)} species, segments and splits all present")
+
+    species = {stem: T._load_species_windows(stem, split_stem, "train") for stem, split_stem in wanted}
+    for node in ["source_pool"] + [f"sub_pools.{name}" for name in sorted(payload["sub_pools"])]:
+        weights = payload
+        for part in node.split("."):
+            weights = weights[part]
+        assert_tier3_sources(weights)
+        pool = SourcePool.from_registered_weights(species, REGISTERED_POOL, pool=node)
+        windows = sum(species[name].n_windows for name in pool.names)
+        print(f"{node:<28} {len(pool.names)} species, {windows:,} windows")
+
+    for stem, split_stem in held_out:
+        print(f"{'held_out:' + stem:<28} {T._load_species_windows(stem, split_stem, 'train').n_windows:,} windows")
+
+    donor = T.TIER2_FINAL_RESULTS / "Z_s0_reported.pt"
+    print(f"F3c donor        : {'present' if donor.exists() else 'MISSING'} ({donor.name})")
+    print("F9 donor         : Z9_s0_reported.pt, written by plan index 0")
+    print("\ndry run only; nothing was trained and no test partition was opened.")
+
+
 # Runners. 
 def run_torch(run: Run, index: int, steps: int, grid_index: int, source: str, tier_e: bool, payload: dict) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -423,11 +463,14 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=None, help="optimiser updates; must be the registered value")
     parser.add_argument("--list", action="store_true", help="print the plan and exit")
     parser.add_argument("--tier-e", action="store_true", help="run the exploratory Tier E plan (the 40k budget check)")
+    parser.add_argument("--dry-run", action="store_true", help="build the registered pools and exit without training")
     args = parser.parse_args()
 
     plan = TIER_E_PLAN if args.tier_e else PLAN
     if args.list:
         return print_plan(plan, args.tier_e)
+    if args.dry_run:
+        return dry_run(load_registered_pool())
     if args.tier_e:
         RESULTS, CHECKPOINTS = T.TIER_E_RESULTS, T.TIER_E_CHECKPOINTS
     # The Tier 2 helpers resolve their checkpoint-selection files through their own module globals. 
