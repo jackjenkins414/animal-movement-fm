@@ -702,3 +702,47 @@ The window counter matched manifest ids to data ids as plain strings where the t
 ## 21-09-2026: Tier 3 trained and frozen
 
 All 158 runs complete, 1,876.8 SU, every run at its full budget with nothing withheld. Two things recorded in the freeze before the seal: doubling the budget to 40,000 steps does not lower the training loss, so the budget is not the binding constraint; and at the registered A8 weights white stork takes about 64% of the training loss from 33% of the draws while the three marine sources take about 3% between them, so the nine source pool is in gradient terms close to a flying species model. The pre seal prediction is recorded in sec 7.
+
+## 23-09-2026: Tier 3 sealed evaluation — WEAK/NULL, and transfer is domain bound
+
+Opened the three test partitions once under our committed freeze. Band unchanged from Tier 2. Nine sources beat three
+on two of three species at zero shot but never by more than the noise scale, so the registered scaling prediction is met
+and unresolved. The registered prediction that lost is the informative one; the same domain three source model beats the
+nine source model on all three species, and on NES by 0.11 in skill, with the single same domain source better still at
++0.1798. Every species added from outside the held-out species' domain subtracts. Fine-tuning the pooled model is beaten
+by a specialist trained from scratch on the identical subset on 17 of 18 draws. In the descriptive ladder the transformer
+is the weakest family: an untuned XGBoost with no validation privilege, and an LSTM, roughly triple the transformer
+specialist on the gull, and pooled XGBoost beats every pooled neural arm. 
+
+**Pool composition, travel p90 skill against persistence.**
+
+| species | Z9 (9, all) | Za9 (6, other domains) | Zd3 (3, same domain) | Zd1 (1, same domain) | Z (Tier 2, 3) |
+|---|---:|---:|---:|---:|---:|
+| *L. fuscus* | −0.0074 | −0.0261 | −0.0035 | −0.0049 | −0.0256 |
+| *C. lupus* | −0.0036 | −0.0030 | −0.0003 | −0.0015 | −0.0029 |
+| *M. angustirostris* | +0.0043 | −0.0011 | **+0.1140** | **+0.1798** | −0.0080 |
+
+**The ladder, travel p90 skill, descriptive.** XGB-S has no validation privilege; S, SB and LSTM-S do.
+
+| rung | gull | wolf | NES |
+|---|---:|---:|---:|
+| ARIMA | −0.1405 | −0.1845 | −0.0941 |
+| AVG10 | −0.0900 | −0.0324 | +0.0853 |
+| XGB-S | +0.1558 | +0.0105 | +0.1978 |
+| LSTM-S | **+0.1616** | **+0.0236** | **+0.2484** |
+| SB | +0.0803 | +0.0141 | +0.2156 |
+| S | +0.0498 | +0.0043 | +0.2047 |
+| XGB-B3 | +0.0748 | −0.0295 | +0.2037 |
+| LSTM-B3 | +0.0231 | −0.0226 | +0.1657 |
+| B9 | −0.0174 | −0.0001 | +0.1272 |
+| Z9 | −0.0074 | −0.0036 | +0.0043 |
+| Zd3 | −0.0035 | −0.0003 | +0.1140 |
+| B9dom | −0.0002 | +0.0004 | +0.0625 |
+
+**Fine-tuning against from-scratch, F9 minus Sk in travel p90 metres (positive means F9 is worse).**
+
+| species | k = 1% | k = 10% |
+|---|---:|---:|
+| gull | +773 | +2,387 |
+| wolf | +17 | +9 |
+| NES | +5,070 | +5,717 |
