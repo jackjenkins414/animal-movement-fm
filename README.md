@@ -5,7 +5,11 @@ ANU honours thesis in machine learning (2026), Jack Jenkins.
 
 ## What this is
 
-A benchmarking suite for animal movement prediction that scales models from trivial baselines (persistence, averaging) through classical statistics (ARIMA), gradient boosting (XGBoost), and recurrent networks (LSTM) up to transformer-based foundation models. Models are trained on a large multi-species GPS tracking corpus and evaluated for cross-species and cross-domain transfer.
+A benchmarking suite for animal movement prediction that scales models from trivial baselines (persistence, averaging) through classical statistics (ARIMA), gradient boosting (XGBoost), and recurrent networks (LSTM) up to transformer based foundation models. Models are trained on a large multi-species GPS tracking corpus and evaluated for **zero-shot transfer to species never seen in training**.
+
+We currently run a two phase preregistration (Hofman et al., 2023). We first document the arms, metrics, success bands and predictions, and ensure those are committed before any model is trained; held-out test partitions are opened once, by a sealed evaluator that refuses to run until the matching freeze is committed to git. Exploratory work lives in a separate tier (Tier E) that is validation only and may never be reported as a registered result.
+
+**Tiers.** Tier 1: the baseline ladder on synthetic and single species data. Tier 2: three source species, three held-out species, one per domain. Tier 3: source-pool scaling, the same three held-out species, nine sources. Tier 4: all remaining eligible species, exploratory.
 
 ## Repository layout
 
@@ -28,7 +32,12 @@ animal-movement-fm/
 │   └── reporting/             # prediction dumps + writeup figures
 ├── notebooks/                 # exploratory analysis only — not for results
 ├── tests/                     # pytest unit tests
+├── registered/                # write once artefacts: selection, sampling weights, boundaries
+├── splits/                    # frozen per species split manifests (seed 42)
 ├── results/                   # output tables, plots (gitignored)
+├── preregistration_tier2*.md  # Tier 2 registration, tuning amendments, pre test freeze
+├── preregistration_tier3*.md  # Tier 3 registration and pre test freeze
+├── tierE_exploratory_ablations.md  # exploratory arms, each registered before it runs
 ├── methods.md                 # decisions log
 ├── pyproject.toml             # dependencies + tool config
 └── README.md
@@ -65,4 +74,20 @@ uv run jupyter lab
 
 ## Status
 
-Full baseline ladder (persistence -> averaging -> ARIMA -> XGBoost -> LSTM -> Transformer) complete on real 6h white-stork data; 6h cadence resolved as near-optimal. Transformer convergence resolved on NCI Gadi. Two headline results: a raw sequence Transformer vs LSTM head to head (a tie), and a time of day 2×2 showing attention exploits the covariate while recurrence does not. Now focused on modelling/feature work (added covariates, multi-seed spread, val-curve monitoring) toward the foundation model, infrastructure is in place.
+**Tier 1** complete: the full ladder (persistence, averaging, ARIMA, XGBoost, LSTM, transformer) on real 6 hour white stork
+data, with 6 hours resolved as the near-optimal cadence.
+
+**Tier 2** sealed and reported (26-08-2026): **WEAK/NULL**. The foundation model does not beat persistence zero-shot on
+any of the three held-out species, the same trunk with the FM package stripped matches or beats it, and a single species
+specialist reaches +0.20 skill on northern elephant seal. The failure is concentrated in near stationary windows.
+
+**Tier E** (exploratory, validation only) locates the failure inside the architecture: within a single species, with
+ample data, the full FM package never beats a plain transformer trunk, and the context conditioning path is negative on
+every species tested. The masked reconstruction objective is the one component that helps, and only when learned across
+species.
+
+**Tier 3** trained (158 registered runs, 21-09-2026) and frozen; the sealed evaluation is the current step. It changes
+one variable — three source species to nine — and holds configuration, budget, representation, metrics, held-out species
+and protocol fixed.
+
+**Next:** a probabilistic and multi-horizon prediction head, trait conditioning as a registered ablation, and Tier 4.
