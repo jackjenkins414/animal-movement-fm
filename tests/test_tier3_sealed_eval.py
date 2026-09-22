@@ -222,3 +222,21 @@ def test_tier_e_records_cannot_enter_a_tier3_evaluation(tmp_path, monkeypatch):
     (tmp_path / "X_s0.json").write_text(json.dumps(make_record("X_s0")))
     with pytest.raises(SystemExit):
         E.tier3_runs()
+
+def test_xgboost_metadata_files_are_ignored(tmp_path, monkeypatch):
+    """
+    The XGBoost arms save a metadata file beside their result record. It has no run_id, and a record reader that does
+    not skip it crashes the report; this is a regression test for that.
+    """
+    monkeypatch.setattr(E, "TIER3_RESULTS", tmp_path)
+    (tmp_path / "XGBB9_s0.json").write_text(json.dumps(make_record("XGBB9_s0") | {"model": "WindowXGBoost"}))
+    (tmp_path / "XGBB9_s0_xgb_meta.json").write_text(
+        json.dumps({"params": {"n_estimators": 200}, "n_features": 132, "name": "window_xgboost"})
+    )
+    assert [r["run_id"] for r in E.tier3_runs()] == ["XGBB9_s0"]
+    records = {
+        record["run_id"]: record
+        for record in (json.loads(open(path).read()) for path in sorted(tmp_path.glob("*.json")))
+        if "run_id" in record and "arm" in record
+    }
+    assert list(records) == ["XGBB9_s0"]

@@ -314,9 +314,12 @@ def species_frames(species: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame],
     for tag, frame in frames.items():
         assert_aligned(frame, persistence, f"{species} {tag}")
 
+    # the XGBoost arms write a metadata file beside their result record, and it carries no run_id; the records are the
+    # run files only, keyed by run id
     records = {
         record["run_id"]: record
         for record in (json.loads(path.read_text()) for path in sorted(TIER3_RESULTS.glob("*.json")))
+        if "run_id" in record and "arm" in record
     }
     return persistence, frames, records
 
