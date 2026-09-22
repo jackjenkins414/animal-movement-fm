@@ -672,3 +672,33 @@ In section 2 we locked in our modelling window and split policy, but we never sa
 ## 16-08-2026: physical plausibility QC applied to the marine pair (A9)
 
 We dropped the four physical plausibility flags at extraction instead of only reporting them, which cost us 29.4% of our SOES fixes and 13.5% of NES but pulls the worst 6h step down from 12,959 km to 3,822 km. Windows take a big loss, going down by 36% and 16% against 5.7% and 3.9%, since emptying a single bin splits a contiguous run and costs up to twelve windows. We rederived Gate 2 on the refrozen standardisation and nothing important moved; A4 still returns `0.1 x p50`, the marine pair goes 1.42 -> 1.46, so no role changed, and our A8 draw probabilities become 47.911 / 39.799 / 12.290; though SOES rho flipped sign (-0.165 -> +0.041) once (what appears) the speed outliers stopped manufacturing fake reversals.
+
+
+## 26-08-2026: Tier 2 freeze and sealed evaluation — WEAK/NULL
+
+Froze the configuration (grid 11: `d_model` 256, 4 layers, LR 1e-3, 20,000 updates at batch 256), the seed set 0-4, S and F's checkpoint-selection rule and F's budget, then opened the three held-out test partitions once. Verdict **WEAK/NULL**: Z does not beat persistence on any held-out species, B (package stripped) matches or beats Z, and S reaches +0.2047 on NES. The failure is concentrated in the low displacement stratum, where Z appears to over move by up to 28x persistence's p90.
+
+## 27-08 to 20-09-2026: Tier E, exploratory, validation only
+
+Four blocks, each registered in `tierE_exploratory_ablations.md` before running, none reportable as a Tier result:
+
+- **Architecture 2x2 pooled.** Reconstruction alone (`Brecon`) reaches +0.2279 on NES, the largest pooled skill anywhere
+  in the study; the conditioning path costs on every species.
+- **Species conditioning (E0-E2).** A learned per species row helps only NES, and identity can be supplied for an unseen
+  species without its data, but it is not what was missing.
+- **F budget (Flong, Spre).** At the registered 2,000 steps fine-tuning barely moves the model; this motivated Tier 3's
+  20,000 step F.
+- **Single species 2x2 (65 runs).** Within one species the full package never beats the plain trunk, on any of four
+  species including white stork where data is not the limit; the conditioning path is negative in all four.
+
+## 16-09-2026: Tier 3 registered — source pool scaling, three sources to nine
+
+One variable changes: the pool. Configuration, budget, representation, metrics, held-out species and protocol are Tier 2's. The nine sources were chosen mechanically — keep Tier 2's three, add two per domain, maximise mean pairwise descriptor distance over training partitions only, with a 2,000 window floor. Three further species are reserved from Tier 3 and Tier 4 entirely so a later study has unread test partitions. 158 registered runs: Z9, B9, Za9, Zd3, Zd1, B9dom, F9, F3c, Sk and the Tier 1 baseline ladder rebuilt on the registered method.
+
+## 20-09-2026: A8 counts corrected before any Tier 3 run
+
+The window counter matched manifest ids to data ids as plain strings where the training pipeline matches them canonically, so four candidate species were undercounted and one was wrongly excluded by the eligibility floor. Re run mechanically on corrected counts the rule selects the same nine; only the draw probabilities move. We recoreded this as a dated correction in `preregistration_tier3.md` sec 1, with the superseded values kept inside the regenerated artefact.
+
+## 21-09-2026: Tier 3 trained and frozen
+
+All 158 runs complete, 1,876.8 SU, every run at its full budget with nothing withheld. Two things recorded in the freeze before the seal: doubling the budget to 40,000 steps does not lower the training loss, so the budget is not the binding constraint; and at the registered A8 weights white stork takes about 64% of the training loss from 33% of the draws while the three marine sources take about 3% between them, so the nine source pool is in gradient terms close to a flying species model. The pre seal prediction is recorded in sec 7.
