@@ -86,8 +86,15 @@ ample data, the full FM package never beats a plain transformer trunk, and the c
 every species tested. The masked reconstruction objective is the one component that helps, and only when learned across
 species.
 
-**Tier 3** trained (158 registered runs, 21-09-2026) and frozen; the sealed evaluation is the current step. It changes
-one variable — three source species to nine — and holds configuration, budget, representation, metrics, held-out species
-and protocol fixed.
+**Tier 3** sealed and reported (23-09-2026): **WEAK/NULL**. Changing one variable — three source species to nine, with
+configuration, budget, representation, metrics, held-out species and protocol fixed — moves zero-shot travel p90 skill by
+at most +0.018 against Tier 2, inside the ±0.05 noise scale. A three source same domain pool beats the nine source pool
+on all three held-out species by point estimate, but the gap is resolved only on northern elephant seal (+0.11), where a
+single same domain source reaches +0.18 against the nine-source +0.004 — and that source is the congeneric southern
+elephant seal, so domain and genus are confounded. Fine-tuning the nine source model loses to a specialist trained from
+scratch on the identical 1% and 10% subsets on 17 of 18 draws. In the descriptive baseline ladder the single-species LSTM
+is the strongest rung on all three species, and single-species XGBoost (which carries no validation privilege) beats
+every pooled model on two of three.
 
-**Next:** a probabilistic and multi-horizon prediction head, trait conditioning as a registered ablation, and Tier 4.
+**Next:** Tier 4 (exploratory; design to be decided), then a probabilistic and multi-horizon prediction head, cadence
+invariance and environmental covariates.
