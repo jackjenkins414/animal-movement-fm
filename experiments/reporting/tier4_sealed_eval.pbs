@@ -1,0 +1,68 @@
+#!/bin/bash
+#
+# Tier 4 sealed evaluation. Exploratory only; outputs are not tiered results.
+#
+# Default: add missing predictions and rebuild the report.
+#   qsub experiments/reporting/tier4_sealed_eval.pbs
+#
+# Re-report only:
+#   qsub -v REPORT_ONLY=1 -l walltime=02:00:00 experiments/reporting/tier4_sealed_eval.pbs
+#
+# Re-score existing predictions:
+#   qsub -v OVERWRITE=1 experiments/reporting/tier4_sealed_eval.pbs
+#
+# Dilution diagnostic only; does not open test data.
+#   qsub -v DIAGNOSTIC=1 -l walltime=00:20:00 experiments/reporting/tier4_sealed_eval.pbs
+#
+# Prediction mode requires the committed Tier 4 exploratory freeze with sec 7 completed.
+# Tier 2 and Tier 3 predictions are read from disk and never recomputed.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=03:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier4_sealed_eval
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+
+if [ "${DIAGNOSTIC:-0}" = "1" ]; then
+  phase_args=(--diagnostic)
+elif [ "${DIAGNOSTIC:-0}" != "0" ]; then
+  echo "FAIL: DIAGNOSTIC must be 1 when enabled; got '$DIAGNOSTIC'" >&2
+  exit 1
+elif [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+if [ "${OVERWRITE:-0}" = "1" ]; then
+  phase_args+=(--overwrite)
+elif [ "${OVERWRITE:-0}" != "0" ]; then
+  echo "FAIL: OVERWRITE must be 1 when enabled; got '$OVERWRITE'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/tier4_sealed_eval.py "${phase_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
