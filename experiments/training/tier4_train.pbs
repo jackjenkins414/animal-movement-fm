@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# Tier 4 training, one model per PBS subjob. Run plan: `tier4_train.py --list` (91 runs).
+#   0-4     Z26
+#   5-9     B26
+#   10-24   Za26      (gull 10-14, wolf 15-19, NES 20-24)
+#   25-29   ZdF       (gull)
+#   30-34   ZdT       (wolf)
+#   35-39   ZdM       (NES)
+#   40-44   BdM       (NES)
+#   45-49   ZdMnoMir  (NES)
+#   50-54   BdMnoMir  (NES)
+#   55-59   B26dom
+#   60-64   LSTMB26
+#   65-69   XGBB26
+#   70-90   F26       (gull 70-76, wolf 77-83, NES 84-90)
+#
+# Tier 4 is exploratory; all records are tagged accordingly and are not tiered results.
+#
+# Neural runs use STEPS=20000. XGBoost ignores STEPS, but the CLI still requires it.
+# Submit in blocks of at most 10 array jobs.
+#
+# F26 fine-tunes Z26_s0, so run 0 must finish before the F26 block is submitted.
+#
+# TrainConfig must remain unchanged across the full run set because checkpoint resume checks
+# compare the saved config against the current one.
+#
+# Optional data-side dry run:
+#   qsub -v DRY_RUN=1,INDEX=0 -l walltime=00:20:00 experiments/training/tier4_train.pbs
+#   qsub -v DRY_RUN=1 -l walltime=00:30:00 experiments/training/tier4_train.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier4_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+
+# Dry run builds the pool and exits before training.
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+# Optional single-run override outside a PBS array.
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/tier4_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
