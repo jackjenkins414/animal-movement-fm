@@ -25,7 +25,8 @@ import argparse
 import json
 import math
 import time
-from dataclasses import asdict
+from dataclasses import MISSING, asdict
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from statistics import fmean
 
@@ -701,6 +702,59 @@ def rank_probe_budgets(skills_by_budget: dict[int, list[float]]) -> list[dict]:
     return candidates
 
 
+# GenAI reference: I ran into a case of our sealed probe failing, so asked GenAI to write a config comparision below; trainConfig has 
+# gained fields since those probes were written (use_context_conditioning, n_species, species_embed_dim, random_species_labels, 
+# freeze_except_species_embedding, trunk for the plain trunk arms, and species_label_map for B9dom), and species_label_map is a tuple, 
+# which JSON cannot round trip. It now compares field by field instead; 
+def _config_field_defaults() -> dict:
+    """
+    The TrainConfig defaults, for deciding whether an absent field is one this probe predates.
+    """
+    defaults = {}
+    for field in dataclass_fields(TrainConfig):
+        if field.default is not MISSING:
+            defaults[field.name] = field.default
+        elif field.default_factory is not MISSING:
+            defaults[field.name] = field.default_factory()
+    return defaults
+
+
+def _comparable(value):
+    """
+    Normalise a config value so a JSON round trip does not change it; tuples and lists both become lists.
+    """
+    if isinstance(value, (list, tuple)):
+        return [_comparable(item) for item in value]
+    return value
+
+
+def compare_registered_config(config: dict, expected: dict) -> tuple[list[str], list[str]]:
+    """
+    Compare a stored run config against a freshly built one, field by field.
+
+    Returns (mismatches, absent_at_default). A field missing from `config` is accepted only when the expected value is
+    the TrainConfig default, and it is named in the second list so the caller can record what it waived.
+    """
+    defaults = _config_field_defaults()
+    mismatches = []
+    absent_at_default = []
+
+    for name, want in sorted(expected.items()):
+        if name not in config:
+            if name in defaults and _comparable(defaults[name]) == _comparable(want):
+                absent_at_default.append(name)
+            else:
+                mismatches.append(f"{name} absent, registered {want!r}")
+            continue
+        if _comparable(config[name]) != _comparable(want):
+            mismatches.append(f"{name} = {config[name]!r}, registered {want!r}")
+
+    for name in sorted(set(config) - set(expected)):
+        mismatches.append(f"{name} = {config[name]!r} is not a TrainConfig field")
+
+    return mismatches, absent_at_default
+
+
 def _validate_registered_probe_run(run: dict, fold_index: int, path: Path) -> None:
     """
     Fail closed if a probe file is not one of the three corrected full FM runs.
@@ -710,6 +764,7 @@ def _validate_registered_probe_run(run: dict, fold_index: int, path: Path) -> No
     expected_config = asdict(
         build_inner_loop_config(PROBE_GRID_INDEX, REGISTERED_PROBE_BUDGETS[-1], PROBE_SEED)
     )
+    config_mismatches, absent_at_default = compare_registered_config(config, expected_config)
     score_steps = [score.get("steps") for score in run.get("scores", [])]
     checks = {
         "run_id": run.get("run_id") == expected_id,
@@ -720,7 +775,7 @@ def _validate_registered_probe_run(run: dict, fold_index: int, path: Path) -> No
         "maximum steps": config.get("steps") == REGISTERED_PROBE_BUDGETS[-1],
         "FM package": config.get("use_fm_package") is True,
         "reconstruction head": config.get("use_reconstruction_head") is True,
-        "complete registered configuration": config == expected_config,
+        "complete registered configuration": not config_mismatches,
         "probe marker": run.get("probe") is True,
         "probe design": run.get("probe_design") == PROBE_DESIGN,
         "registered budgets": run.get("probe_budgets") == list(REGISTERED_PROBE_BUDGETS),
@@ -728,7 +783,13 @@ def _validate_registered_probe_run(run: dict, fold_index: int, path: Path) -> No
     }
     failed = [label for label, passed in checks.items() if not passed]
     if failed:
-        raise SystemExit(f"FAIL: {path} is not a corrected registered probe: {', '.join(failed)}")
+        detail = f"\n  config: {'; '.join(config_mismatches)}" if config_mismatches else ""
+        raise SystemExit(
+            f"FAIL: {path} is not a corrected registered probe: {', '.join(failed)}{detail}"
+        )
+    if absent_at_default:
+        # the probe predates these fields; accepted at the TrainConfig default, and named so the run leaves a trace
+        print(f"  {path.name}: accepted absent-and-default fields: {', '.join(absent_at_default)}")
 
 
 def report_probe_selection() -> None:

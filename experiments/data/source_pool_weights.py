@@ -119,24 +119,34 @@ TIER3_MIN_TRAIN_WINDOWS = 2_000  # preregistration_tier3.md sec 1, candidate con
 TIER3_OUT = REPO / "registered" / "tier3_source_pool.json"
 
 
+def sub_pools_for(domains: dict[str, str], counts: dict[str, int]) -> dict:
+    """
+    A8 draw probabilities for the `domain_<domain>` and `without_<domain>` sub pools of one pool.
+
+    `domains` maps every pool member to its domain; `counts` holds their training window counts. A single species
+    sub pool (Tier 3's Zd1, Tier 4's carried Zd1) needs no entry, because its draw probability is 1.0.
+    """
+    pool = list(domains)
+    pools = {}
+    for domain in sorted(set(domains.values())):
+        outside = [n for n in pool if domains[n] != domain]
+        inside = [n for n in pool if domains[n] == domain]
+        pools[f"without_{domain}"] = draw_probabilities({n: counts[n] for n in outside})
+        pools[f"domain_{domain}"] = draw_probabilities({n: counts[n] for n in inside})
+    return pools
+
+
 def tier3_sub_pools(payload: dict) -> dict:
     """
     A8 draw probabilities for the Tier 3 sub pools, which we recompute from the registered counts alone.
 
-    `without_<domain>` is Za9s pool (the 6 sources outside that domain); `domain_<domain>` is Zd3's (the three inside it). Zd1 is a single 
+    `without_<domain>` is Za9s pool (the 6 sources outside that domain); `domain_<domain>` is Zd3's (the three inside it). Zd1 is a single
     species and needs no entry.
     """
-    counts = payload["train_window_counts"]
     domain_of = dict(payload["fixed"])
     for domain, added in payload["added"].items():
         domain_of.update({name: domain for name in added})
-    pools = {}
-    for domain in sorted(set(domain_of.values())):
-        outside = [n for n in payload["pool"] if domain_of[n] != domain]
-        inside = [n for n in payload["pool"] if domain_of[n] == domain]
-        pools[f"without_{domain}"] = draw_probabilities({n: counts[n] for n in outside})
-        pools[f"domain_{domain}"] = draw_probabilities({n: counts[n] for n in inside})
-    return pools
+    return sub_pools_for({n: domain_of[n] for n in payload["pool"]}, payload["train_window_counts"])
 
 
 def tier3(args: argparse.Namespace) -> None:
@@ -272,6 +282,292 @@ def tier3(args: argparse.Namespace) -> None:
     print(f"wrote {TIER3_OUT.relative_to(REPO)}")
 
 
+# GenAI reference: based off my specification, the Tier 4 mode below, the pool derived from the eligibility gate and then asserted
+# against the 26 in tier4_exploratory_freeze.md sec 1, the stork dedupe, A8 over the corrected id_key counts, the seven sub pools, 
+# the pinned check percentages, and the refusal of held-out and reserved species. I used GenAI to draft this; copied it into this file;
+# i reviewed and checked the code as well. 
+TIER4_OUT = REPO / "registered" / "tier4_source_pool.json"
+
+# tier4_exploratory_freeze.md sec 1: the pool is the eligible species minus these two groups
+TIER4_HELD_OUT = frozenset(stem for stem, _, _, role in ROLES if role == "held-out")
+TIER4_RESERVED = frozenset({"anser_albifrons", "ovis_dalli", "pygoscelis_adeliae"}) 
+
+# `stork` and `ciconia_ciconia` are two extracts of one species and both clear gate 1, so the eligibility table holds
+# two rows for it. The pool keys the species by its segments stem, `ciconia_ciconia`, which is what every registered
+# artefact and tier3_train.py already use; the older `stork` row collapses onto it before the pool is derived.
+TIER4_ELIGIBILITY_ALIAS = {"stork": "ciconia_ciconia"}
+TIER4_PROFILE_KEY = dict(TIER3_PROFILE_KEY)  # the stork's profile row is still keyed `white_stork`
+SPLIT_STEM = {"ciconia_ciconia": "stork"}  # the one source whose manifest stem differs from its segments stem
+
+# the 26 sources of tier4_exploratory_freeze.md sec 1. The pool is derived from the eligibility gate, not read from
+# here; this is the assertion the derivation has to match
+TIER4_POOL: dict[str, str] = {
+    "anser_caerulescens": "flying",
+    "branta_canadensis": "flying",
+    "cathartes_aura": "flying",
+    "ciconia_ciconia": "flying",
+    "corvus_corone": "flying",
+    "diomedea_exulans": "flying",
+    "falco_naumanni": "flying",
+    "gyps_himalayensis": "flying",
+    "haematopus_ostralegus": "flying",
+    "milvus_milvus": "flying",
+    "mycteria_americana": "flying",
+    "pernis_apivorus": "flying",
+    "thalassarche_chrysostoma": "flying",
+    "thalassoica_antarctica": "flying",
+    "bison_bison": "terrestrial",
+    "canis_latrans": "terrestrial",
+    "cervus_elaphus": "terrestrial",
+    "connochaetes_taurinus": "terrestrial",
+    "lynx_rufus": "terrestrial",
+    "aptenodytes_patagonicus": "marine",
+    "arctocephalus_gazella": "marine",
+    "eudyptes_chrysolophus": "marine",
+    "leptonychotes_weddellii": "marine",
+    "lobodon_carcinophaga": "marine",
+    "mirounga_leonina": "marine",
+    "odobenus_rosmarus": "marine",
+}
+
+# ZdM-noMir and BdM-noMir (tier4_exploratory_freeze.md sec 2) draw from the marine sources without the held-out species' congener
+TIER4_NO_MIROUNGA = "marine_no_mirounga"
+TIER4_NO_MIROUNGA_EXCLUDES = "mirounga_leonina"
+
+# registered A8 percentages, to 3 dp; the freeze prints the pool but not the probabilities, so these constants are the record, in the 
+# same sense as tier3_train.REGISTERED_SOURCE_PERCENT. A mismatch is a failure, not a warning; an idea from GenAI that we adopt
+TIER4_SOURCE_PERCENT: dict[str, float] = {
+    "ciconia_ciconia": 14.949, "cervus_elaphus": 12.418, "cathartes_aura": 7.645, "anser_caerulescens": 7.439,
+    "mycteria_americana": 6.182, "haematopus_ostralegus": 5.940, "corvus_corone": 5.568, "branta_canadensis": 5.256,
+    "mirounga_leonina": 3.835, "connochaetes_taurinus": 3.774, "bison_bison": 3.233, "canis_latrans": 3.213,
+    "falco_naumanni": 2.977, "milvus_milvus": 2.644, "pernis_apivorus": 2.497, "lynx_rufus": 2.366,
+    "gyps_himalayensis": 1.633, "leptonychotes_weddellii": 1.462, "arctocephalus_gazella": 1.225,
+    "diomedea_exulans": 0.970, "eudyptes_chrysolophus": 0.884, "thalassarche_chrysostoma": 0.856,
+    "thalassoica_antarctica": 0.843, "odobenus_rosmarus": 0.826, "lobodon_carcinophaga": 0.796,
+    "aptenodytes_patagonicus": 0.569,
+}
+
+TIER4_SUB_POOL_PERCENT: dict[str, dict[str, float]] = {
+    "domain_flying": {
+        "ciconia_ciconia": 22.858, "cathartes_aura": 11.689, "anser_caerulescens": 11.375,
+        "mycteria_americana": 9.453, "haematopus_ostralegus": 9.083, "corvus_corone": 8.514,
+        "branta_canadensis": 8.037, "falco_naumanni": 4.553, "milvus_milvus": 4.043, "pernis_apivorus": 3.818,
+        "gyps_himalayensis": 2.496, "diomedea_exulans": 1.483, "thalassarche_chrysostoma": 1.309,
+        "thalassoica_antarctica": 1.289,
+    },
+    "domain_terrestrial": {
+        "cervus_elaphus": 49.664, "connochaetes_taurinus": 15.095, "bison_bison": 12.930,
+        "canis_latrans": 12.849, "lynx_rufus": 9.463,
+    },
+    "domain_marine": {
+        "mirounga_leonina": 39.961, "leptonychotes_weddellii": 15.238, "arctocephalus_gazella": 12.763,
+        "eudyptes_chrysolophus": 9.208, "odobenus_rosmarus": 8.603, "lobodon_carcinophaga": 8.293,
+        "aptenodytes_patagonicus": 5.933,
+    },
+    "marine_no_mirounga": {
+        "leptonychotes_weddellii": 25.381, "arctocephalus_gazella": 21.258, "eudyptes_chrysolophus": 15.337,
+        "odobenus_rosmarus": 14.329, "lobodon_carcinophaga": 13.813, "aptenodytes_patagonicus": 9.882,
+    },
+    "without_flying": {
+        "cervus_elaphus": 35.890, "mirounga_leonina": 11.083, "connochaetes_taurinus": 10.908,
+        "bison_bison": 9.344, "canis_latrans": 9.285, "lynx_rufus": 6.838, "leptonychotes_weddellii": 4.226,
+        "arctocephalus_gazella": 3.540, "eudyptes_chrysolophus": 2.554, "odobenus_rosmarus": 2.386,
+        "lobodon_carcinophaga": 2.300, "aptenodytes_patagonicus": 1.646,
+    },
+    "without_terrestrial": {
+        "ciconia_ciconia": 19.933, "cathartes_aura": 10.194, "anser_caerulescens": 9.920,
+        "mycteria_americana": 8.244, "haematopus_ostralegus": 7.921, "corvus_corone": 7.424,
+        "branta_canadensis": 7.009, "mirounga_leonina": 5.113, "falco_naumanni": 3.970, "milvus_milvus": 3.526,
+        "pernis_apivorus": 3.330, "gyps_himalayensis": 2.177, "leptonychotes_weddellii": 1.950,
+        "arctocephalus_gazella": 1.633, "diomedea_exulans": 1.293, "eudyptes_chrysolophus": 1.178,
+        "thalassarche_chrysostoma": 1.141, "thalassoica_antarctica": 1.124, "odobenus_rosmarus": 1.101,
+        "lobodon_carcinophaga": 1.061, "aptenodytes_patagonicus": 0.759,
+    },
+    "without_marine": {
+        "ciconia_ciconia": 16.536, "cervus_elaphus": 13.736, "cathartes_aura": 8.456, "anser_caerulescens": 8.229,
+        "mycteria_americana": 6.839, "haematopus_ostralegus": 6.571, "corvus_corone": 6.159,
+        "branta_canadensis": 5.814, "connochaetes_taurinus": 4.175, "bison_bison": 3.576, "canis_latrans": 3.554,
+        "falco_naumanni": 3.293, "milvus_milvus": 2.925, "pernis_apivorus": 2.762, "lynx_rufus": 2.617,
+        "gyps_himalayensis": 1.806, "diomedea_exulans": 1.072, "thalassarche_chrysostoma": 0.947,
+        "thalassoica_antarctica": 0.932,
+    },
+}
+
+PERCENT_TOLERANCE = 1e-3  # the constants are 3 dp, so this is agreement to the last recorded digit
+
+
+def tier4_pool(passing: set[str], profile_domains: dict[str, str]) -> dict[str, str]:
+    """
+    Derive the Tier 4 pool from the eligibility gate and assert it against TIER4_POOL.
+
+    `passing` is the set of species clearing A7 gate 1; `profile_domains` maps species to the domain column of the
+    profile table. The derivation is eligibility minus the three held-out and three reserved species, with the two
+    stork rows collapsed first. Nothing here applies a window floor: tier4_exploratory_freeze.md sec 1 takes the
+    pool as preregistration_tier3.md sec 2 registers it, and the 2,000 window floor is a Tier 3 candidate condition.
+    """
+    eligible = {TIER4_ELIGIBILITY_ALIAS.get(name, name) for name in passing}
+    if len(eligible) != 32:
+        raise SystemExit(f"FAIL: {len(eligible)} distinct eligible species after the stork alias; sec 1 expects 32")
+
+    derived = eligible - TIER4_HELD_OUT - TIER4_RESERVED
+    expected = set(TIER4_POOL)
+    if derived != expected:
+        missing = sorted(expected - derived)
+        extra = sorted(derived - expected)
+        raise SystemExit(
+            "FAIL: the derived Tier 4 pool does not match tier4_exploratory_freeze.md sec 1.\n"
+            f"  in the freeze but not derived: {missing}\n"
+            f"  derived but not in the freeze: {extra}"
+        )
+
+    # A domain re-label (as on 15-09-2026, when the seabirds moved) would silently reshape every sub-pool, so the
+    # profile table has to agree with the freeze rather than override it.
+    drift = []
+    for name, domain in sorted(TIER4_POOL.items()):
+        key = TIER4_PROFILE_KEY.get(name, name)
+        if key not in profile_domains:
+            raise SystemExit(f"FAIL: {name} has no profile row (looked for {key!r})")
+        if profile_domains[key] != domain:
+            drift.append(f"{name}: profile says {profile_domains[key]}, the freeze says {domain}")
+    if drift:
+        raise SystemExit("FAIL: domain drift against tier4_exploratory_freeze.md sec 1\n  " + "\n  ".join(drift))
+
+    return dict(TIER4_POOL)
+
+
+def tier4_sub_pools(domains: dict[str, str], counts: dict[str, int]) -> dict:
+    """The seven Tier 4 sub pools: `domain_*` and `without_*` for the three domains, plus `marine_no_mirounga`."""
+    pools = sub_pools_for(domains, counts)
+    marine = [n for n in domains if domains[n] == "marine" and n != TIER4_NO_MIROUNGA_EXCLUDES]
+    pools[TIER4_NO_MIROUNGA] = draw_probabilities({n: counts[n] for n in marine})
+    return pools
+
+
+def check_percentages(label: str, weights: dict[str, float], registered: dict[str, float]) -> list[str]:
+    """Return every disagreement between computed A8 probabilities and the registered percentages."""
+    failures = []
+    if set(weights) != set(registered):
+        missing = sorted(set(registered) - set(weights))
+        extra = sorted(set(weights) - set(registered))
+        failures.append(f"{label} membership differs; missing {missing}, unexpected {extra}")
+        return failures
+    for name, value in sorted(weights.items()):
+        got = value * 100
+        if abs(got - registered[name]) > PERCENT_TOLERANCE:
+            failures.append(f"{label}.{name} = {got:.3f}%, registered {registered[name]:.3f}%")
+    return failures
+
+
+def refuse_excluded_species(pools: dict[str, dict[str, float]]) -> None:
+    """Fail if any pool or sub pool holds a held-out or reserved species. Checked, not assumed from construction."""
+    banned = TIER4_HELD_OUT | TIER4_RESERVED
+    hits = sorted(f"{label}.{name}" for label, probs in pools.items() for name in probs if name in banned)
+    if hits:
+        raise SystemExit(f"FAIL: held-out or reserved species in a Tier 4 pool: {hits}")
+
+
+def tier4(args: argparse.Namespace) -> None:
+    """Build the 26 source Tier 4 pool under tier4_exploratory_freeze.md sec 1 and weight it under A8."""
+    eligibility = pd.read_csv(RESULTS / "species_eligibility.csv")
+    passing = set(eligibility.loc[eligibility["clears_gate1"].astype(bool), "species"])
+    profiles = pd.read_csv(RESULTS / "regime_profiles.csv").set_index("species")
+    domains = tier4_pool(passing, profiles["domain"].to_dict())
+
+    counts: dict[str, int] = {}
+    for stem in sorted(domains):
+        counts[stem] = species_window_counts(stem, SPLIT_STEM.get(stem, stem))["train"]
+        if stem in GUARDS and counts[stem] != GUARDS[stem]["train"]:
+            raise SystemExit(f"FAIL: {stem} has {counts[stem]} training windows, registered {GUARDS[stem]['train']}")
+
+    weights = draw_probabilities(counts)
+    sub_pools = tier4_sub_pools(domains, counts)
+
+    refuse_excluded_species({"pool": weights, **sub_pools})
+
+    failures = check_percentages("source_pool", weights, TIER4_SOURCE_PERCENT)
+    for label, registered in sorted(TIER4_SUB_POOL_PERCENT.items()):
+        failures += check_percentages(label, sub_pools[label], registered)
+    if failures:
+        raise SystemExit(
+            "FAIL: A8 probabilities do not match the registered Tier 4 percentages\n  " + "\n  ".join(failures)
+        )
+
+    print(f"C={CONTEXT_LENGTH}; alpha={ALPHA}; {len(domains)} sources, {sum(counts.values()):,} training windows")
+    for domain in ("flying", "terrestrial", "marine"):
+        members = [n for n in domains if domains[n] == domain]
+        share = sum(weights[n] for n in members)
+        print(f"\n{domain} ({len(members)}), {share * 100:.3f}% of draws")
+        for name in sorted(members, key=lambda n: -counts[n]):
+            print(f"  {name:26s} n={counts[name]:9,d}  p={weights[name] * 100:7.3f}%")
+    for label in sorted(sub_pools):
+        probs = sub_pools[label]
+        print(f"\n{label} ({len(probs)})")
+        for name in sorted(probs, key=lambda n: -probs[n]):
+            print(f"  {name:26s} p={probs[name] * 100:7.3f}%")
+
+    payload = {
+        "_comment": [
+            "Tier 4 source pool: every eligible species except the three held-out and the three reserved, as",
+            "preregistration_tier3.md sec 2 registers it and tier4_exploratory_freeze.md sec 1 records it. No window",
+            "floor. A8 draw probabilities (alpha 0.5) over the 26, with the seven sub-pools each renormalised over",
+            "their own members. Written by source_pool_weights.py --tier4, once, then verified on every later run.",
+        ],
+        "rule": "tier4_exploratory_freeze.md sec 1",
+        "context_length": CONTEXT_LENGTH,
+        "alpha": ALPHA,
+        "min_train_windows": None,
+        "pool": sorted(domains),
+        "domains": domains,
+        "train_window_counts": counts,
+        "source_pool": weights,
+        "sub_pools": sub_pools,
+    }
+
+    if TIER4_OUT.exists():
+        previous = json.loads(TIER4_OUT.read_text())
+        same = previous["pool"] == payload["pool"] and all(
+            abs(previous["source_pool"][k] - weights[k]) <= 1e-12 for k in weights
+        )
+        if not same and not args.regenerate:
+            raise SystemExit(
+                f"FAIL: {TIER4_OUT.name} already holds a different pool; the rule is run once. Pass --regenerate "
+                "only to correct a defect in its inputs, and record it in tier4_exploratory_freeze.md."
+            )
+        if not same:
+            payload["regenerated"] = {
+                "date": time.strftime("%Y-%m-%d"),
+                "reason": args.regenerate,
+                "supersedes": {
+                    "pool": previous["pool"],
+                    "source_pool": previous["source_pool"],
+                    "train_window_counts": previous.get("train_window_counts"),
+                    "sub_pools": previous.get("sub_pools"),
+                },
+            }
+            if args.no_write:
+                print("\nwould regenerate; rerun without --no-write to write it")
+                return
+            TIER4_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+            print(f"\nREGENERATED {TIER4_OUT.relative_to(REPO)}; the superseded pool is recorded inside it")
+            return
+        drift = [
+            f"sub_pools.{label}.{name}"
+            for label, probs in sub_pools.items()
+            for name, value in probs.items()
+            if abs(previous.get("sub_pools", {}).get(label, {}).get(name, float("nan")) - value) > 1e-12
+        ]
+        if drift or set(previous.get("sub_pools", {})) != set(sub_pools):
+            raise SystemExit(f"FAIL: registered Tier 4 sub-pools no longer reproduce: {drift or 'pool names differ'}")
+        print(f"\nreproduced {TIER4_OUT.relative_to(REPO)}")
+        return
+
+    if args.no_write:
+        print(f"\n{TIER4_OUT.relative_to(REPO)} does not exist; rerun without --no-write to write it")
+        return
+    TIER4_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {TIER4_OUT.relative_to(REPO)}")
+# GenAI code ends here. 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -293,9 +589,19 @@ def main() -> None:
         action="store_true",
         help="select the nine Tier 3 sources (preregistration_tier3.md sec 1) and write registered/tier3_source_pool.json",
     )
+    parser.add_argument(
+        "--tier4",
+        action="store_true",
+        help="build the 26 source Tier 4 pool (tier4_exploratory_freeze.md sec 1) and write registered/tier4_source_pool.json",
+    )
     args = parser.parse_args()
+    if args.tier3 and args.tier4:
+        raise SystemExit("FAIL: pass one of --tier3 or --tier4, not both")
     if args.tier3:
         tier3(args)
+        return
+    if args.tier4:
+        tier4(args)
         return
 
     rows = []

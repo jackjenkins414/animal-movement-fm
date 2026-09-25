@@ -243,3 +243,87 @@ def test_single_species_configs_are_the_2x2():
         cells[arm] = (config.use_fm_package, config.use_reconstruction_head)
         assert config.lr == final_train.GRID[grid][2]
     assert cells == {"SB": (False, False), "SBrecon": (False, True), "SZrecon": (True, False), "SZ": (True, True)}
+
+
+# GenAI reference: I asked GenAI to cover the narrowed probe config check; the JSON round trip, a field that is
+# absent but not at its default, a present field with the wrong value, and the three sealed probe files on disk.
+from pathlib import Path
+
+SEALED_PROBES = Path(inner_loop.__file__).resolve().parents[2] / "results" / "tier2_inner_loop_T3_excluded"
+ADDED_AFTER_THE_PROBES = [
+    "freeze_except_species_embedding",
+    "n_species",
+    "random_species_labels",
+    "species_embed_dim",
+    "species_label_map",
+    "trunk",
+    "use_context_conditioning",
+]
+
+
+def _expected_probe_config():
+    return asdict(
+        build_inner_loop_config(
+            inner_loop.PROBE_GRID_INDEX, REGISTERED_PROBE_BUDGETS[-1], inner_loop.PROBE_SEED
+        )
+    )
+
+
+def test_a_json_round_trip_of_the_registered_config_still_compares_equal():
+    # species_label_map is a tuple and comes back from JSON as a list; that is not a mismatch. 
+    expected = _expected_probe_config()
+    stored = json.loads(json.dumps(expected))
+    assert stored["species_label_map"] == [] and expected["species_label_map"] == ()
+    mismatches, absent = inner_loop.compare_registered_config(stored, expected)
+    assert mismatches == []
+    assert absent == []
+
+
+def test_an_absent_field_whose_registered_value_is_not_the_default_fails():
+    expected = _expected_probe_config()
+    stored = {k: v for k, v in expected.items() if k != "d_model"}
+    mismatches, absent = inner_loop.compare_registered_config(stored, expected)
+    assert absent == []
+    assert len(mismatches) == 1 and mismatches[0].startswith("d_model absent")
+
+
+def test_an_absent_field_at_its_default_is_accepted_and_named():
+    expected = _expected_probe_config()
+    stored = {k: v for k, v in expected.items() if k != "trunk"}
+    mismatches, absent = inner_loop.compare_registered_config(stored, expected)
+    assert mismatches == []
+    assert absent == ["trunk"]
+
+
+def test_a_present_field_with_the_wrong_value_fails():
+    expected = _expected_probe_config()
+    for name, wrong in (("lr", 0.001), ("use_fm_package", False), ("species_label_map", [0, 1, 2])):
+        stored = {**expected, name: wrong}
+        mismatches, absent = inner_loop.compare_registered_config(stored, expected)
+        assert absent == []
+        assert len(mismatches) == 1 and mismatches[0].startswith(name), name
+
+
+def test_an_unknown_field_fails():
+    expected = _expected_probe_config()
+    stored = {**expected, "invented_option": 1}
+    mismatches, _ = inner_loop.compare_registered_config(stored, expected)
+    assert any("invented_option" in message for message in mismatches)
+
+
+@pytest.mark.skipif(not SEALED_PROBES.is_dir(), reason="the sealed Tier 2 probe results are not on this machine")
+def test_the_sealed_probe_files_validate_and_name_the_fields_added_after_them(capsys):
+    expected = _expected_probe_config()
+    paths = sorted(SEALED_PROBES.glob("*_registered_fullfm_probe.json"))
+    assert len(paths) == 3
+
+    for fold_index, path in enumerate(paths):
+        run = json.loads(path.read_text())
+        mismatches, absent = inner_loop.compare_registered_config(run["config"], expected)
+        assert mismatches == [], f"{path.name}: {mismatches}"
+        assert absent == ADDED_AFTER_THE_PROBES, path.name
+        inner_loop._validate_registered_probe_run(run, fold_index, path)
+
+    printed = capsys.readouterr().out
+    for name in ADDED_AFTER_THE_PROBES:
+        assert name in printed
