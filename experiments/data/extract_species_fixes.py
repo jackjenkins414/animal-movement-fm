@@ -347,6 +347,26 @@ def main() -> None:
             "Pass --allow-role-species only if that is genuinely what you mean."
         )
 
+    # GenAI reference: GenAI added told me to add this guard (which I checked and agree with). The summary is only ever added to: an
+    # unreadable summary stops the run rather than starting a fresh one, and a species that already has an entry or a fixes file is 
+    # refused, so no existing extract is replaced. There is deliberately no override flag.
+    summary_path = args.out_dir / "species_fixes_summary.json"
+    existing = {}
+    if summary_path.exists():
+        try:
+            existing = {s["species"]: s for s in json.loads(summary_path.read_text())}
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise SystemExit(f"FAIL: could not parse {summary_path} ({exc}); nothing was extracted.")
+    already = [
+        name for name in species
+        if name in existing or (args.out_dir / f"{slug(name)}_fixes.parquet").exists()
+    ]
+    if already:
+        raise SystemExit(
+            f"FAIL: {', '.join(already)} already have a summary entry or a fixes file in {args.out_dir}; "
+            "existing extracts are never replaced. Nothing was extracted."
+        )
+
     paths = {
         "locations": str(args.data_root / "locations_gps.parquet"),
         "individuals": str(args.data_root / "individuals.parquet"),
@@ -392,14 +412,7 @@ def main() -> None:
             f"{stats['fixes_dropped_by_qc']:,} dropped by QC)"
         )
 
-    # merge summaries because species may be extracted in separate runs
-    summary_path = args.out_dir / "species_fixes_summary.json"
-    existing = {}
-    if summary_path.exists():
-        try:
-            existing = {s["species"]: s for s in json.loads(summary_path.read_text())}
-        except (json.JSONDecodeError, KeyError, TypeError):
-            print(f"warning: could not parse {summary_path}; starting a fresh summary")
+    # merge summaries because species may be extracted in separate runs; the guard above means this only adds
     existing.update({s["species"]: s for s in summaries})
     merged = sorted(existing.values(), key=lambda s: s["species"])
     summary_path.write_text(json.dumps(merged, indent=2, default=str) + "\n", encoding="utf-8")

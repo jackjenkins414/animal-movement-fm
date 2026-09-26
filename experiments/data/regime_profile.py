@@ -1,7 +1,8 @@
 # GenAI reference: I wrote the docstring, the CLI design (training individuals only profiling, shared cadence flag) and
 # the call into profile_species(); GenAI helped with the CSV append/replace logic and the terminal print summaries.
 # It was verified by rerunning the stork profile and checking the printed p50/boundary matched profile_species() directly,
-# and that a repeat run replaced the species row rather than duplicating it.
+# and that a repeat run replaced the species row rather than duplicating it. We later modified this ourselves so the bird 
+# study's rows go to their own table; it refuses --decide-threshold and --reselect, which only run on the shared one
 """
 Create a movement regime profile for one species.
 
@@ -123,11 +124,24 @@ def parse_args() -> argparse.Namespace:
         help="assert that the accumulated CSV holds every mechanically eligible candidate's "
         "training-only profile, then apply the tree registered in amendment A4",
     )
+    p.add_argument(
+        "--out-csv",
+        type=Path,
+        default=OUT_CSV,
+        help="profile table to add this species' row to; anything but the default refuses --decide-threshold "
+             "and --reselect",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # the A4 decision and the screening standardisation are defined over the shared table, never a separate one
+    if args.out_csv.resolve() != OUT_CSV.resolve() and (args.decide_threshold or args.reselect):
+        raise SystemExit(
+            f"FAIL: --decide-threshold and --reselect run only on {OUT_CSV}, not on {args.out_csv}. Nothing was written."
+        )
 
     path = Path(args.segments)
     if not path.exists():
@@ -171,14 +185,15 @@ def main() -> None:
         )
     )
 
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    if OUT_CSV.exists():
-        table = pd.read_csv(OUT_CSV)
+    out_csv = args.out_csv
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    if out_csv.exists():
+        table = pd.read_csv(out_csv)
         table = table[table["species"] != args.name]  # Replace any earlier profile for this species
         table = pd.concat([table, pd.DataFrame([row])], ignore_index=True)
     else:
         table = pd.DataFrame([row])
-    table.to_csv(OUT_CSV, index=False)
+    table.to_csv(out_csv, index=False)
 
     print(
         f"\n  p50 / p75 / p90: {row['step_p50_m']:,.1f} / "
@@ -341,7 +356,7 @@ def main() -> None:
             "registered/tier2_descriptor_standardisation.json (A16)"
         )
 
-    print(f"\nprofiles -> {OUT_CSV}")
+    print(f"\nprofiles -> {out_csv}")
 
 
 if __name__ == "__main__":

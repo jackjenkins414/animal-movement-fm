@@ -1,0 +1,52 @@
+{
+  "note": "Split for 'anser_brachyrhynchus' generated from anser_brachyrhynchus_segments.parquet under the A7 split-specific policy: seed=42, evaluation floor F=25 (A5), context_length=12 (A6), 10 validation and 10 test drawn from the >=F pool, training taking every remaining individual with >=1 valid window.",
+  "n_train": 20,
+  "n_val": 10,
+  "n_test": 10,
+  "train": [
+    2449515955,
+    2449515956,
+    2449515957,
+    2449515958,
+    2449515963,
+    2449515964,
+    2449515965,
+    2449515970,
+    2449515971,
+    2449515972,
+    2449515973,
+    2449515974,
+    2449515976,
+    2449515978,
+    2449515980,
+    2449516008,
+    2449516075,
+    2449516078,
+    2449516082,
+    2449516084
+  ],
+  "val": [
+    2449515961,
+    2449515966,
+    2449515975,
+    2449515977,
+    2449515979,
+    2449516010,
+    2449516012,
+    2449516013,
+    2449516071,
+    2449516083
+  ],
+  "test": [
+    2449515959,
+    2449515960,
+    2449515962,
+    2449516009,
+    2449516011,
+    2449516014,
+    2449516015,
+    2449516016,
+    2449516081,
+    2449516085
+  ]
+}

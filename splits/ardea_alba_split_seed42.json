@@ -1,0 +1,52 @@
+{
+  "note": "Split for 'ardea_alba' generated from ardea_alba_segments.parquet under the A7 split-specific policy: seed=42, evaluation floor F=25 (A5), context_length=12 (A6), 10 validation and 10 test drawn from the >=F pool, training taking every remaining individual with >=1 valid window.",
+  "n_train": 20,
+  "n_val": 10,
+  "n_test": 10,
+  "train": [
+    8867931,
+    8867935,
+    8867936,
+    18418659,
+    18427303,
+    18427348,
+    67279348,
+    179002190,
+    179002324,
+    4944569749,
+    4944569754,
+    4944569755,
+    4944569758,
+    4944569759,
+    4944569762,
+    4944569763,
+    4944569764,
+    4944569765,
+    4944569767,
+    4944569771
+  ],
+  "val": [
+    8867929,
+    8867930,
+    8867934,
+    78588007,
+    487944942,
+    4944569752,
+    4944569756,
+    4944569768,
+    4944569769,
+    4944569772
+  ],
+  "test": [
+    8867928,
+    8867932,
+    8867933,
+    8867937,
+    78588036,
+    4944569751,
+    4944569753,
+    4944569757,
+    4944569766,
+    4944569770
+  ]
+}

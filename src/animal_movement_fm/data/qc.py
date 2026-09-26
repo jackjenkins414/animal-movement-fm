@@ -167,6 +167,8 @@ def _from_donor(donor: str, note: str) -> SpeedCeiling:
     return SpeedCeiling(base.instant_kmh, base.sustained_kmh, f"bound from {donor}; {note}")
 
 
+_BIRD_STUDY_NOTE = "not covered by the 15-09-2026 review; bound taken unchanged from the flier donor"
+
 # (species, donor, provenance). "no published maximum" means the 15-09-2026 review found none at either
 # averaging window for that species. The 6h p90 is this project's own measurement from regime_profiles.csv and
 # is context, not justification: it is a resampled bin-to-bin speed, while the ceiling is applied at raw
@@ -226,6 +228,22 @@ _INHERITED: tuple[tuple[str, str, str], ...] = (
     ("Larus argentatus", "wind-assisted flier", "no published maximum; registered so the species can be "
                                                 "built, but barred from a source role by the Tier 3 "
                                                 "registration"),
+    # GenAI reference: rows below added by GenAI for the bird-only study's 13 first-time extracts (26-09-2026); donor
+    # and note wording approved by me. None was in the 15-09-2026 review, so the note says so rather than claiming
+    # that no maximum has been published.
+    ("Hydroprogne caspia", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Anas platyrhynchos", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Branta leucopsis", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Anser fabalis", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Anser anser", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Anser brachyrhynchus", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Falco tinnunculus", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Streptopelia turtur", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Pelecanus occidentalis", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Phoenicopterus roseus", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Platalea leucorodia", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Morus bassanus", "wind-assisted flier", _BIRD_STUDY_NOTE),
+    ("Ardea alba", "wind-assisted flier", _BIRD_STUDY_NOTE),
 )
 
 SPEED_CEILINGS.update(

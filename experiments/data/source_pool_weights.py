@@ -568,6 +568,229 @@ def tier4(args: argparse.Namespace) -> None:
     print(f"\nwrote {TIER4_OUT.relative_to(REPO)}")
 # GenAI code ends here. 
 
+# GenAI reference: GenAI wrote part of this below (the main framework I copied myself from the above and modified for the bird fm;
+# GenAI cleaned and then added 2 of the functions and fixed spelling in my latin names)
+BIRDS_OUT = REPO / "registered" / "birds_source_pool.json"
+BIRDS_RESULTS = RESULTS / "birds"  # gate and profile tables for the 14 species first extracted for this study
+
+BIRDS_HELD_OUT = frozenset({"larus_fuscus", "anser_albifrons", "streptopelia_turtur"})
+# preregistration_tier3.md sec 2 reserves three species; the goose is released for this study only
+BIRDS_RESERVED = TIER4_RESERVED - {"anser_albifrons"}
+BIRDS_ELIGIBLE_FLYING = 30
+
+# the pools are derived from the gate, not read from here; these are the assertions the derivation has to match
+BIRDS_CONGENERS = frozenset(
+    {"larus_argentatus", "anser_caerulescens", "anser_fabalis", "anser_anser", "anser_brachyrhynchus"}
+)
+BIRDS_MAIN_POOL = frozenset({
+    "ciconia_ciconia", "cathartes_aura", "haematopus_ostralegus", "mycteria_americana", "corvus_corone",
+    "branta_canadensis", "falco_naumanni", "pernis_apivorus", "milvus_milvus", "gyps_himalayensis",
+    "diomedea_exulans", "thalassarche_chrysostoma", "thalassoica_antarctica", "anas_platyrhynchos",
+    "branta_leucopsis", "hydroprogne_caspia", "pelecanus_occidentalis", "falco_tinnunculus", "phoenicopterus_roseus",
+    "platalea_leucorodia", "morus_bassanus", "ardea_alba",
+})
+
+# sec 3: A. albifrons training birds with >= 100 fixes duplicated in a val or test bird, left out of every goose training
+# set. Recorded in the registered file so the driver reads its exclusions from there
+BIRDS_TRAINING_EXCLUSIONS: dict[str, tuple[int, ...]] = {
+    "anser_albifrons": (490431939, 662388807, 1056306620, 662388728, 133992693, 133992680),
+}
+
+# registered A8 percentages, to 3 dp. Pinned 26-09-2026 from the reviewed --no-write dry run; while either is empty,
+# --birds refuses to write the registered file
+BIRDS_MAIN_PERCENT: dict[str, float] = {
+    "ciconia_ciconia": 17.150, "cathartes_aura": 8.770, "mycteria_americana": 7.093, "haematopus_ostralegus": 6.815,
+    "corvus_corone": 6.388, "branta_canadensis": 6.030, "hydroprogne_caspia": 5.849, "platalea_leucorodia": 5.570,
+    "phoenicopterus_roseus": 5.174, "anas_platyrhynchos": 4.847, "branta_leucopsis": 4.476, "falco_naumanni": 3.416,
+    "milvus_milvus": 3.033, "pernis_apivorus": 2.865, "ardea_alba": 2.782, "falco_tinnunculus": 2.377,
+    "gyps_himalayensis": 1.873, "pelecanus_occidentalis": 1.602, "diomedea_exulans": 1.112,
+    "thalassarche_chrysostoma": 0.982, "thalassoica_antarctica": 0.967, "morus_bassanus": 0.829,
+}
+BIRDS_CONGENER_PERCENT: dict[str, float] = {
+    "ciconia_ciconia": 13.324, "larus_argentatus": 8.402, "cathartes_aura": 6.814, "anser_caerulescens": 6.631,
+    "mycteria_americana": 5.510, "haematopus_ostralegus": 5.294, "corvus_corone": 4.963, "branta_canadensis": 4.685,
+    "hydroprogne_caspia": 4.544, "anser_anser": 4.474, "platalea_leucorodia": 4.328, "phoenicopterus_roseus": 4.020,
+    "anas_platyrhynchos": 3.765, "branta_leucopsis": 3.477, "falco_naumanni": 2.654, "milvus_milvus": 2.357,
+    "pernis_apivorus": 2.226, "ardea_alba": 2.161, "anser_fabalis": 2.040, "falco_tinnunculus": 1.847,
+    "gyps_himalayensis": 1.455, "pelecanus_occidentalis": 1.245, "diomedea_exulans": 0.864,
+    "thalassarche_chrysostoma": 0.763, "anser_brachyrhynchus": 0.763, "thalassoica_antarctica": 0.751,
+    "morus_bassanus": 0.644,
+}
+
+
+def genus(stem: str) -> str:
+    """The genus of a binomial segments stem, e.g. `anser` for `anser_fabalis`."""
+    return stem.split("_", 1)[0]
+
+
+def refuse_birds_excluded(pools: dict) -> None:
+    """Fail if any pool holds a held-out bird or a still-reserved species. Checked, not assumed from construction."""
+    banned = BIRDS_HELD_OUT | BIRDS_RESERVED
+    hits = sorted(f"{label}.{name}" for label, members in pools.items() for name in members if name in banned)
+    if hits:
+        raise SystemExit(f"FAIL: held-out or reserved species in a bird pool: {hits}")
+
+
+def birds_pools(passing_tables: list[set[str]], profile_domains: dict[str, str]) -> dict[str, list[str]]:
+    """
+    Derive the main (22) and congener (27) bird pools and assert them against the registered lists.
+
+    `passing_tables` holds the gate-1 species of each eligibility table; `profile_domains` maps profile keys to the
+    domain column. Eligible flying birds, minus the held-out three, minus every other member of their genera, is the
+    main pool; the congener pool adds those congeners back.
+    """
+    eligible: set[str] = set()
+    for table in passing_tables:
+        aliased = {TIER4_ELIGIBILITY_ALIAS.get(name, name) for name in table}
+        twice = sorted(eligible & aliased)
+        if twice:
+            raise SystemExit(f"FAIL: {twice} pass the gate in more than one eligibility table")
+        eligible |= aliased
+
+    missing = sorted(n for n in eligible if TIER4_PROFILE_KEY.get(n, n) not in profile_domains)
+    if missing:
+        raise SystemExit(f"FAIL: no profile row for gate-1 species {missing}")
+    flying = {n for n in eligible if profile_domains[TIER4_PROFILE_KEY.get(n, n)] == "flying"}
+    if len(flying) != BIRDS_ELIGIBLE_FLYING:
+        raise SystemExit(
+            f"FAIL: {len(flying)} eligible flying birds after the stork alias; preregistration_birds.md expects "
+            f"{BIRDS_ELIGIBLE_FLYING}"
+        )
+
+    held_out_genera = {genus(n) for n in BIRDS_HELD_OUT}
+    congeners = {n for n in flying - BIRDS_HELD_OUT if genus(n) in held_out_genera}
+    main = flying - BIRDS_HELD_OUT - congeners
+    for label, derived, expected in (("congeners", congeners, BIRDS_CONGENERS), ("main pool", main, BIRDS_MAIN_POOL)):
+        if derived != expected:
+            raise SystemExit(
+                f"FAIL: the derived {label} does not match preregistration_birds.md sec 3.\n"
+                f"  registered but not derived: {sorted(expected - derived)}\n"
+                f"  derived but not registered: {sorted(derived - expected)}"
+            )
+
+    pools = {"main": sorted(main), "congener": sorted(main | congeners)}
+    if set(pools["congener"]) - set(pools["main"]) != BIRDS_CONGENERS or len(pools["congener"]) != 27:
+        raise SystemExit("FAIL: the congener pool is not the main pool plus exactly the five congeners")
+    refuse_birds_excluded(pools)
+    return pools
+
+
+def check_counts_against_tier4(counts: dict[str, int], registered: dict[str, int]) -> int:
+    """Every source shared with Tier 4 must reproduce its registered training-window count. Returns how many matched."""
+    shared = sorted(set(counts) & set(registered))
+    drift = [f"{n}: {counts[n]} here, {registered[n]} in {TIER4_OUT.name}" for n in shared if counts[n] != registered[n]]
+    if drift:
+        raise SystemExit("FAIL: training-window counts differ from the registered Tier 4 pool\n  " + "\n  ".join(drift))
+    return len(shared)
+
+
+def register_birds(payload: dict, args: argparse.Namespace) -> None:
+    """Write `registered/birds_source_pool.json` once, and verify it on every later run."""
+    if BIRDS_OUT.exists():
+        previous = json.loads(BIRDS_OUT.read_text())
+        same = (
+            previous["pools"] == payload["pools"]
+            and previous.get("training_exclusions") == payload["training_exclusions"]
+            and all(
+                abs(previous["probabilities"][label][name] - value) <= 1e-12
+                for label, probs in payload["probabilities"].items()
+                for name, value in probs.items()
+            )
+        )
+        if same:
+            print(f"\nreproduced {BIRDS_OUT.relative_to(REPO)}")
+            return
+        if not args.regenerate:
+            raise SystemExit(
+                f"FAIL: {BIRDS_OUT.name} already holds a different pool; the rule is run once. Pass --regenerate "
+                "only to correct a defect in its inputs, and record it in preregistration_birds.md."
+            )
+        payload = payload | {
+            "regenerated": {
+                "date": time.strftime("%Y-%m-%d"),
+                "reason": args.regenerate,
+                "supersedes": {
+                    key: previous.get(key)
+                    for key in ("pools", "probabilities", "train_window_counts", "training_exclusions")
+                },
+            }
+        }
+
+    if args.no_write:
+        print(f"\n--no-write: {BIRDS_OUT.relative_to(REPO)} not written")
+        return
+    if not (BIRDS_MAIN_PERCENT and BIRDS_CONGENER_PERCENT):
+        raise SystemExit(
+            "FAIL: BIRDS_MAIN_PERCENT and BIRDS_CONGENER_PERCENT are not pinned. Review the --no-write dry run and pin "
+            "them before the registered file is written."
+        )
+    BIRDS_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {BIRDS_OUT.relative_to(REPO)}")
+
+
+def birds(args: argparse.Namespace) -> None:
+    """Build the two bird pools under preregistration_birds.md sec 3 and weight each under A8."""
+    passing_tables = []
+    for path in (RESULTS / "species_eligibility.csv", BIRDS_RESULTS / "species_eligibility.csv"):
+        table = pd.read_csv(path)
+        passing_tables.append(set(table.loc[table["clears_gate1"].astype(bool), "species"]))
+    profile_domains: dict[str, str] = {}
+    for path in (RESULTS / "regime_profiles.csv", BIRDS_RESULTS / "regime_profiles.csv"):
+        profiles = pd.read_csv(path)
+        for name, domain in zip(profiles["species"], profiles["domain"]):
+            if profile_domains.get(name, domain) != domain:
+                raise SystemExit(f"FAIL: {name} has conflicting domains across the two profile tables")
+            profile_domains[name] = domain
+    pools = birds_pools(passing_tables, profile_domains)
+
+    counts: dict[str, int] = {}
+    for stem in pools["congener"]:
+        counts[stem] = species_window_counts(stem, SPLIT_STEM.get(stem, stem))["train"]
+        if stem in GUARDS and counts[stem] != GUARDS[stem]["train"]:
+            raise SystemExit(f"FAIL: {stem} has {counts[stem]} training windows, registered {GUARDS[stem]['train']}")
+    matched = check_counts_against_tier4(counts, json.loads(TIER4_OUT.read_text())["train_window_counts"])
+
+    weights = {label: draw_probabilities({n: counts[n] for n in members}) for label, members in pools.items()}
+    refuse_birds_excluded(weights)
+    failures = []
+    for label, registered in (("main", BIRDS_MAIN_PERCENT), ("congener", BIRDS_CONGENER_PERCENT)):
+        if registered:
+            failures += check_percentages(label, weights[label], registered)
+    if failures:
+        raise SystemExit("FAIL: A8 probabilities do not match the registered bird percentages\n  " + "\n  ".join(failures))
+
+    print(f"C={CONTEXT_LENGTH}; alpha={ALPHA}; {matched} sources reproduce their Tier 4 training-window counts")
+    for label, probs in weights.items():
+        print(f"\n{label} ({len(probs)}), {sum(counts[n] for n in probs):,} training windows")
+        for name in sorted(probs, key=lambda n: -counts[n]):
+            marker = "  (congener)" if name in BIRDS_CONGENERS else ""
+            print(f"  {name:26s} n={counts[name]:9,d}  p={probs[name] * 100:7.3f}%{marker}")
+    for species, ids in BIRDS_TRAINING_EXCLUSIONS.items():
+        print(f"\ntraining exclusions, {species}: {', '.join(map(str, ids))}")
+
+    payload = {
+        "_comment": [
+            "Bird-only study pools (preregistration_birds.md sec 3): every eligible flying bird except the three",
+            "held out and their congeners (main, 22), and the same plus the five congeners (congener, 27). No window",
+            "floor. A8 draw probabilities (alpha 0.5), renormalised within each pool. training_exclusions lists the",
+            "individuals left out of every training set for that species. Written by source_pool_weights.py --birds,",
+            "once, then verified on every later run.",
+        ],
+        "rule": "preregistration_birds.md sec 3",
+        "context_length": CONTEXT_LENGTH,
+        "alpha": ALPHA,
+        "min_train_windows": None,
+        "held_out": sorted(BIRDS_HELD_OUT),
+        "congeners": sorted(BIRDS_CONGENERS),
+        "pools": pools,
+        "train_window_counts": counts,
+        "probabilities": weights,
+        "training_exclusions": {species: list(ids) for species, ids in BIRDS_TRAINING_EXCLUSIONS.items()},
+    }
+    register_birds(payload, args)
+# GenAI code ends here.
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -594,9 +817,18 @@ def main() -> None:
         action="store_true",
         help="build the 26 source Tier 4 pool (tier4_exploratory_freeze.md sec 1) and write registered/tier4_source_pool.json",
     )
+    parser.add_argument(
+        "--birds",
+        action="store_true",
+        help="build the bird-only study's two pools (preregistration_birds.md sec 3) and write "
+             "registered/birds_source_pool.json",
+    )
     args = parser.parse_args()
-    if args.tier3 and args.tier4:
-        raise SystemExit("FAIL: pass one of --tier3 or --tier4, not both")
+    if args.tier3 + args.tier4 + args.birds > 1:
+        raise SystemExit("FAIL: pass only one of --tier3, --tier4 or --birds")
+    if args.birds:
+        birds(args)
+        return
     if args.tier3:
         tier3(args)
         return
