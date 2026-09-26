@@ -102,3 +102,9 @@ In the marine arms loss tracks draw share within about 6 points: *M. leonina* ta
 ## 8. Note 
 
 No Tier 4 test result exists. Every arm was chosen knowing the Tier 2 and Tier 3 results. The reserved species (*A. albifrons*, *O. dalli*, *P. adeliae*) are in no pool. Only the Tier 4 sealed evaluator opens test partitions.
+
+## 9. Corrections
+
+| date | what | effect |
+|---|---|---|
+| 27-09-2026 | Report step decoded carried `tier3:` tags with Tier 3's parse_tag, so every carried Tier 3 arm was ignored in our job 179924605's report (3_scaling not scored; Zd1/Zd3, F9, Sk and Tier 3 ladder rungs absent). Tier 4's parse_tag also placed subset tags ending in a seed (Sk, F9, F3c) under that seed rather than their draw; it now reads the trailing seed. summarise_all now takes Tier 4's decoder; build_report fails if a carried arm is missing. | Report-only rerun; no predictions regenerated, no test data re-opened for new arms, no arm list/metric/reading rule changed. Note as per the code, I used GenAI to diagnose this and help correct it. |

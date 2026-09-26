@@ -319,6 +319,10 @@ def test_no_tier4_arm_is_also_a_carried_arm():
         (f"tier3:F9_{NES}_k010_d1", "F9", None, 10, 1),
         (f"tier3:Sk_{NES}_k001_d0", "Sk", None, 1, 0),
         ("tier3:ARIMA", "ARIMA", None, None, None),
+        # as Tier 3's subset files are actually named, with the seed on the end 
+        (f"tier3:F9_{NES}_k010_d1_s0", "F9", 0, 10, 1),
+        (f"tier3:Sk_{NES}_k001_d0_s0", "Sk", 0, 1, 0),
+        ("tier3:F3c_canis_lupus_k100_d0_s0", "F3c", 0, 100, 0),
     ],
 )
 def test_carried_tags_parse_to_their_arm_seed_and_draw(tag, arm, seed, k, draw):
@@ -403,3 +407,132 @@ def test_the_four_way_table_uses_each_species_own_domain_arm():
     assert E4.four_way(arms, NES)["same_domain_arm"] == "ZdM"
     table = E4.four_way(arms, NES)
     assert "ZdM" in table["travel_p90_skill"] and "ZdF" not in table["travel_p90_skill"]
+
+
+# Carried tags decoded through summarise_all. 
+# GenAI reference: GenAI wrote these tests after job 179924605's report dropped every carried Tier 3 arm; they drive the real E3.summarise_all with S2.summarise stubbed.
+CARRIED_TAGS = {
+    "tier2:P": ("P", "by_seed", -1),
+    "tier2:Z_s0": ("Z", "by_seed", 0),
+    "tier3:Z9_s0": ("Z9", "by_seed", 0),
+    "tier3:ARIMA": ("ARIMA", "by_seed", -1),
+    f"tier3:Zd1_{NES}_s0": ("Zd1", "by_seed", 0),
+    f"tier3:Sk_{NES}_k001_d0_s0": ("Sk", "by_draw", (1, 0)),
+    f"tier3:F9_{NES}_k010_d1_s0": ("F9", "by_draw", (10, 1)),
+    "tier3:SB_s0": ("SB", "by_seed", 0),
+    "tier3:E1embed_dom_s0": ("E1embed_dom", "by_seed", 0),
+    "Z26_s0": ("Z26", "by_seed", 0),
+}
+
+
+@pytest.fixture
+def echo_summarise(monkeypatch):
+    """Stub the metric so each summary is the frame it was given, which here is the tag itself."""
+    monkeypatch.setattr(E4.E3.S2, "summarise", lambda frame, persistence, boundary, floor: frame)
+
+
+def test_summarise_all_places_every_carried_tag_with_tier4s_decoder(echo_summarise, capsys):
+    frames = {tag: tag for tag in CARRIED_TAGS}
+    records = {"Z26_s0": record("Z26_s0", "Z26")}
+    out = E4.E3.summarise_all(frames, None, 1.0, records, parse=E4.parse_tag)
+    assert "ignored" not in capsys.readouterr().out
+    assert set(out) == {arm for arm, _, _ in CARRIED_TAGS.values()}
+    for tag, (arm, table, key) in CARRIED_TAGS.items():
+        assert out[arm][table][key] == tag, tag
+        assert out[arm]["tags"][key] == tag, tag
+
+
+def test_summarise_all_without_parse_still_uses_tier3s_decoder(echo_summarise, monkeypatch, capsys):
+    seen = []
+    original = E4.E3.parse_tag
+
+    def spy(tag, records):
+        seen.append(tag)
+        return original(tag, records)
+
+    monkeypatch.setattr(E4.E3, "parse_tag", spy)
+    out = E4.E3.summarise_all({"tier2:P": "tier2:P", "tier3:Z9_s0": "tier3:Z9_s0"}, None, 1.0, {})
+    assert seen == ["tier2:P", "tier3:Z9_s0"]
+    assert set(out) == {"P"}  # Tier 3's own decoder, unchanged: it does not know the tier3: prefix
+    assert "ignored tier3:Z9_s0" in capsys.readouterr().out
+
+
+def test_missing_carried_names_each_absent_arm_for_the_species():
+    carried = set(E4.CARRIED_TIER2) | set(E4.CARRIED_TIER3)
+    assert E4.missing_carried({arm: {} for arm in carried}, NES) == []
+    assert E4.missing_carried({arm: {} for arm in carried - {"Z9", "Sk"}}, NES) == [("Sk", NES), ("Z9", NES)]
+
+
+def test_build_report_stops_when_a_carried_arm_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(E4, "PREDICTIONS", tmp_path)
+    monkeypatch.setattr(E4, "TIER4_RESULTS", tmp_path)
+    monkeypatch.setattr(E4, "MANIFEST", tmp_path / "manifest.json")
+    monkeypatch.setattr(E4, "species_frames", lambda species: (None, {}, {}))
+    monkeypatch.setattr(E4.T, "boundary_m", lambda key: 1.0)
+    calls = []
+
+    def summaries(frames, persistence, boundary, records, parse=None):
+        calls.append(parse)
+        return {arm: {} for arm in (set(E4.CARRIED_TIER2) | set(E4.CARRIED_TIER3)) - {"Z9"}}
+
+    monkeypatch.setattr(E4.E3, "summarise_all", summaries)
+    with pytest.raises(SystemExit, match="Z9 / larus_fuscus"):
+        E4.build_report()
+    assert calls == [E4.parse_tag]
+
+
+# Collisions, draw completeness and the placement log (27-09-2026 correction).
+def _draw_summaries(species, drop=(), arms=E4.SUBSET_ARMS):
+    return {
+        arm: {"by_seed": {}, "by_draw": {key: {} for key in E4.registered_draws(arm, species) if key not in drop}}
+        for arm in arms
+    }
+
+
+def test_registered_draws_are_read_off_the_plans():
+    tier3_style = {(1, 0), (1, 1), (1, 2), (10, 0), (10, 1), (10, 2)}
+    assert E4.registered_draws("Sk", "larus_fuscus") == tier3_style
+    assert E4.registered_draws("F9", "larus_fuscus") == tier3_style | {(100, 0)}
+    assert E4.registered_draws("F3c", NES) == tier3_style | {(100, 0)}
+    assert E4.registered_draws("F26", "canis_lupus") == tier3_style | {(100, 0)}
+
+
+def test_draw_completeness_passes_on_the_registered_sets():
+    for species in ("larus_fuscus", "canis_lupus", NES):
+        E4.assert_draws_complete(_draw_summaries(species), species)
+
+
+def test_draw_completeness_fails_when_sk_misses_a_draw():
+    with pytest.raises(SystemExit, match=r"Sk / larus_fuscus: missing \[\(10, 2\)\]"):
+        E4.assert_draws_complete(_draw_summaries("larus_fuscus", drop={(10, 2)}), "larus_fuscus")
+
+
+def test_draw_completeness_fails_when_sk_sits_under_a_seed_instead():
+    summaries = _draw_summaries(NES)
+    summaries["Sk"] = {"by_seed": {0: {}}, "by_draw": {}}  # what the pre-correction decoder produced
+    with pytest.raises(SystemExit, match=f"Sk / {NES}: missing"):
+        E4.assert_draws_complete(summaries, NES)
+
+
+def test_two_tags_in_one_slot_are_a_collision():
+    frames = {f"tier3:Sk_{NES}_k001_d0_s0": None, f"tier3:Sk_{NES}_k001_d0": None, "tier2:P": None}
+    with pytest.raises(SystemExit, match=r"same summary slot"):
+        E4.assert_no_collisions(frames, {})
+
+
+def test_distinct_slots_are_not_a_collision():
+    frames = {tag: None for tag in CARRIED_TAGS}
+    E4.assert_no_collisions(frames, {"Z26_s0": record("Z26_s0", "Z26")})
+
+
+def test_the_placement_log_is_one_line_per_arm():
+    summaries = {
+        "P": {"by_seed": {-1: {}}, "by_draw": {}},
+        "Z9": {"by_seed": {s: {} for s in range(5)}, "by_draw": {}},
+        "Sk": {"by_seed": {}, "by_draw": {(1, 0): {}, (1, 1): {}}},
+    }
+    lines = E4.placement_lines(summaries, NES)
+    assert len(lines) == 3
+    assert "P" in lines[0] and "seeds  0" in lines[0] and "one unseeded run" in lines[0]
+    assert "Z9" in lines[1] and "seeds  5" in lines[1] and "draws  0" in lines[1]
+    assert "Sk" in lines[2] and "draws  2" in lines[2]

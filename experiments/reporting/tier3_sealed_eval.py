@@ -344,12 +344,14 @@ def parse_tag(tag: str, records: dict[str, dict]) -> dict | None:
 
 
 def summarise_all(
-    frames: dict[str, pd.DataFrame], persistence: pd.DataFrame, boundary: float, records: dict
+    frames: dict[str, pd.DataFrame], persistence: pd.DataFrame, boundary: float, records: dict, parse=None
 ) -> dict[str, dict]:
     """Compute the registered metrics and group them by arm, seed or subset draw."""
+    # GenAI reference: GenAI helped my diagnose and fix this bug;`parse` added so tier4_sealed_eval.py can decode its `tier3:`-prefixed carried tags
+    # with its own parse_tagl if left as None, Tier 3s own parse_tag is used exactly as before
     out: dict[str, dict] = {}
     for tag, frame in frames.items():
-        parsed = parse_tag(tag, records)
+        parsed = (parse or parse_tag)(tag, records)
         if parsed is None:
             continue
         statistics = S2.summarise(frame, persistence, boundary, FLOOR)

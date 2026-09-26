@@ -19,6 +19,8 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import json
+import contextlib
+import io
 import re
 import subprocess
 import sys
@@ -244,9 +246,15 @@ def parse_tag(tag: str, records: dict[str, dict]) -> dict | None:
         print(f"  ignored {tag}: no Tier 4 record and not a carried arm")
         return None
     arm, rest = split
-    subset = re.fullmatch(r"(?:.*_)?k(\d+)_d(\d+)", rest)
+    # Tier 3's subset files end in the seed (F9_<species>_k010_d1_s0); without the optional suffix they fell through to
+    # the seed branch and every draw landed under seed 0. Corrected 27-09-2026 (GenAI), freeze sec 9.
+    subset = re.fullmatch(r"(?:.*_)?k(\d+)_d(\d+)(?:_s(\d+))?", rest)
     if subset:
-        return {"arm": arm, "seed": None, "k": int(subset.group(1)), "draw": int(subset.group(2))}
+        seed = subset.group(3)
+        return {
+            "arm": arm, "seed": int(seed) if seed is not None else None,
+            "k": int(subset.group(1)), "draw": int(subset.group(2)),
+        }
     seeded = re.fullmatch(r"(?:.*_)?s(\d+)", rest)
     return {
         "arm": arm,
@@ -254,6 +262,73 @@ def parse_tag(tag: str, records: dict[str, dict]) -> dict | None:
         "k": None,
         "draw": None,
     }
+
+
+# GenAI reference: the bug I mentioned it helped catch; added the `parse=parse_tag` fix in build_report; job 179924605's report had silently
+# dropped every carried Tier 3 arm, so a missing carried comparator now stops the report instead
+def missing_carried(summaries: dict, species: str) -> list[tuple[str, str]]:
+    """(arm, species) for every carried arm of tier4_exploratory_freeze.md sec 2 with no summary for this species."""
+    return [(arm, species) for arm in sorted(set(CARRIED_TIER2) | set(CARRIED_TIER3)) if arm not in summaries]
+
+
+# The arms trained on (k, draw) subsets. Their registered draws are read off the plans that defined the runs.
+SUBSET_ARMS = ("Sk", "F9", "F3c", "F26")
+
+
+def summary_key(parsed: dict) -> tuple:
+    """The slot E3.summarise_all files a decoded tag under: (arm, seed) or (arm, (k, draw)); a shared slot overwrites."""
+    if parsed["k"] is None:
+        return parsed["arm"], parsed["seed"] if parsed["seed"] is not None else -1
+    return parsed["arm"], (parsed["k"], parsed["draw"])
+
+
+def assert_no_collisions(frames: dict, records: dict) -> None:
+    """Fail if two prediction tags decode to the same summary slot, where the later file would silently win."""
+    slots: dict[tuple, list[str]] = {}
+    with contextlib.redirect_stdout(io.StringIO()):  # summarise_all reports ignored tags itself
+        decoded = {tag: parse_tag(tag, records) for tag in frames}
+    for tag, parsed in decoded.items():
+        if parsed is not None:
+            slots.setdefault(summary_key(parsed), []).append(tag)
+    collisions = {slot: tags for slot, tags in slots.items() if len(tags) > 1}
+    if collisions:
+        raise SystemExit(
+            "FAIL: prediction tags decode to the same summary slot, so one would overwrite another:\n  "
+            + "\n  ".join(f"{slot}: {', '.join(tags)}" for slot, tags in sorted(collisions.items(), key=str))
+        )
+
+
+def registered_draws(arm: str, species: str) -> set[tuple[int, int]]:
+    """The (k, draw) pairs the plan that trained `arm` registers for `species`: Tier 4's plan for F26, Tier 3's otherwise."""
+    plan = T4.PLAN if arm in T4.ARMS else T4.T3.PLAN
+    return {(run.k_percent, run.draw) for run in plan if run.arm == arm and run.species == species}
+
+
+def assert_draws_complete(summaries: dict, species: str) -> None:
+    """Fail unless each subset arm holds exactly its registered (k, draw) set for this species."""
+    problems = []
+    for arm in SUBSET_ARMS:
+        expected = registered_draws(arm, species)
+        if not expected:
+            raise SystemExit(f"FAIL: no registered draws found for {arm} / {species}")
+        present = set(summaries.get(arm, {}).get("by_draw", {}))
+        if present != expected:
+            problems.append(
+                f"{arm} / {species}: missing {sorted(expected - present)}, unexpected {sorted(present - expected)}"
+            )
+    if problems:
+        raise SystemExit("FAIL: subset arms do not hold their registered draws:\n  " + "\n  ".join(problems))
+
+
+def placement_lines(summaries: dict, species: str) -> list[str]:
+    """One line per arm: how many seeds and subset draws the report found for it."""
+    lines = []
+    for arm in sorted(summaries, key=lambda a: (ARM_ORDER.index(a) if a in ARM_ORDER else len(ARM_ORDER), a)):
+        entry = summaries[arm]
+        seeds = len([key for key in entry["by_seed"] if key >= 0])
+        single = "  (one unseeded run)" if -1 in entry["by_seed"] else ""
+        lines.append(f"  {species:<24} {arm:<12} seeds {seeds:>2}  draws {len(entry['by_draw']):>2}{single}")
+    return lines
 
 
 def species_frames(species: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, dict]]:
@@ -607,7 +682,16 @@ def build_report() -> dict:
         _, _, profile_key, domain, matching_source = T.held_out_entry(species)
         boundary = T.boundary_m(profile_key)
         persistence, frames, records = species_frames(species)
-        summaries = E3.summarise_all(frames, persistence, boundary, records)
+        assert_no_collisions(frames, records)
+        summaries = E3.summarise_all(frames, persistence, boundary, records, parse=parse_tag)
+        missing = missing_carried(summaries, species)
+        if missing:
+            raise SystemExit(
+                "FAIL: carried comparators the freeze lists (sec 2) have no summary, so readings would be scored "
+                "without them:\n  " + "\n  ".join(f"{arm} / {sp}" for arm, sp in missing)
+            )
+        assert_draws_complete(summaries, species)
+        print("\n".join(placement_lines(summaries, species)), flush=True)
         if "P" not in summaries:
             raise SystemExit(f"FAIL: {species} has no persistence summary; P is the skill denominator")
         persistence_headline = {
