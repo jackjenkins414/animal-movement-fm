@@ -61,7 +61,9 @@ if set(HELD_OUT) != SPW.BIRDS_HELD_OUT:
 # A4 travel boundaries (0.1 x p50 on training individuals), pinned at full precision and checked on every load against
 # the profile tables and the frozen rule. The evaluator imports these. The gull's is registered in
 # registered/tier2_regime_decision.json; the goose's is its profile row as built on all 299 training individuals; the
-# dove's is the median anchor in results/birds/regime_profiles.csv, where --out-csv refuses --decide-threshold.
+# dove's is the median anchor in results/birds/regime_profiles.csv, where --out-csv refuses --decide-threshold. The
+# goose's row is read from a snapshot of the Mac's results/regime_profiles.csv: Gadi's copy of that file is older, has
+# no goose row, and is read by tier2_sealed_eval.py, so it is left alone on both machines.
 HELD_OUT_BOUNDARY_M: dict[str, float] = {
     "larus_fuscus": 411.451080530957,
     "anser_albifrons": 82.13945953878455,
@@ -69,7 +71,7 @@ HELD_OUT_BOUNDARY_M: dict[str, float] = {
 }
 PROFILE_TABLES: dict[str, Path] = {
     "larus_fuscus": IL.PROFILES_CSV,
-    "anser_albifrons": IL.PROFILES_CSV,
+    "anser_albifrons": SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv",
     "streptopelia_turtur": SPW.BIRDS_RESULTS / "regime_profiles.csv",
 }
 

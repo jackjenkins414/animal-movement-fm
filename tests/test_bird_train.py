@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import asdict
 from dataclasses import fields as dataclass_fields
 
+import pandas as pd
 import pytest
 
 import experiments.training.bird_train as bt
@@ -313,6 +314,24 @@ def test_fb_refuses_to_start_until_zb_seed_0_has_reported(tmp_path, monkeypatch)
 def test_the_pinned_boundaries_reproduce_from_the_profile_tables():
     assert bt.check_boundaries() == bt.HELD_OUT_BOUNDARY_M
     assert set(bt.HELD_OUT_BOUNDARY_M) == set(bt.HELD_OUT)
+
+
+def test_the_goose_boundary_reads_the_snapshot_not_the_shared_profile_table():
+    # Gadi's results/regime_profiles.csv is older and has no goose row; tier2_sealed_eval.py reads it, so it stays as is
+    assert bt.PROFILE_TABLES[GOOSE] == bt.SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv"
+    assert bt.PROFILE_TABLES[GOOSE] != bt.IL.PROFILES_CSV
+    assert bt.PROFILE_TABLES[DOVE] == bt.SPW.BIRDS_RESULTS / "regime_profiles.csv"
+
+
+def test_the_boundary_check_passes_when_the_shared_table_has_no_goose_row(tmp_path, monkeypatch):
+    # the Gadi situation: a shared table without the goose, and the goose's row only in the snapshot
+    shared = pd.read_csv(bt.IL.PROFILES_CSV)
+    without_goose, snapshot = tmp_path / "regime_profiles.csv", tmp_path / "regime_profiles_main_snapshot.csv"
+    shared[shared["species"] != GOOSE].to_csv(without_goose, index=False)
+    shared.to_csv(snapshot, index=False)
+    monkeypatch.setitem(bt.PROFILE_TABLES, GULL, without_goose)
+    monkeypatch.setitem(bt.PROFILE_TABLES, GOOSE, snapshot)
+    assert bt.check_boundaries() == bt.HELD_OUT_BOUNDARY_M
 
 
 def test_a_drifted_pinned_boundary_is_refused(monkeypatch):
