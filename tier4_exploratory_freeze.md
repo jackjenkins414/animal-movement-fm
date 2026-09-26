@@ -85,7 +85,19 @@ Per species loss shares against draw shares (Tier 3 freeze sec 7.1), for Z26, B2
 
 ## 7. As trained
 
-TO FILL after training: runs, SU, anything deferred.
+**DRAFT (GenAI) — Jack to edit before commit.**
+
+| | |
+|---|---|
+| runs | 91 of 91, all exit status 0, all on gpuhopper |
+| neural (86) | 20,000 of 20,000 updates applied; none withheld, no non-finite steps |
+| XGBoost (5) | fit once |
+| compute | 1,261.4 SU, about 13.9 per run (sec 2 estimated about 1,075); longest run 21m12s |
+| walltime | lowered with qalter while queued: 1 h for 20–59, 1.5 h for 60–90; no run came close |
+| deferred or missing | none |
+
+Dilution diagnostic (sec 4; pre-seal, training records only, median across seeds). Z26: stork 18.0% of loss from 14.9% of draws (Tier 3 Z9: 64.1%), turkey vulture 27.8% from 7.6%; by domain, rescaled to 100%, flying 93.7 / terrestrial 4.8 / marine 1.5% from draws of 65.4 / 25.0 / 9.6%. B26 shows the same pattern (turkey vulture 25.0%, stork 13.4%).
+In the marine arms loss tracks draw share within about 6 points: *M. leonina* takes 34–35% of loss from 40.0% of draws, and without it *L. weddellii* takes 31–32% from 25.4%.
 
 ## 8. Note 
 
