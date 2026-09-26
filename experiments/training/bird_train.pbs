@@ -1,0 +1,78 @@
+#!/bin/bash
+#
+# Bird study training, one model per PBS subjob. Run plan: `bird_train.py --list` (95 runs).
+#   0-4     Zb
+#   5-9     Bb
+#   10-14   Zbc
+#   15-19   Bbc
+#   20-24   LSTMBb
+#   25-29   XGBBb
+#   30-39   S       (goose 30-34, dove 35-39)
+#   40-49   SB      (goose 40-44, dove 45-49)
+#   50-61   Sk      (goose 50-55, dove 56-61)
+#   62-71   LSTMS   (goose 62-66, dove 67-71)
+#   72-73   XGBS    (goose 72, dove 73)
+#   74-94   Fb      (gull 74-80, goose 81-87, dove 88-94)
+#
+# Gull specialists are carried from Tiers 2-3 and are not retrained here.
+#
+# Neural runs use STEPS=20000. XGBoost ignores STEPS, but the CLI still requires it.
+# Submit in blocks of at most 10 array jobs.
+#
+# Fb fine-tunes Zb_s0, so run 0 must finish before submitting Fb jobs.
+# TrainConfig must remain unchanged across the run set for checkpoint compatibility.
+#
+# Optional data-side dry run:
+#   qsub -v DRY_RUN=1,INDEX=0 -l walltime=00:20:00 experiments/training/bird_train.pbs
+#   qsub -v DRY_RUN=1 -l walltime=00:30:00 experiments/training/bird_train.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bird_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+
+# dry run builds the training data and exits before training
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+# optional single run override outside a PBS array
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/bird_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
