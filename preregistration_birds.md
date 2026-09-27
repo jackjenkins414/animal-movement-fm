@@ -72,7 +72,62 @@ Tier 3 numbers are from `results.md` sec 18. Tier 4 loss shares are from its pre
 
 ## 7. As trained
 
-WILL FILL after training. The evaluator refuses to open any test partition until this section is filled and committed.
+**Generated with GenAI from my terminal output; sentences are mine (easier to copy and paste than write this all out)**
+
+| | |
+|---|---|
+| runs | 95 of 95; exit status 0 for every run; gpuvolta, fp32, torch 2.5.1+cu121 |
+| neural (88) | 88 clean: 20,000 of 20,000 updates applied, none withheld, no non-finite steps |
+| XGBoost (7) | 7 fit once, boosters present |
+| compute | 458.0 SU; longest run 11m11s |
+| evaluation | predict and report on gpuhopper (inference only on the fp32 Volta checkpoints); the Volta runs are the record, no Hopper re-run |
+| draw identity | PASS (paired_draws 18, fb_draws 21) |
+| goose exclusions | PASS (runs 29, training_birds 293, windows_without_the_six 77550, windows_with_the_six 79873) |
+| deferred or missing | none |
+
+Loss share against draw share (training records; median across seeds, columns need not sum to 100%).
+
+| source | draw, main | Zb | Bb | draw, congener | Zbc | Bbc |
+|---|---:|---:|---:|---:|---:|---:|
+| cathartes_aura | 8.8% | 21.6% | 17.7% | 6.8% | 18.3% | 14.8% |
+| ciconia_ciconia | 17.2% | 12.6% | 12.3% | 13.3% | 10.6% | 9.6% |
+| morus_bassanus | 0.8% | 8.5% | 3.9% | 0.6% | 5.1% | 4.4% |
+| mycteria_americana | 7.1% | 7.5% | 8.4% | 5.5% | 6.5% | 7.9% |
+| pernis_apivorus | 2.9% | 6.3% | 6.1% | 2.2% | 4.5% | 5.9% |
+| hydroprogne_caspia | 5.8% | 5.6% | 5.6% | 4.5% | 5.2% | 4.4% |
+| pelecanus_occidentalis | 1.6% | 4.3% | 3.0% | 1.2% | 4.5% | 4.2% |
+| diomedea_exulans | 1.1% | 4.0% | 10.1% | 0.9% | 0.7% | 0.2% |
+| thalassarche_chrysostoma | 1.0% | 3.9% | 5.1% | 0.8% | 4.5% | 8.0% |
+| branta_canadensis | 6.0% | 3.4% | 4.0% | 4.7% | 2.0% | 3.5% |
+| gyps_himalayensis | 1.9% | 2.9% | 4.5% | 1.5% | 6.2% | 5.0% |
+| anas_platyrhynchos | 4.8% | 2.3% | 1.8% | 3.8% | 1.7% | 1.8% |
+| phoenicopterus_roseus | 5.2% | 2.2% | 2.4% | 4.0% | 2.7% | 2.2% |
+| platalea_leucorodia | 5.6% | 2.0% | 3.3% | 4.3% | 1.3% | 1.9% |
+| corvus_corone | 6.4% | 1.6% | 1.6% | 5.0% | 1.4% | 1.1% |
+| ardea_alba | 2.8% | 1.2% | 1.2% | 2.2% | 1.1% | 1.3% |
+| haematopus_ostralegus | 6.8% | 1.2% | 1.3% | 5.3% | 1.0% | 1.1% |
+| falco_naumanni | 3.4% | 1.0% | 1.4% | 2.7% | 0.7% | 0.8% |
+| branta_leucopsis | 4.5% | 1.0% | 1.0% | 3.5% | 1.4% | 1.3% |
+| milvus_milvus | 3.0% | 1.0% | 1.0% | 2.4% | 1.3% | 1.1% |
+| falco_tinnunculus | 2.4% | 0.6% | 0.5% | 1.8% | 0.4% | 0.5% |
+| thalassoica_antarctica | 1.0% | 0.2% | 0.1% | 0.8% | 0.1% | 0.1% |
+| anser_brachyrhynchus | — | — | — | 0.8% | 0.3% | 0.2% |
+| anser_anser | — | — | — | 4.5% | 1.2% | 1.0% |
+| anser_caerulescens | — | — | — | 6.6% | 3.5% | 5.6% |
+| anser_fabalis | — | — | — | 2.0% | 0.8% | 2.1% |
+| larus_argentatus | — | — | — | 8.4% | 6.0% | 6.8% |
+| five congeners combined | — | — | — | 22.3% | 12.7% | 15.9% |
+
+Clarifications before the seal.
+
+| item | resolution |
+|---|---|
+| Zb, Bb vs S | S is the transformer specialist: Tier 2's S for the gull, the bird S for the goose and dove. LSTM-S, XGB-S and SB appear in the ladder only. |
+| vs S outcomes | Two, as written: within 0.05 or above = matches; S ahead by more than 0.05 = specialist wins. The gap is always printed. |
+| Fb vs Sk | Read per draw; the count across draws is descriptive (Tier 3 freeze sec 6.1). |
+| Fb at k = 100% | Descriptive only, shown beside S; there is no Sk at 100%. |
+| dove $\Delta$ rows | adding five unrelated birds helps / changes nothing / interacts with the package / unresolved; same thresholds. |
+| floor sensitivity | Not reported. |
 
 ## 8. Attestation
 
