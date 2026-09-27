@@ -282,11 +282,13 @@ def summary_key(parsed: dict) -> tuple:
     return parsed["arm"], (parsed["k"], parsed["draw"])
 
 
-def assert_no_collisions(frames: dict, records: dict) -> None:
+def assert_no_collisions(frames: dict, records: dict, parse=None) -> None:
     """Fail if two prediction tags decode to the same summary slot, where the later file would silently win."""
+    # GenAI reference: `parse` added 27-09-2026 so bird_sealed_eval.py can run this check with its own decoder. Left as
+    # None, Tier 4's parse_tag is used exactly as before.
     slots: dict[tuple, list[str]] = {}
     with contextlib.redirect_stdout(io.StringIO()):  # summarise_all reports ignored tags itself
-        decoded = {tag: parse_tag(tag, records) for tag in frames}
+        decoded = {tag: (parse or parse_tag)(tag, records) for tag in frames}
     for tag, parsed in decoded.items():
         if parsed is not None:
             slots.setdefault(summary_key(parsed), []).append(tag)

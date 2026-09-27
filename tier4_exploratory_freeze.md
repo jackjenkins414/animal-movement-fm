@@ -85,7 +85,7 @@ Per species loss shares against draw shares (Tier 3 freeze sec 7.1), for Z26, B2
 
 ## 7. As trained
 
-**DRAFT (GenAI) — Jack to edit before commit.**
+**Drafted by GenAI from my terminal to write the below and initial scientific names above; sentences are mine.**
 
 | | |
 |---|---|
@@ -108,3 +108,4 @@ No Tier 4 test result exists. Every arm was chosen knowing the Tier 2 and Tier 3
 | date | what | effect |
 |---|---|---|
 | 27-09-2026 | Report step decoded carried `tier3:` tags with Tier 3's parse_tag, so every carried Tier 3 arm was ignored in our job 179924605's report (3_scaling not scored; Zd1/Zd3, F9, Sk and Tier 3 ladder rungs absent). Tier 4's parse_tag also placed subset tags ending in a seed (Sk, F9, F3c) under that seed rather than their draw; it now reads the trailing seed. summarise_all now takes Tier 4's decoder; build_report fails if a carried arm is missing. | Report-only rerun; no predictions regenerated, no test data re-opened for new arms, no arm list/metric/reading rule changed. Note as per the code, I used GenAI to diagnose this and help correct it. |
+| 27-09-2026 | Replaced the leftover drafting header in with a GenAI attribution line. No content changed. | This attested version still remains 75c2158ffa2e / blob 81ee894d3ce7. |

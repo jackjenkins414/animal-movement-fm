@@ -69,8 +69,10 @@ HELD_OUT_BOUNDARY_M: dict[str, float] = {
     "anser_albifrons": 82.13945953878455,
     "streptopelia_turtur": 25.806078308740823,
 }
+# we found that the the gulls row moved to the snapshot after training had finished; this table only feeds check_boundaries(), 
+# so no training behaviour changed. Nothing here reads Gadi's results/regime_profiles.csv any more.
 PROFILE_TABLES: dict[str, Path] = {
-    "larus_fuscus": IL.PROFILES_CSV,
+    "larus_fuscus": SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv",
     "anser_albifrons": SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv",
     "streptopelia_turtur": SPW.BIRDS_RESULTS / "regime_profiles.csv",
 }

@@ -319,7 +319,8 @@ def test_the_pinned_boundaries_reproduce_from_the_profile_tables():
 def test_the_goose_boundary_reads_the_snapshot_not_the_shared_profile_table():
     # Gadi's results/regime_profiles.csv is older and has no goose row; tier2_sealed_eval.py reads it, so it stays as is
     assert bt.PROFILE_TABLES[GOOSE] == bt.SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv"
-    assert bt.PROFILE_TABLES[GOOSE] != bt.IL.PROFILES_CSV
+    assert bt.PROFILE_TABLES[GULL] == bt.SPW.BIRDS_RESULTS / "regime_profiles_main_snapshot.csv" 
+    assert bt.IL.PROFILES_CSV not in bt.PROFILE_TABLES.values()
     assert bt.PROFILE_TABLES[DOVE] == bt.SPW.BIRDS_RESULTS / "regime_profiles.csv"
 
 
