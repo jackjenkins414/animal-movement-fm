@@ -96,5 +96,27 @@ scratch on the identical 1% and 10% subsets on 17 of 18 draws. In the descriptiv
 is the strongest rung on all three species, and single-species XGBoost (which carries no validation privilege) beats
 every pooled model on two of three.
 
-**Next:** Tier 4 (exploratory; design to be decided), then a probabilistic and multi-horizon prediction head, cadence
-invariance and environmental covariates.
+**26 source pool** sealed and reported (27-09-2026), exploratory and never a tiered result. Pooling every eligible
+source moves zero-shot travel p90 skill by at most +0.004 against the nine-source pool, and the FM package sits within
+0.007 of the plain trunk on all three held-out species, inside the $\pm$ 0.05 noise scale. On northern elephant seal, +0.16
+for a seven species marine pool against +0.009 for all 26 sources; removing southern elephant seal costs −0.047 with
+the package and −0.011 without, both inside noise, so the marine gain reads as domain rather than genus. White stork's
+share of the training loss fell from 64% to 18% with no change in skill, so the stork imbalance was not the cause.
+Fine-tuning still loses to a from-scratch specialist on 13 of 18 draws, and the single species LSTM is still the
+strongest rung on all three species.
+
+**Bird only study** sealed and reported (28-09-2026), preregistered: pretrained on 22 flying birds, tested on the
+lesser black-backed gull, the greater white-fronted goose and the European turtle dove. Zero-shot, +0.067 (FM) and
++0.128 (plain trunk) on the dove are the only transformer results that clear persistence by more than 0.05 from that
+pool; adding five congener pool birds lifts the gull to +0.081. On the dove, the pooled LSTM and XGBoost are level with
+their own specialists (+0.011, +0.026); it has the fewest training birds (88). This is the first case in the project
+where models that never saw a species predict it as well as models trained on it. Earlier zero-shot transfer (NES)
+stayed below the specialists. It comes from pooled LSTM and XGBoost rather than the foundation model, and from one
+species, but it is first evidence that zero-shot prediction of an unseen species at specialist level is possible. On
+the goose every transformer arm is within $\pm$ 0.03 of persistence. The package costs on every bird by point estimate
+(−0.025, −0.024, −0.060), beyond noise only on the dove. Three of the five registered predictions held on at least
+one bird.
+
+**Next:** a cross-species randomness analysis on training individuals, a pooling study on the 26 source pool
+(domain-balanced sampling and MoE routing), environmental covariate for birds, and a quick descriptive comparison of 
+fix intervals. A probabilistic head and a full covariate study are probably future work at this point. 

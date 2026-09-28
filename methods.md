@@ -746,3 +746,20 @@ specialist on the gull, and pooled XGBoost beats every pooled neural arm.
 | gull | +773 | +2,387 |
 | wolf | +17 | +9 |
 | NES | +5,070 | +5,717 |
+
+## 24-09-2026: Tier 4 frozen — the 26-source pool, exploratory
+
+After the Tier 3 seal we pooled every eligible source (26: eligible minus the three held-out and three reserved species), with no window floor and A8 at alpha = 0.5, and kept Tier 3's configuration and budget. Every pool dependent Tier 3 arm is mirrored at 26 sources, and a new NES 2 x 2 (package × *Mirounga*) asks whether marine transfer is bound to the domain or the genus. Exploratory under `preregistration_tier3.md` sec 6 and never a tiered result; the readings were committed in `tier4_exploratory_freeze.md` before any run. Was 91 runs, 1,261.4 SU.
+
+## 27-09-2026: Tier 4 sealed evaluation — nothing scales, NES reads domain
+
+Third opening of the same 30 test animals. Z26 is within noise of Z9 and of B26 on all three species, and removing *M. leonina* from the marine pool does not cost a resolved amount, so NES reads domain rather than genus ($\Delta$_Z just inside the threshold). Stork's share of the loss fell from 64% to 18% and nothing moved, so the imbalance was not the cause. The first report dropped every carried Tier 3 arm through a tag decoding bug and was rerun as report only (freeze sec 9). Numbers in `results.md` sec 19.
+
+## 26-09-2026: Bird-only study preregistered
+
+Does a model pretrained only on flying birds transfer to held-out birds? Held out: the gull, the white fronted goose (released from the Tier 3 reservation for this study only) and the turtle dove (chosen by a stated rule). The pool is 22 flying birds, plus a 27 bird variant that adds five congeners. Registered before any bird model was trained; note this was 95 runs, 458.0 SU, trained on gpuvolta in fp32.
+
+## 28-09-2026: Bird study sealed evaluation
+
+Zero-shot from the 22-bird pool, Zb and Bb clear persistence by more than 0.05 only on the dove (+0.067, +0.128); adding the congeners lifts the gull's Zbc to +0.081, and pooled LSTM and XGBoost clear it on the gull and the dove. On the dove the pooled LSTM and XGBoost are level with their own specialists (+0.011, +0.026, within +/-0.05); it has the fewest training birds of the three (88). The goose is within +/-0.03 of persistence for every transformer arm. The
+package costs on every bird by point estimate (Zb − Bb −0.025, −0.024, −0.060), beyond noise only on the dove. Three of the five registered predictions held on at least one bird and none on all three; the congener and Fb predictions failed on every bird. Numbers we added to `results.md`. 
