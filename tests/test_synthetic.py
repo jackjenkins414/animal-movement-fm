@@ -150,6 +150,48 @@ class TestCRW:
         assert R < 0.15
 
 
+# GenAI reference: reversing CRW cases for the `turning_mu` parameter; GenAI wrote them.
+def _turns(df: pd.DataFrame) -> np.ndarray:
+    """Turning angles between consecutive steps, per individual, wrapped to [-pi, pi]."""
+    out = []
+    for _, g in df.sort_values(["individual_id", "timestamp"]).groupby("individual_id"):
+        heading = np.arctan2(np.diff(g["lat"].to_numpy()), np.diff(g["lon"].to_numpy()))
+        d = np.diff(heading)
+        out.append(np.arctan2(np.sin(d), np.cos(d)))
+    return np.concatenate(out)
+
+
+def _von_mises_a(kappa: float) -> float:
+    """A(kappa) = I1(kappa) / I0(kappa), the expected mean resultant length of von Mises(mu, kappa)."""
+    from scipy.special import i0, i1
+
+    return float(i1(kappa) / i0(kappa))
+
+
+class TestReversingCRW:
+
+    def test_explicit_zero_mu_equals_default(self):
+        default = generate_crw(n_individuals=5, n_steps=200, seed=11)
+        explicit = generate_crw(n_individuals=5, n_steps=200, turning_mu=0.0, seed=11)
+        pd.testing.assert_frame_equal(default, explicit)
+
+    def test_reversing_rho_is_negative_a_kappa(self):
+        turns = _turns(generate_crw(n_individuals=50, n_steps=500, turning_kappa=2.0, turning_mu=np.pi, seed=0))
+        assert np.cos(turns).mean() == pytest.approx(-_von_mises_a(2.0), abs=0.02)
+
+    def test_reversing_rbar_is_a_kappa(self):
+        turns = _turns(generate_crw(n_individuals=50, n_steps=500, turning_kappa=2.0, turning_mu=np.pi, seed=0))
+        rbar = np.hypot(np.cos(turns).mean(), np.sin(turns).mean())
+        assert rbar == pytest.approx(_von_mises_a(2.0), abs=0.02)
+
+    def test_forward_and_reversing_share_rbar(self):
+        rbars = []
+        for mu in (0.0, np.pi):
+            turns = _turns(generate_crw(n_individuals=50, n_steps=500, turning_kappa=1.0, turning_mu=mu, seed=5))
+            rbars.append(np.hypot(np.cos(turns).mean(), np.sin(turns).mean()))
+        assert rbars[0] == pytest.approx(rbars[1], abs=0.02)
+
+
 # ---------------------------------------------------------------------------
 # State-switching CRW
 # ---------------------------------------------------------------------------

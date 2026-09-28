@@ -104,8 +104,9 @@ def generate_crw(
         n_steps: int = 100, 
         step_shape: float = 2.0, 
         step_scale: float = 0.005, 
-        turning_kappa: float = 4.0, 
-        start_lon: float = 0.0, 
+        turning_kappa: float = 4.0,
+        turning_mu: float = 0.0,
+        start_lon: float = 0.0,
         start_lat: float = 0.0, 
         timestep_seconds: int = 3600, 
         seed: int | None = None, 
@@ -128,7 +129,9 @@ def generate_crw(
     step_shape, step_scale: Gamma distribution parameters for step length (degrees). The 
         mean step length is shape * scale. 
     turning_kappa: concentration of the von Mises turning angle distribution. 
-        kappa=0 is uniform (no directional persistence); kappa ~10+ is persistent. 
+        kappa=0 is uniform (no directional persistence); kappa ~10+ is persistent.
+    turning_mu: mean turning angle, in radians. 0 (default) is the forward CRW above; pi gives a reversing
+        (out-and-back) CRW with the same concentration, so Rbar matches the forward track while rho flips sign.
     """
     rng = np.random.default_rng(seed)
     # Allocate output array Easier to fil row-by-row here bc heading at step t=1 depends 
@@ -143,7 +146,7 @@ def generate_crw(
     # Pre draw all step lengths and turning angles, this still vectorises the random sampling 
     # even though the position update is sequential 
     step_lengths = rng.gamma(shape=step_shape, scale=step_scale, size=(n_individuals, n_steps))
-    turning_angles = rng.vonmises(mu=0.0, kappa=turning_kappa, size=(n_individuals, n_steps))
+    turning_angles = rng.vonmises(mu=turning_mu, kappa=turning_kappa, size=(n_individuals, n_steps))
 
     for t in range (1, n_steps): 
         headings = headings + turning_angles[:, t]

@@ -95,3 +95,33 @@ def track_randomness(
             }
         )
     return pd.DataFrame(rows)
+
+def mean_resultant_length(turn_angles: np.ndarray) -> float:
+    """
+    Mean resultant length Rbar of turning angles, |mean exp(i theta)|.
+
+    Measures how concentrated turning angles are about any single direction, so a track that keeps reversing scores 1 just like a straight 
+    one; rho (the mean cosine) carries the sign. Rbar >= |rho| always.
+
+    """
+    turns = np.asarray(turn_angles, dtype=float)
+    turns = turns[np.isfinite(turns)]
+    if turns.size == 0:
+        return np.nan
+    return float(np.hypot(np.cos(turns).mean(), np.sin(turns).mean()))
+
+
+def mean_resultant_length_corrected(turn_angles: np.ndarray) -> float:
+    """
+    Small sample bias- orrected Rbar, sqrt(max(0, (n Rbar^2 - 1) / (n - 1))).
+
+    Under uniformly random turns the raw Rbar is about sqrt(pi / 4n), not 0, so individuals with few turns look more directed than they are. 
+    The correction removes that floor. Returns NaN with fewer than two finite angles.
+    """
+    turns = np.asarray(turn_angles, dtype=float)
+    turns = turns[np.isfinite(turns)]
+    n = turns.size
+    if n < 2:
+        return np.nan
+    rbar = mean_resultant_length(turns)
+    return float(np.sqrt(max(0.0, (n * rbar**2 - 1.0) / (n - 1.0))))
