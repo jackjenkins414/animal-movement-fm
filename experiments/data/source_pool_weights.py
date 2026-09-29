@@ -13,6 +13,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -791,6 +792,261 @@ def birds(args: argparse.Namespace) -> None:
 # GenAI code ends here.
 
 
+# GenAI reference: Here I specified the rotating held-out bird studys foild and pools; using the 30 birds in birds_source_pool.json; 
+# fold 0 keeps our original three birds, genus groups stay together, and any genus with more than three birds gets its own fold. The 
+# rest are assigned by A8 mass to keep folds roughly balanced with max three birds each. Each fold trains on all other birds except 
+# genus mates of the held-out birds, with A8 weights recalculated after exclusions. Fold membership and window counts are fixed, 
+# probabilities come from those counts. GenAI wrote the code from that, which I checked, and did add comments and refined docstrings of
+# in certain places. But it was all correct. 
+BIRDS_ROTATION_OUT = REPO / "registered" / "birds_rotation_folds.json"
+BIRDS_ROTATION_CAPACITY = 3  # birds per fold, except a genus block larger than this
+
+# our rule's output, pinned; the derivation has to reproduce it; fold 0 is carried not derived
+BIRDS_ROTATION_FOLDS: dict[int, tuple[str, ...]] = {
+    0: ("anser_albifrons", "larus_fuscus", "streptopelia_turtur"),
+    1: ("anser_anser", "anser_brachyrhynchus", "anser_caerulescens", "anser_fabalis"),
+    2: ("ciconia_ciconia", "morus_bassanus"),
+    3: ("ardea_alba", "larus_argentatus", "thalassoica_antarctica"),
+    4: ("branta_canadensis", "branta_leucopsis", "pernis_apivorus"),
+    5: ("cathartes_aura", "gyps_himalayensis", "milvus_milvus"),
+    6: ("anas_platyrhynchos", "mycteria_americana", "pelecanus_occidentalis"),
+    7: ("haematopus_ostralegus", "phoenicopterus_roseus", "thalassarche_chrysostoma"),
+    8: ("corvus_corone", "diomedea_exulans", "platalea_leucorodia"),
+    9: ("falco_naumanni", "falco_tinnunculus", "hydroprogne_caspia"),
+}
+
+# Individuals left out of every training set of their species, pooled or specialist: the bird study's six geese, carried
+# as registered, plus those found by the results of experiments/data/bird_duplicate_check.py (>= 100 exactly shared fixes
+# with one val or test individual of the same species; the wood stork is the one cross-species case, against a great
+# egret test bird held out in fold 3). 
+BIRDS_ROTATION_TRAINING_EXCLUSIONS: dict[str, tuple] = {
+    **BIRDS_TRAINING_EXCLUSIONS,
+    "cathartes_aura": (
+        559918, 2077395, 13969528, 17002732, 17002738, 17002744, 17002749, 17002754, 20761532, 167706071, 221612397,
+        221612404, 221612407, 221612495, 221612504, 221612519, 221612540, 221612549,
+    ),
+    "ciconia_ciconia": (
+        9515866, 10157684, 10258435, 10258449, 10258517, 10467332, 10467334, 10467337, 10792386, 21976875, 21977647,
+        23467699, 24542933, 24563082, 75618441, 75618444, 75618453, 75618454, 75618461, 75618464, 75618472, 368072897,
+        368072905, 368072910, 368072912, 368072916, 368072919, 368072922, 368072935, 368072938, 368072941, 368072945,
+        573104461, 573104466, 573104474, 909029793, 909029794, 909029798, 909029802, 909029803, 1419503440, 1419503448,
+        1419503464, 1419503479,
+    ),
+    "gyps_himalayensis": (
+        47196668, 54325600, 182760742, 182760751, 182760769, 182760843, 182760906, 182760922, 182760930, 182761027,
+    ),
+    "mycteria_americana": (67281317,),
+}
+
+# Training windows per bird after the exclusions, pinned from the --no-write run; while empty. --birds-rotation refuses to write 
+# the registered file. 
+BIRDS_ROTATION_TRAIN_WINDOWS: dict[str, int] = {
+    "anas_platyrhynchos": 64415, "anser_albifrons": 77550, "anser_anser": 90964, "anser_brachyrhynchus": 2642,
+    "anser_caerulescens": 199754, "anser_fabalis": 18914, "ardea_alba": 21218, "branta_canadensis": 99724,
+    "branta_leucopsis": 54942, "cathartes_aura": 188267, "ciconia_ciconia": 779723, "corvus_corone": 111895,
+    "diomedea_exulans": 3393, "falco_naumanni": 31995, "falco_tinnunculus": 15496, "gyps_himalayensis": 6782,
+    "haematopus_ostralegus": 127354, "hydroprogne_caspia": 93811, "larus_argentatus": 320729, "larus_fuscus": 597407,
+    "milvus_milvus": 25234, "morus_bassanus": 1884, "mycteria_americana": 135968, "pelecanus_occidentalis": 7037,
+    "pernis_apivorus": 22509, "phoenicopterus_roseus": 73408, "platalea_leucorodia": 85093,
+    "streptopelia_turtur": 34737, "thalassarche_chrysostoma": 2645, "thalassoica_antarctica": 2564,
+}
+
+
+def rotation_birds(registered: dict) -> list[str]:
+    """The 30 birds of the registered bird study: its congener pool plus its three held out."""
+    birds = sorted(set(registered["pools"]["congener"]) | set(registered["held_out"]))
+    if len(birds) != BIRDS_ELIGIBLE_FLYING:
+        raise SystemExit(f"FAIL: {len(birds)} birds in {BIRDS_OUT.name}; the rotation expects {BIRDS_ELIGIBLE_FLYING}")
+    return birds
+
+
+def rotation_folds(counts: dict[str, int], fold0=BIRDS_HELD_OUT) -> dict[int, list[str]]:
+    """
+    Derive the folds from training-window counts of the birds outside fold 0; any fold-0 entries are ignored.
+
+    The rotation passes the counts registered in birds_source_pool.json, from which the fold table was agreed; the
+    exclusions found later move the A8 probabilities, not the folds. Folds are numbered 0 (carried), then each
+    oversized genus block in genus order, then the balanced folds in the order they were opened.
+    """
+    rest = sorted(set(counts) - set(fold0))
+    blocks: dict[str, list[str]] = {}
+    for name in rest:
+        blocks.setdefault(genus(name), []).append(name)
+    folds: dict[int, list[str]] = {0: sorted(fold0)}
+    for name in sorted(g for g, members in blocks.items() if len(members) > BIRDS_ROTATION_CAPACITY):
+        folds[len(folds)] = blocks.pop(name)
+
+    n_folds = math.ceil(sum(len(members) for members in blocks.values()) / BIRDS_ROTATION_CAPACITY)
+    mass = {g: sum(math.sqrt(counts[n]) for n in members) for g, members in blocks.items()}
+    placed: list[list[str]] = [[] for _ in range(n_folds)]
+    held = [0.0] * n_folds
+    for name in sorted(blocks, key=lambda g: (-mass[g], g)):
+        room = [i for i in range(n_folds) if len(placed[i]) + len(blocks[name]) <= BIRDS_ROTATION_CAPACITY]
+        if not room:
+            raise SystemExit(f"FAIL: no fold has room for the {name} block ({len(blocks[name])} birds)")
+        i = min(room, key=lambda i: (held[i], i))
+        placed[i] += blocks[name]
+        held[i] += mass[name]
+    for members in placed:
+        folds[len(folds)] = sorted(members)
+    return folds
+
+
+def rotation_pool(members, birds) -> list[str]:
+    """Every bird not in the fold and not sharing a genus with it."""
+    genera = {genus(n) for n in members}
+    return sorted(n for n in birds if genus(n) not in genera)
+
+
+def refuse_rotation_leaks(folds: dict[int, list[str]], pools: dict[int, list[str]], birds) -> None:
+    """Fail unless every bird is in one fold and no pool holds a fold member, a genus-mate or a reserved species."""
+    placed = sorted(n for members in folds.values() for n in members)
+    if placed != sorted(birds):
+        raise SystemExit("FAIL: the folds do not hold every bird exactly once")
+    problems = []
+    for k, members in folds.items():
+        genera = {genus(n) for n in members}
+        leaks = sorted(n for n in pools[k] if n in members or genus(n) in genera or n in BIRDS_RESERVED)
+        if leaks:
+            problems.append(f"fold {k}: {leaks}")
+    if problems:
+        raise SystemExit("FAIL: a fold's pool holds its own bird, a genus-mate or a reserved species\n  "
+                         + "\n  ".join(problems))
+
+
+def train_windows_without(segments_stem: str, split_stem: str, excluded=()) -> int:
+    """Training windows of one species at the registered context length, with the excluded individuals left out."""
+    counts = window_counts_per_individual(
+        str(PROCESSED / f"{segments_stem}_segments.parquet"), context_length=CONTEXT_LENGTH
+    )
+    per_individual = counts.assign(key=counts["individual_id"].map(id_key)).set_index("key")["n_windows"]
+    train = [id_key(i) for i in json.loads((SPLITS / f"{split_stem}_split_seed42.json").read_text())["train"]]
+    dropped = {id_key(i) for i in excluded}
+    missing = sorted(dropped - set(train))
+    if missing:
+        raise SystemExit(f"FAIL: exclusions {missing} are not in {split_stem}'s training partition")
+    kept = [i for i in train if i not in dropped]
+    return int(per_individual.reindex(kept).fillna(0).sum())
+
+
+def rotation_probabilities(pools: dict, counts: dict[str, int]) -> dict[str, dict[str, float]]:
+    """A8 over each derived fold's pool. Fold 0 is carried with the bird study's registered main-pool probabilities."""
+    return {str(k): draw_probabilities({n: counts[n] for n in pool}) for k, pool in pools.items() if int(k) != 0}
+
+
+def register_birds_rotation(payload: dict, args: argparse.Namespace) -> None:
+    """Write `registered/birds_rotation_folds.json` once, and verify it on every later run."""
+    if BIRDS_ROTATION_OUT.exists():
+        previous = json.loads(BIRDS_ROTATION_OUT.read_text())
+        recomputed = rotation_probabilities(previous["pools"], previous["train_window_counts"])
+        drift = sorted(
+            f"{k}.{n}" for k, probs in recomputed.items() for n, p in probs.items()
+            if abs(previous["probabilities"].get(k, {}).get(n, float("nan")) - p) > 1e-12
+        )
+        if drift:
+            raise SystemExit(f"FAIL: {BIRDS_ROTATION_OUT.name}'s probabilities no longer follow from its counts: {drift}")
+        same = all(previous.get(key) == payload[key] for key in ("folds", "pools", "train_window_counts",
+                                                                   "training_exclusions"))
+        if same:
+            print(f"\nreproduced {BIRDS_ROTATION_OUT.relative_to(REPO)}")
+            return
+        if not args.regenerate:
+            raise SystemExit(
+                f"FAIL: {BIRDS_ROTATION_OUT.name} already holds different folds; the rule is run once. Pass "
+                "--regenerate only to correct a defect in its inputs, and record it in the freeze."
+            )
+        payload = payload | {
+            "regenerated": {
+                "date": time.strftime("%Y-%m-%d"),
+                "reason": args.regenerate,
+                "supersedes": {
+                    key: previous.get(key)
+                    for key in ("folds", "pools", "probabilities", "train_window_counts", "training_exclusions")
+                },
+            }
+        }
+
+    if args.no_write:
+        print(f"\n--no-write: {BIRDS_ROTATION_OUT.relative_to(REPO)} not written")
+        return
+    if not BIRDS_ROTATION_TRAIN_WINDOWS:
+        raise SystemExit(
+            "FAIL: BIRDS_ROTATION_TRAIN_WINDOWS is not pinned. Review the --no-write dry run and pin it before the "
+            "registered file is written."
+        )
+    BIRDS_ROTATION_OUT.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {BIRDS_ROTATION_OUT.relative_to(REPO)}")
+
+
+def birds_rotation(args: argparse.Namespace) -> None:
+    """Derive the rotation's folds and pools from the registered bird study, and weight each fold's pool under A8."""
+    registered = json.loads(BIRDS_OUT.read_text())
+    birds = rotation_birds(registered)
+    exclusions = BIRDS_ROTATION_TRAINING_EXCLUSIONS
+    counts = {
+        stem: train_windows_without(stem, SPLIT_STEM.get(stem, stem), exclusions.get(stem, ())) for stem in birds
+    }
+
+    # birds with no exclusions must reproduce every count registered before
+    earlier = registered["train_window_counts"] | {n: g["train"] for n, g in GUARDS.items() if n in counts}
+    drift = [f"{n}: {counts[n]} here, {earlier[n]} registered" for n in sorted(earlier)
+             if n in counts and n not in exclusions and counts[n] != earlier[n]]
+    if BIRDS_ROTATION_TRAIN_WINDOWS:
+        drift += [f"{n}: {counts.get(n)} here, {v} pinned" for n, v in sorted(BIRDS_ROTATION_TRAIN_WINDOWS.items())
+                  if counts.get(n) != v]
+        if set(BIRDS_ROTATION_TRAIN_WINDOWS) != set(birds):
+            drift.append("the pinned window counts do not cover exactly the 30 birds")
+    if drift:
+        raise SystemExit("FAIL: training-window counts differ\n  " + "\n  ".join(drift))
+
+    folds = rotation_folds(registered["train_window_counts"])
+    pinned = {k: sorted(members) for k, members in BIRDS_ROTATION_FOLDS.items()}
+    if folds != pinned:
+        raise SystemExit(f"FAIL: the fold rule gives {folds}; the pinned folds are {pinned}")
+    pools = {k: rotation_pool(members, birds) for k, members in folds.items()}
+    refuse_rotation_leaks(folds, pools, birds)
+    if pools[0] != sorted(registered["pools"]["main"]):
+        raise SystemExit("FAIL: fold 0's pool under the rule is not the bird study's registered main pool")
+    probabilities = rotation_probabilities(pools, counts)
+
+    total = sum(math.sqrt(counts[n]) for n in birds if n not in folds[0])
+    print(f"C={CONTEXT_LENGTH}; alpha={ALPHA}; {len(birds)} birds, {len(folds)} folds")
+    for k, members in folds.items():
+        share = sum(math.sqrt(counts[n]) for n in members) / total
+        print(f"\nfold {k}: {', '.join(members)}")
+        print(f"  pool {len(pools[k])} birds, {sum(counts[n] for n in pools[k]):,} training windows"
+              + ("; carried, registered main-pool probabilities" if k == 0 else f"; held-out A8 mass {share:.1%}"))
+    print("\ntraining windows")
+    for name in birds:
+        dropped = len(exclusions.get(name, ()))
+        print(f"  {name:26s} {counts[name]:9,d}" + (f"  ({dropped} individuals excluded)" if dropped else ""))
+
+    payload = {
+        "_comment": [
+            "Rotating held-out birds (exploratory): folds over the 30 birds of birds_source_pool.json, genus blocks",
+            "kept together, placed by the training-window counts registered in birds_source_pool.json. Fold 0 is the",
+            "bird study's held-out three, carried as reported with its registered main pool. A fold's pool is every",
+            "other bird minus the fold's genus-mates. A8 draw probabilities (alpha 0.5) per fold, recomputable from",
+            "train_window_counts, which are counted after training_exclusions. Written by source_pool_weights.py",
+            "--birds-rotation, once, then verified on every later run.",
+        ],
+        "rule": "birds_rotation_exploratory_freeze.md sec 2",
+        "context_length": CONTEXT_LENGTH,
+        "alpha": ALPHA,
+        "capacity": BIRDS_ROTATION_CAPACITY,
+        "fold_mass_counts": f"{BIRDS_OUT.name} train_window_counts",
+        "birds": birds,
+        "folds": {str(k): members for k, members in folds.items()},
+        "pools": {str(k): pool for k, pool in pools.items()},
+        "carried": {"0": f"{BIRDS_OUT.name} probabilities.main"},
+        "train_window_counts": counts,
+        "probabilities": probabilities,
+        "training_exclusions": {species: list(ids) for species, ids in exclusions.items()},
+    }
+    register_birds_rotation(payload, args)
+# GenAI code ends here.
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -823,9 +1079,18 @@ def main() -> None:
         help="build the bird-only study's two pools (preregistration_birds.md sec 3) and write "
              "registered/birds_source_pool.json",
     )
+    parser.add_argument(
+        "--birds-rotation",
+        action="store_true",
+        help="derive the rotating held-out bird folds and their pools' A8 weights, and write "
+             "registered/birds_rotation_folds.json",
+    )
     args = parser.parse_args()
-    if args.tier3 + args.tier4 + args.birds > 1:
-        raise SystemExit("FAIL: pass only one of --tier3, --tier4 or --birds")
+    if args.tier3 + args.tier4 + args.birds + args.birds_rotation > 1:
+        raise SystemExit("FAIL: pass only one of --tier3, --tier4, --birds or --birds-rotation")
+    if args.birds_rotation:
+        birds_rotation(args)
+        return
     if args.birds:
         birds(args)
         return

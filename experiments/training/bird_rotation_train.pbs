@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# GenAI reference: GenAI adapted `bird_train.pbs` for the rotating held-out bird study (in the past I wrote these but time saver :)
+# I added most of the commenting up here though. 
+#
+# Rotating held-out birds, one model per PBS subjob. Run plan: `bird_rotation_train.py --list` (198 runs).
+# Fold 0 is carried from the bird study and is not retrained.
+#   0-26     Bb       (folds 1-9, seeds 0-2)
+#   27-53    LSTMBb   (folds 1-9, seeds 0-2)
+#   54-62    XGBBb    (folds 1-9, seed 0)
+#   63-143   LSTMS    (27 held-out birds, seeds 0-2)
+#   144-170  XGBS     (27 held-out birds, seed 0)
+#   171-197  Zb       (folds 1-9, seeds 0-2)
+#
+# Uses gpuvolta/fp32 to match the bird study. Neural runs use STEPS=20000;
+# XGBoost ignores STEPS, but the CLI still requires it. No runs depend on each other.
+#
+# Submit in blocks of at most 10 array jobs:
+#   qsub -J 0-9 -v STEPS=20000 experiments/training/bird_rotation_train.pbs
+#
+# Optional data-side dry run:
+#   qsub -v DRY_RUN=1,INDEX=0 -l walltime=00:20:00 experiments/training/bird_rotation_train.pbs
+#   qsub -v DRY_RUN=1 -l walltime=00:30:00 experiments/training/bird_rotation_train.pbs
+
+#PBS -P um09
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bird_rotation_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+
+# dry run builds the training data and exits before training
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+# same optional single run override outside a PBS array
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/bird_rotation_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
