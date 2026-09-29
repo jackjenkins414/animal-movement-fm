@@ -30,15 +30,23 @@ EXCLUDE_AT = 100
 OUT = SPW.RESULTS / "birds_rotation" / "duplicate_fixes.csv"
 
 
-def load_fixes(stem: str) -> tuple[pd.DataFrame, dict[str, object]]:
-    """One bird's fixes with a partition label, and each id key's spelling in the manifest. Unassigned birds are dropped."""
-    manifest = json.loads((SPW.SPLITS / f"{SPW.SPLIT_STEM.get(stem, stem)}_split_seed42.json").read_text())
+def load_fixes(stem: str, keep_unassigned: bool = False) -> tuple[pd.DataFrame, dict[str, object]]:
+    """
+    One species' fixes with a partition label, and each id key's spelling in the manifest.
+    """
+    path = SPW.SPLITS / f"{SPW.SPLIT_STEM.get(stem, stem)}_split_seed42.json"
+    if keep_unassigned and not path.exists():
+        manifest = {part: [] for part in PARTITIONS}
+    else:
+        manifest = json.loads(path.read_text())
     raw = {id_key(i): i for part in PARTITIONS for i in manifest[part]}
     partition = {id_key(i): part for part in PARTITIONS for i in manifest[part]}
     frame = pd.read_parquet(SPW.PROCESSED / f"{stem}_segments.parquet", columns=["individual_id", *FIX])
     keys = {value: id_key(value) for value in frame["individual_id"].unique()}
     frame["individual"] = frame["individual_id"].map(keys)
     frame["partition"] = frame["individual"].map(partition)
+    if keep_unassigned:
+        frame["partition"] = frame["partition"].fillna("unassigned")
     frame = frame.dropna(subset=["partition"]).drop_duplicates(["individual", *FIX])
     frame["species"] = stem
     return frame[["species", "individual", "partition", *FIX]].reset_index(drop=True), raw
