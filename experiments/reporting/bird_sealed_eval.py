@@ -46,7 +46,7 @@ from animal_movement_fm.eval.fm_predictor import (  # noqa: E402
 )
 from animal_movement_fm.eval.harness import evaluate  # noqa: E402
 
-PREREG = REPO / "preregistration_birds.md"
+PREREG = REPO / "preregistration" / "preregistration_birds.md"
 AS_TRAINED_HEADING = "As trained"
 
 PLACEHOLDER = re.compile(r"\b(?:to|will)\s+fill\b|\bdraft\b", re.IGNORECASE)
@@ -141,7 +141,7 @@ def as_trained_section(text: str) -> str:
 
 def assert_as_trained_filled() -> str:
     """§7 as committed at HEAD, not as in the working tree."""
-    shown = E4.git("show", f"HEAD:{PREREG.name}")
+    shown = E4.git("show", f"HEAD:{PREREG.relative_to(REPO).as_posix()}")
     if shown.returncode != 0:
         raise SystemExit(f"FAIL: cannot read {PREREG.name} from HEAD, so it is not committed: {shown.stderr.strip()}")
     body = as_trained_section(shown.stdout)

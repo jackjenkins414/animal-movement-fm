@@ -51,7 +51,7 @@ TIER_E_RESULTS = REPO / "results" / "tier_e"
 SEALED = REPO / "results" / "tier3_sealed"
 PREDICTIONS = SEALED / "predictions"
 TIER2_PREDICTIONS = REPO / "results" / "tier2_sealed" / "predictions"
-FREEZE = REPO / "preregistration_tier3_freeze.md"
+FREEZE = REPO / "preregistration" / "preregistration_tier3_freeze.md"
 
 REPORT_JSON = SEALED / "tier3_results.json"
 REPORT_MD = SEALED / "tier3_results.md"

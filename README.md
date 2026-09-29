@@ -35,9 +35,13 @@ animal-movement-fm/
 ├── registered/                # write once artefacts: selection, sampling weights, boundaries
 ├── splits/                    # frozen per species split manifests (seed 42)
 ├── results/                   # output tables, plots (gitignored)
-├── preregistration_tier2*.md  # Tier 2 registration, tuning amendments, pre test freeze
-├── preregistration_tier3*.md  # Tier 3 registration and pre test freeze
-├── tierE_exploratory_ablations.md  # exploratory arms, each registered before it runs
+├── preregistration/           # the study record
+│   ├── preregistration_tier2*.md  # Tier 2 registration, tuning amendments, pre test freeze
+│   ├── preregistration_tier3*.md  # Tier 3 registration and pre test freeze
+│   ├── preregistration_birds.md   # bird only study
+│   ├── tier4_exploratory_freeze.md, birds_rotation_exploratory_freeze.md  # exploratory freezes
+│   ├── tierE_exploratory_ablations.md  # exploratory arms, each registered before it runs
+│   └── tier2_species_roles.md
 ├── methods.md                 # decisions log
 ├── pyproject.toml             # dependencies + tool config
 └── README.md

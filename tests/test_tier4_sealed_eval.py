@@ -96,6 +96,7 @@ def test_as_trained_is_read_from_the_committed_blob_not_the_working_tree(monkeyp
     working = tmp_path / "tier4_exploratory_freeze.md"
     working.write_text(FREEZE_UNFILLED)
     monkeypatch.setattr(E4, "FREEZE", working)
+    monkeypatch.setattr(E4, "REPO", tmp_path)
     fake_git(monkeypatch, FREEZE_FILLED)
     assert "91 of 91" in E4.assert_as_trained_filled()
 

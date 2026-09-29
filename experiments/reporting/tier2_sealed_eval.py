@@ -59,7 +59,7 @@ SPLITS = REPO / "splits"
 FINAL = REPO / "results" / "tier2_final"
 SEALED = REPO / "results" / "tier2_sealed"
 PREDICTIONS = SEALED / "predictions"
-FREEZE = REPO / "preregistration_tier2_freeze.md"
+FREEZE = REPO / "preregistration" / "preregistration_tier2_freeze.md"
 
 # A16 post hoc sensitivity outputs; specifically not named `tier2_verdict`/`tier2_results`; nothing
 # this mode writes is a Tier 2 result, and no filename should let it be mistaken for one
@@ -122,18 +122,18 @@ def assert_freeze_committed() -> dict:
 
     if git("rev-parse", "--git-dir").returncode != 0:
         raise SystemExit("FAIL: not a git checkout, so the freeze cannot be shown to be committed")
-    if git("ls-files", "--error-unmatch", FREEZE.name).returncode != 0:
+    if git("ls-files", "--error-unmatch", FREEZE.relative_to(REPO).as_posix()).returncode != 0:
         raise SystemExit(
             f"FAIL: {FREEZE.name} exists but is not tracked by git, so it is not committed."
         )
-    if git("diff", "--quiet", "HEAD", "--", FREEZE.name).returncode != 0:
+    if git("diff", "--quiet", "HEAD", "--", FREEZE.relative_to(REPO).as_posix()).returncode != 0:
         raise SystemExit(
             f"FAIL: {FREEZE.name} has uncommitted changes. Commit it before any sealed partition "
             "is opened; an editable freeze is not a freeze."
         )
 
     commit = git("rev-parse", "HEAD").stdout.strip()
-    blob = git("rev-parse", f"HEAD:{FREEZE.name}").stdout.strip()
+    blob = git("rev-parse", f"HEAD:{FREEZE.relative_to(REPO).as_posix()}").stdout.strip()
     print(f"freeze           : {FREEZE.name} committed at {commit[:12]} (blob {blob[:12]})")
     return {
         "freeze_commit": commit,

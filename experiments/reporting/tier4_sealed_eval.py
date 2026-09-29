@@ -54,7 +54,7 @@ SEALED = REPO / "results" / "tier4_sealed"
 PREDICTIONS = SEALED / "predictions"
 TIER3_PREDICTIONS = REPO / "results" / "tier3_sealed" / "predictions"
 TIER2_PREDICTIONS = REPO / "results" / "tier2_sealed" / "predictions"
-FREEZE = REPO / "tier4_exploratory_freeze.md"
+FREEZE = REPO / "preregistration" / "tier4_exploratory_freeze.md"
 AS_TRAINED_HEADING = "As trained"  # matched by text, not by number, so renumbering cannot disable the check
 
 REPORT_JSON = SEALED / "tier4_results.json"
@@ -132,7 +132,7 @@ def assert_as_trained_filled() -> str:
     Read from the committed blob rather than the working tree, so this gate does not rest on the diff check that
     precedes it; the two conditions the freeze sets are then verified independently.
     """
-    shown = git("show", f"HEAD:{FREEZE.name}")
+    shown = git("show", f"HEAD:{FREEZE.relative_to(REPO).as_posix()}")
     if shown.returncode != 0:
         raise SystemExit(f"FAIL: cannot read {FREEZE.name} from HEAD, so it is not committed: {shown.stderr.strip()}")
     body = as_trained_section(shown.stdout)
