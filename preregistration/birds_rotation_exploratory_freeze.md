@@ -116,7 +116,19 @@ Filled by me.
 
 ## 7. As trained
 
-WILL FILL
+| | |
+|---|---|
+| runs | 198 of 198; exit status 0 for every run; gpuvolta, fp32 |
+| neural (162) | 162 clean: 20,000 of 20,000 updates applied, none withheld, no non finite steps |
+| XGBoost (36) | 36 fit once, boosters present |
+| compute | 493 SU against the ~955 SU estimated in sec 3; longest run 00:11:09 |
+| training exclusions | all 198 runs match the registered exclusions (5 species) |
+| identity rule | *A. alba* 8867928; scope every species in data/processed, unassigned individuals included; no other drop |
+| val–test rule | *C. ciconia* 5, *G. himalayensis* 2, *C. aura* 1 |
+| scored test birds | as sec 4 after the two rules; the floor then drops two stork birds (next row) |
+| F = 25 | *C. ciconia* test birds 494812848 and 7517384 have 0 windows at C = 12 (959 and 6,972 fixes). Their fixes fill three of every four 6 h bins, and since the continuity correction, after the stork manifest was frozen, windows form only within unbroken runs, so none reaches the 13 bins a window needs. The floor drops both: stork is scored on 98 of 105. This corrects sec 4's "every test bird has $\geq$ 25 windows under its split rule". Every other scored test bird has $\geq$ 25 windows; 384 are scored in all |
+| test partition reads | the diagnostic read test bird fixes and window counts (ids and counts only) before this section was committed, as sec 4 allows |
+| deferred or missing | none |
 
 ## 8. Limitations
 
