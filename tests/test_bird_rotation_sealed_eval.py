@@ -226,11 +226,56 @@ def test_a_prediction_from_another_fold_s_model_is_refused(tmp_path, monkeypatch
         R.rotation_frames("gyps_himalayensis")
 
 
-def test_seeds_up_to_keeps_seeds_0_to_2_and_p():
-    records = {f"Bb_s{s}": {"arm": "Bb", "seed": s} for s in range(5)}
+def test_planned_seeds_follow_the_plan_that_trained_each_arm():
+    for bird in R.FOLD0:  # carried: bird study pooled arms at 0-4, XGB-Bb included; XGB-S at seed 0 (gull from Tier 3)
+        assert R.planned_seeds(bird, "XGBBb") == {0, 1, 2, 3, 4}
+        assert R.planned_seeds(bird, "XGBS") == {0}
+        for arm in ("Bb", "LSTMBb", "Zb", "LSTMS"):
+            assert R.planned_seeds(bird, arm) == {0, 1, 2, 3, 4}
+    for bird in ("ciconia_ciconia", "ardea_alba"):
+        assert R.planned_seeds(bird, "XGBBb") == R.planned_seeds(bird, "XGBS") == {0}
+        for arm in ("Bb", "LSTMBb", "Zb", "LSTMS"):
+            assert R.planned_seeds(bird, arm) == {0, 1, 2}
+
+
+def test_the_descriptive_column_keeps_the_rotation_s_own_seeds():
+    records = {f"{arm}_s{s}": {"arm": arm, "seed": s} for arm in ("LSTMBb", "XGBBb") for s in range(5)}
     frames = {tag: None for tag in [*records, "P"]}
-    kept = R.seeds_up_to(frames, records, R.parse_tag, 2)
-    assert set(kept) == {"Bb_s0", "Bb_s1", "Bb_s2", "P"}
+    same = {arm: R.rotation_seeds(arm) for arm in R.ARMS[1:]}
+    assert set(R.with_seeds(frames, records, R.parse_tag, same)) == {"LSTMBb_s0", "LSTMBb_s1", "LSTMBb_s2", "XGBBb_s0",
+                                                                     "P"}
+
+
+def _fold0_gull(drop=None):
+    """Synthetic gull frames holding every fold-0 arm at the seeds its plan trained, XGB-Bb at five."""
+    ids = list(range(1, 7))
+    records, frames = {}, {"P": _prediction(ids, seed=0)}
+    for index, arm in enumerate(R.ARMS[1:]):
+        for seed in sorted(R.planned_seeds("larus_fuscus", arm)):
+            tag = f"{arm}_larus_fuscus_s{seed}"
+            if tag == drop:
+                continue
+            records[tag] = {"arm": arm, "seed": seed}
+            frames[tag] = _prediction(ids, seed=10 * index + seed + 1)
+    return frames["P"], frames, records
+
+
+def test_fold_0_is_summarised_with_xgb_bb_at_five_seeds():
+    persistence, frames, records = _fold0_gull()
+    expected = {arm: R.planned_seeds("larus_fuscus", arm) for arm in R.ARMS[1:]}
+    arms = R.summarise_bird("larus_fuscus", persistence, frames, records, R.parse_tag, 1.0, expected)
+    assert arms["XGBBb"]["n_seeds"] == 5 and arms["XGBS"]["n_seeds"] == 1 and arms["LSTMS"]["n_seeds"] == 5
+    same = {arm: R.rotation_seeds(arm) for arm in R.ARMS[1:]}
+    early = R.summarise_bird("larus_fuscus", persistence, R.with_seeds(frames, records, R.parse_tag, same), records,
+                             R.parse_tag, 1.0, same)
+    assert early["XGBBb"]["n_seeds"] == 1 and early["LSTMBb"]["n_seeds"] == 3
+
+
+def test_a_missing_fold_0_seed_is_refused():
+    persistence, frames, records = _fold0_gull(drop="XGBBb_larus_fuscus_s4")
+    expected = {arm: R.planned_seeds("larus_fuscus", arm) for arm in R.ARMS[1:]}
+    with pytest.raises(SystemExit, match=r"XGBBb has seeds \[0, 1, 2, 3\], expected \[0, 1, 2, 3, 4\]"):
+        R.summarise_bird("larus_fuscus", persistence, frames, records, R.parse_tag, 1.0, expected)
 
 
 # --------------------------------------------------------------------------- statistic

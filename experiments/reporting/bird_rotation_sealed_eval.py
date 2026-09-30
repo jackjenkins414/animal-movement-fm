@@ -472,11 +472,33 @@ def drop_scored(persistence: pd.DataFrame, frames: dict[str, pd.DataFrame], drop
             {tag: frame.loc[keep].reset_index(drop=True) for tag, frame in frames.items()})
 
 
-def seeds_up_to(frames: dict, records: dict, parse, highest: int) -> dict:
-    """Frames whose seed is at most `highest`, or unseeded (P)."""
+def planned_seeds(species: str, arm: str) -> set[int]:
+    """
+    The seeds one bird's arm was trained at, read from the plan that trained it.
+
+    Fold 0 is carried as sealed, its pooled arms from the bird study (seeds 0-4, XGB-Bb included), its specialists from
+    the bird study (goose, dove) or Tier 3 (gull). Folds 1-9 from the rotation plan.
+    """
+    if species in FOLD0:
+        if arm in ("LSTMS", "XGBS"):
+            plan = BE.T3.PLAN if species == BE.GULL else BT.PLAN
+            return {run.seed for run in plan if run.arm == arm and run.species == species and run.k_percent is None}
+        return {run.seed for run in BT.PLAN if run.arm == arm and not run.species}
+    fold = FOLD_OF[species]
+    return {run.seed for run in RT.PLAN if run.arm == arm and run.fold == fold and run.species in ("", species)}
+
+
+def rotation_seeds(arm: str) -> set[int]:
+    """The rotation's own seed set for an arm: neural 0-2, XGBoost 0."""
+    return {run.seed for run in RT.PLAN if run.arm == arm}
+
+
+def with_seeds(frames: dict, records: dict, parse, seeds: dict[str, set[int]]) -> dict:
+    """Frames whose arm's seed is in `seeds[arm]`, or unseeded (P)."""
     with contextlib.redirect_stdout(io.StringIO()):
         return {tag: frame for tag, frame in frames.items()
-                if (parsed := parse(tag, records)) is not None and (parsed["seed"] is None or parsed["seed"] <= highest)}
+                if (parsed := parse(tag, records)) is not None
+                and (parsed["seed"] is None or parsed["seed"] in seeds.get(parsed["arm"], set()))}
 
 
 # Statistic
@@ -546,15 +568,15 @@ def arm_blocks(summaries: dict) -> dict[str, dict]:
     return arms
 
 
-def summarise_bird(species, persistence, frames, records, parse, boundary, neural_seeds: int) -> dict:
+def summarise_bird(species, persistence, frames, records, parse, boundary, expected: dict[str, set[int]]) -> dict:
+    """Summarise one bird's arms; each trained arm must hold exactly the seeds in `expected[arm]`."""
     E4.assert_no_collisions(frames, records, parse=parse)
     summaries = E3.summarise_all(frames, persistence, boundary, records, parse=parse)
     problems = [arm for arm in ARMS if arm not in summaries]
     for arm in ARMS[1:]:
-        want = 1 if arm.startswith("XGB") else neural_seeds
-        seeds = [key for key in summaries.get(arm, {}).get("by_seed", {}) if key >= 0]
-        if arm in summaries and len(seeds) != want:
-            problems.append(f"{arm} has {len(seeds)} seeds, expected {want}")
+        seeds = {key for key in summaries.get(arm, {}).get("by_seed", {}) if key >= 0}
+        if arm in summaries and seeds != expected[arm]:
+            problems.append(f"{arm} has seeds {sorted(seeds)}, expected {sorted(expected[arm])}")
     if problems:
         raise SystemExit(f"FAIL: {species}: " + "; ".join(problems))
     return arm_blocks(summaries)
@@ -650,12 +672,13 @@ def build_report() -> dict:
             if dropped:
                 raise SystemExit(f"FAIL: the scoring rules drop fold-0 birds {dropped}; freeze sec 4 says none")
             persistence, frames, records = fold0_frames(species)
-            parse, neural_seeds = BE.parse_tag, 5
+            parse = BE.parse_tag
         else:
             persistence, frames, records = rotation_frames(species)
-            parse, neural_seeds = parse_tag, 3
+            parse = parse_tag
         persistence, frames = drop_scored(persistence, frames, dropped)
-        arms = summarise_bird(species, persistence, frames, records, parse, boundary, neural_seeds)
+        expected = {arm: planned_seeds(species, arm) for arm in ARMS[1:]}
+        arms = summarise_bird(species, persistence, frames, records, parse, boundary, expected)
         entry = {
             "fold": FOLD_OF[species],
             "regime_boundary_m": boundary,
@@ -666,8 +689,10 @@ def build_report() -> dict:
             "readings": bird_readings(arms, frames, persistence, boundary),
         }
         if species in FOLD0:
-            early = seeds_up_to(frames, records, parse, 2)
-            entry["seeds_0_2"] = point_readings(summarise_bird(species, persistence, early, records, parse, boundary, 3))
+            # like for like with folds 1-9; the rotation's own seed set per arm (neural 0-2, XGBoost seed 0)
+            same = {arm: rotation_seeds(arm) for arm in ARMS[1:]}
+            early = with_seeds(frames, records, parse, same)
+            entry["seeds_0_2"] = point_readings(summarise_bird(species, persistence, early, records, parse, boundary, same))
         report["species"][species] = entry
     report["band_counts"] = band_counts(report)
     report["spearman_gap_vs_training_windows"] = spearman_windows(report, payload["train_window_counts"])
