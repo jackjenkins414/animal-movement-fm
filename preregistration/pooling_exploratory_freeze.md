@@ -132,7 +132,16 @@ Every row is per species: gull, wolf, NES. A difference is left minus right, wit
 
 ## 7. As trained
 
-WILL FILL.
+| | |
+|---|---|
+| runs | 15 of 15; exit status 0 for every run; gpuhopper, fp32 |
+| neural (15) | 15 clean: 20,000 of 20,000 updates applied, none withheld, no non finite steps, finite final loss and weights |
+| parameters | B26bal 2,112,258; B26moe and B26balmoe 5,279,490, as sec 3 |
+| pool | 2,570,302 training windows in every run; draw probabilities A8 (B26moe) or domain balanced (B26bal, B26balmoe), as sec 2 |
+| routing record | complete for the 10 MoE runs: 26 sources x 4 layers x 8 experts, 2,048 training windows per source or all of a smaller one |
+| compute | 257.18 SU against the ~210–350 SU we estimated in sec 3; longest run 00:13:59 (index 5); index 5 alone 13m59s, 20.98 SU |
+| persistence | P is read from Tier 2's sealed prediction files, as Tier 4 read it |
+| deferred or missing | none |
 
 ## 8. Limitations
 
