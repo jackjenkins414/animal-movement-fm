@@ -42,6 +42,9 @@ FEEDFORWARD_MULTIPLIER = 2  # dim_feedforward = 2 x d_model, as `MovementFM` alr
 MASK_RATIO = 0.15
 RECONSTRUCTION_WEIGHT = 0.5
 
+# pooling study, MoE trunk only; weight on the router's load balancing loss. Provisional; the value is pending a source
+MOE_AUX_WEIGHT = 1e-2
+
 # cap on stored non-finite gradient records; once a run is poisoned every later step is non-finite too, and the first few are the 
 # only informative ones
 NONFINITE_RECORD_LIMIT = 20
@@ -544,6 +547,9 @@ def train(
                 loss = forecast_loss + config.reconstruction_weight * reconstruction_loss
             else:
                 loss = normalised_huber(model(features, species=cond_species), targets)
+            if config.trunk == "moe":
+                # the load balancing term from the forward just run; every other trunk never reaches this
+                loss = loss + MOE_AUX_WEIGHT * model.encoder.aux_loss
 
             loss.backward()
 

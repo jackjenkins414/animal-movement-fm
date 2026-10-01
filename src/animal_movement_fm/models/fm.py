@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from animal_movement_fm.data.enu import FEATURES, N_FEATURES
+from animal_movement_fm.models.moe import MoEEncoder
 
 # feature indices used by the context-conditioning summary
 _LOG_SCALE = FEATURES.index("log_scale")
@@ -92,8 +93,8 @@ class MovementFM(nn.Module):
         super().__init__()
         # `trunk="lstm"` is our Tier 3 baseline-ladder rung; we reuse the whole Tier 2 pipeline (representation, pools, loss, schedule, selection, 
         # predictor) and swap only the sequence encoder. It is a plain trunk, B style: no conditioning path and no reconstruction head.
-        if trunk not in ("transformer", "lstm"):
-            raise ValueError(f"unknown trunk {trunk!r}; use 'transformer' or 'lstm'")
+        if trunk not in ("transformer", "lstm", "moe"):
+            raise ValueError(f"unknown trunk {trunk!r}; use 'transformer', 'lstm' or 'moe'")
         if trunk == "lstm" and (use_fm_package or use_reconstruction_head):
             raise ValueError("the LSTM trunk is a plain baseline rung; switch the FM package and reconstruction head off")
         self.trunk = trunk
@@ -120,6 +121,11 @@ class MovementFM(nn.Module):
                 batch_first=True,
                 dropout=dropout if num_layers > 1 else 0.0,
             )
+        elif trunk == "moe":
+            # pooling study; every layer's dense feedforward block becomes routed experts; the rest of the trunk and the path through encode(), 
+            # is the Transformers
+            self.pos_encoder = _PositionalEncoding(d_model)
+            self.encoder = MoEEncoder(d_model, nhead, dim_feedforward, num_layers, dropout)
         else:
             self.pos_encoder = _PositionalEncoding(d_model)
             encoder_layer = nn.TransformerEncoderLayer(
