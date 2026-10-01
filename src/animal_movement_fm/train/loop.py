@@ -42,7 +42,7 @@ FEEDFORWARD_MULTIPLIER = 2  # dim_feedforward = 2 x d_model, as `MovementFM` alr
 MASK_RATIO = 0.15
 RECONSTRUCTION_WEIGHT = 0.5
 
-# pooling study, MoE trunk only; weight on the router's load balancing loss. Provisional; the value is pending a source
+# pooling study, MoE trunk only; weight on the router's load balancing loss; will use the source we first found but reffed: Fedus et al (2022)
 MOE_AUX_WEIGHT = 1e-2
 
 # cap on stored non-finite gradient records; once a run is poisoned every later step is non-finite too, and the first few are the 
