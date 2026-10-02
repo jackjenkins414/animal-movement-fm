@@ -155,3 +155,9 @@ Every row is per species: gull, wolf, NES. A difference is left minus right, wit
 ## 9. Note
 
 No pooling run existed when this file was first committed. Only the pooling sealed evaluator (not yet written) opens the held-out test partitions, after this file is committed with sec 6 and sec 7 filled.
+
+## 10. Corrections and outcomes
+
+| date | what | effect |
+|---|---|---|
+| 01-10-2026 | conditional control did not fire (B26moe − B26: gull −0.0003, wolf +0.0005, NES +0.0303) | B26wide not trained |
