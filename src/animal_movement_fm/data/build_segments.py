@@ -20,6 +20,7 @@ import pandas as pd
 
 from animal_movement_fm.data.resample import (
     BIN_SECONDS,
+    MAX_GAP_BINS,
     MIN_SEGMENT_BINS,
     resample_trajectory,
 )
@@ -48,6 +49,7 @@ def trajectory_segment_frames(
     deployment_id=None,
     bin_seconds: int = BIN_SECONDS,
     min_segment_bins: int = MIN_SEGMENT_BINS,
+    max_gap_bins: int = MAX_GAP_BINS,
     extra: dict | None = None,
 ) -> list[pd.DataFrame]:
     """
@@ -61,7 +63,7 @@ def trajectory_segment_frames(
     """
 
     segments = resample_trajectory(
-        timestamp, lat, lon, bin_seconds=bin_seconds, min_segment_bins=min_segment_bins
+        timestamp, lat, lon, bin_seconds=bin_seconds, min_segment_bins=min_segment_bins, max_gap_bins=max_gap_bins
     )
     if not segments:
         return []
@@ -93,6 +95,7 @@ def segments_from_fixes(
     lon_col: str = "lon",
     bin_seconds: int = BIN_SECONDS,
     min_segment_bins: int = MIN_SEGMENT_BINS,
+    max_gap_bins: int = MAX_GAP_BINS,
     carry_columns: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame | None, dict]:
     """
@@ -147,6 +150,7 @@ def segments_from_fixes(
             deployment_id=keys[1] if has_deployment else None,
             bin_seconds=bin_seconds,
             min_segment_bins=min_segment_bins,
+            max_gap_bins=max_gap_bins,
         )
         if not produced:
             n_empty += 1
@@ -160,6 +164,7 @@ def segments_from_fixes(
         "median_native_gap_h": round(median_gap_h, 3),
         "share_gaps_within_bin": round(share_within_bin, 4),
         "min_segment_bins": min_segment_bins,
+        "max_gap_bins": max_gap_bins,
         "segments": 0,
         "bins": 0,
         "individuals_out": 0,

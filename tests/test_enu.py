@@ -185,3 +185,18 @@ def test_clock_features_are_tagged_to_the_fix_the_step_lands_on():
 
     expected, _ = local_solar_sincos_from_epoch(clock[:, 1:], lon[:, 1:])
     assert np.allclose(features[..., sin_i], expected, atol=1e-12)
+
+
+def test_dt_bins_follows_the_grid_and_nothing_else_changes():
+    rng = np.random.default_rng(0)
+    lon = 10.0 + np.cumsum(rng.normal(0, 1e-3, (3, 12)), axis=1)
+    lat = 50.0 + np.cumsum(rng.normal(0, 1e-3, (3, 12)), axis=1)
+    clock = _clock(3, 12) / enu.BIN_SECONDS * 3600  # an exact hourly grid
+    six_h, scale_six = enu.encode_window(lon, lat, timestamp_s=clock)
+    one_h, scale_one = enu.encode_window(lon, lat, timestamp_s=clock, bin_seconds=3600)
+    dt = enu.FEATURES.index("dt_bins")
+    assert np.allclose(one_h[..., dt], 1.0)
+    assert np.allclose(six_h[..., dt], 1 / 6)
+    others = [i for i in range(enu.N_FEATURES) if i != dt]
+    assert np.array_equal(one_h[..., others], six_h[..., others])
+    assert np.array_equal(scale_one, scale_six)

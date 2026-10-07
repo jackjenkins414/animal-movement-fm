@@ -85,6 +85,7 @@ def encode_window(
     *,
     timestamp_s: np.ndarray,
     sigma: float = SCALE_FLOOR_M,
+    bin_seconds: int = BIN_SECONDS,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Encode context positions into the registered feature tensor and return the reversible window scale.
@@ -107,7 +108,7 @@ def encode_window(
     inv = 1.0 / scale[..., None]
     d_scaled = steps * inv[..., None]
 
-    dt_bins = elapsed_s / BIN_SECONDS
+    dt_bins = elapsed_s / bin_seconds  # in bins of the grid the window was built on
 
     # direction is undefined near zero movement so gate heading there.
     moving = magnitude > HEADING_GATE_M

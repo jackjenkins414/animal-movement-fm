@@ -139,3 +139,26 @@ class TestFrameLevelRule:
         at_1, _ = segments_from_fixes(frame, min_segment_bins=1)
 
         assert len(at_25) == len(at_1)
+
+
+def hourly_with_hole(hole_h: int) -> pd.DataFrame:
+    """Two hourly runs of 20 fixes, the second starting hole_h hours after the first ends."""
+    first = fixes("a", n=20, step_h=1)
+    second = fixes("a", n=20, start=first["timestamp"].iloc[-1] + pd.Timedelta(hours=hole_h), step_h=1)
+    return pd.concat([first, second], ignore_index=True)
+
+
+class TestMaxGapBins:
+    def test_default_is_the_registered_rule(self):
+        track = fixes("a", n=60)
+        default, default_stats = segments_from_fixes(track)
+        explicit, _ = segments_from_fixes(track, max_gap_bins=8)
+        pd.testing.assert_frame_equal(default, explicit)
+        assert default_stats["max_gap_bins"] == 8
+
+    @pytest.mark.parametrize("max_gap_bins, n_segments", [(8, 2), (48, 1)])
+    def test_hourly_hole_splits_only_beyond_max_gap(self, max_gap_bins, n_segments):
+        segments, stats = segments_from_fixes(hourly_with_hole(24), bin_seconds=3600, max_gap_bins=max_gap_bins)
+        assert segments["segment_id"].nunique() == n_segments
+        assert len(segments) == 40
+        assert stats["max_gap_bins"] == max_gap_bins
