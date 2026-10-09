@@ -21,14 +21,16 @@ except ImportError:  # pragma: no cover - older torch on some machines
     SDPBackend = sdpa_kernel = None
 
 from animal_movement_fm.data.enu import N_FEATURES
+from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.models.fm import MovementFM
 from animal_movement_fm.train.loss import (
     HUBER_DELTA,
+    horizon_huber,
     masked_reconstruction_loss,
     normalised_huber,
     radial_pseudo_huber,
 )
-from animal_movement_fm.train.pool import PreparedPool
+from animal_movement_fm.train.pool import PreparedPool, StreamingPool
 
 # fixed training constants we carry over from Tier 1
 BATCH_SIZE = 256  # Tier 1; all architectures
@@ -178,11 +180,27 @@ class TrainConfig:
     # Tier 3 B9dom: pool species index -> lookup row, so nine species can share three domain rows; empty means the row is the species itself, which 
     # is every arm before this field existed
     species_label_map: tuple[int, ...] = ()
+    horizons: tuple[int, ...] = ()
+    history: int = 0
+    observed_flag: bool = False
 
     def __post_init__(self) -> None:
         # this dataclass is frozen, so normalisation goes through object.__setattr__. The map is stored as a tuple
         # so a configuration rebuilt from a saved JSON record, where it is a list, equals the one that was saved.
         object.__setattr__(self, "species_label_map", tuple(int(row) for row in self.species_label_map))
+        object.__setattr__(self, "horizons", tuple(int(h) for h in self.horizons))
+        if self.horizons and (len(set(self.horizons)) != len(self.horizons) or min(self.horizons) < 1):
+            raise ValueError(f"horizons {self.horizons} must be distinct positive bin counts")
+        if self.horizons and self.use_reconstruction_head:
+            raise ValueError("the reconstruction head is not part of the horizon design")
+        if self.history and not self.horizons:
+            raise ValueError("a padded history belongs to the horizon design; set horizons")
+        if self.history and self.history <= CONTEXT_LENGTH:
+            raise ValueError(f"history {self.history} must exceed the {CONTEXT_LENGTH}-bin core; 0 is the core alone")
+        if self.history and (self.use_fm_package or self.trunk == "moe"):
+            raise ValueError("a padded history needs a plain Transformer or an LSTM; the FM package and MoE cannot mask")
+        if self.observed_flag != (self.history > 0 and self.trunk == "lstm"):
+            raise ValueError("observed_flag is required for an LSTM on a padded history, and only there")
         if self.species_label_map and not self.species_embed_dim:
             raise ValueError("species_label_map routes species to lookup rows and needs a species embedding")
         if self.species_label_map and not all(0 <= row < self.n_species for row in self.species_label_map):
@@ -206,7 +224,7 @@ class TrainConfig:
 
     def build(self, *, input_dim: int = N_FEATURES) -> MovementFM:
         return MovementFM(
-            input_dim=input_dim,
+            input_dim=input_dim + int(self.observed_flag),
             d_model=self.d_model,
             nhead=self.nhead,
             num_layers=self.num_layers,
@@ -218,6 +236,8 @@ class TrainConfig:
             n_species=self.n_species,
             species_embed_dim=self.species_embed_dim,
             trunk=self.trunk,
+            n_horizons=len(self.horizons),
+            observed_flag=self.observed_flag,
         )
 
 
@@ -230,6 +250,7 @@ class TrainResult:
     loss_shares: list[dict] = field(default_factory=list)
     grad_norms: list[dict] = field(default_factory=list)
     nonfinite_steps: list[dict] = field(default_factory=list)
+    head_loss_history: list[list[float]] = field(default_factory=list)  # horizon runs: per-head loss at each log
     skipped_steps: int = 0
     attempted_batches: int = 0
     applied_updates: int = 0
@@ -315,7 +336,9 @@ def _nonfinite_record(step, grad_norm, loss, features, targets, species, names, 
     }
 
 
-def _species_loss_share(model, features, targets, species, names, config, cond_species=None) -> dict:
+def _species_loss_share(
+    model, features, targets, species, names, config, cond_species=None, observed=None, target_mask=None
+) -> dict:
     """
     Return each source species' share of the batch forecast loss.
 
@@ -325,9 +348,12 @@ def _species_loss_share(model, features, targets, species, names, config, cond_s
     are still attributed to the true species, since that is what the reader wants to know.
     """
     with torch.no_grad():
-        output = model(features, species=cond_species)
+        output = model(features, species=cond_species, observed=observed)
         prediction = output[0] if isinstance(output, tuple) else output
         per_window = radial_pseudo_huber(prediction - targets, delta=HUBER_DELTA, reduction="none")
+        if target_mask is not None:
+            # horizon runs: a window's loss is its mean over the heads it has a target for
+            per_window = torch.where(target_mask, per_window, torch.zeros_like(per_window)).sum(1) / target_mask.sum(1)
         total = per_window.sum()
         if total <= 0:
             return {name: float("nan") for name in names}
@@ -336,10 +362,11 @@ def _species_loss_share(model, features, targets, species, names, config, cond_s
             for index, name in enumerate(names)
         }
 
-
+# GenAI reference: GenAI helped draft this training function from my spec, including checkpoint/resume, horizon/reconstruction branches, 
+# conditioning, gradient handling logging and the applied update budget
 def train(
     config: TrainConfig,
-    pool: PreparedPool,
+    pool: PreparedPool | StreamingPool,
     *,
     device: torch.device | str | None = None,
     checkpoint_path: str | Path | None = None,
@@ -393,8 +420,18 @@ def train(
     the donor model did not have. Any other missing or unexpected key is refused rather than silently ignored. Combined with
     `config.freeze_except_species_embedding` the optimiser then sees only the lookup table, so the run fits one vector per species 
     and nothing else. Registered arms pass neither and are unaffected
+
+    A configuration with `horizons` draws with `sample_horizon` from a horizon pool (PreparedPool, or StreamingPool for a
+    padded history) and trains on `horizon_huber`; with `history` > 0 the pool's token mask reaches the model as
+    `observed`. Per-head losses are logged in `head_loss_history`. A configuration without horizons is untouched.
     """
-    device = torch.device(device or pool.features.device)
+    device = torch.device(device or pool.device)
+    horizon = bool(config.horizons)
+    pool_k = getattr(pool, "horizon_k", None)
+    if horizon != (pool_k is not None):
+        raise ValueError("a horizon configuration needs a horizon pool, and a horizon pool a horizon configuration")
+    if horizon and len(pool_k) != len(config.horizons):
+        raise ValueError(f"the pool has {len(pool_k)} horizons, the configuration {len(config.horizons)}")
     torch.manual_seed(config.seed)
 
     model = config.build(input_dim=pool.n_features).to(device)
@@ -429,7 +466,7 @@ def train(
     generator = torch.Generator(device=device)
     generator.manual_seed(config.seed)
 
-    start_step, attempted, history, loss_shares = 0, 0, [], []
+    start_step, attempted, history, loss_shares, head_history = 0, 0, [], [], []
     grad_norms, nonfinite_steps, skipped_steps = [], [], 0
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
@@ -464,6 +501,7 @@ def train(
         grad_norms = list(state.get("grad_norms", []))
         nonfinite_steps = list(state.get("nonfinite_steps", []))
         skipped_steps = int(state.get("skipped_steps", 0))
+        head_history = list(state.get("head_loss_history", []))
 
     def save(step: int) -> None:
         if checkpoint_path is None:
@@ -486,6 +524,7 @@ def train(
                 "grad_norms": grad_norms,
                 "nonfinite_steps": nonfinite_steps,
                 "skipped_steps": skipped_steps,
+                "head_loss_history": head_history,
                 "species": list(pool.names),
             },
             tmp,
@@ -511,7 +550,18 @@ def train(
         while applied < config.steps and attempted < max_attempts:
             step = attempted  # attempt index, so a diagnostic record points at the batch that failed
             attempted += 1
-            features, targets, species = pool.sample(generator, config.batch_size)
+            observed = target_mask = None
+            if horizon:
+                features, token_mask, targets, target_mask, species = pool.sample_horizon(generator, config.batch_size)
+                if features.shape[1] != (config.history or CONTEXT_LENGTH) - 1:
+                    raise ValueError(
+                        f"the pool's windows have {features.shape[1]} tokens; history {config.history} needs "
+                        f"{(config.history or CONTEXT_LENGTH) - 1}"
+                    )
+                if config.history:
+                    observed = token_mask
+            else:
+                features, targets, species = pool.sample(generator, config.batch_size)
 
             # the index the conditioning path is given. It is the true species except under the shuffled-label control, and None for every 
             # arm without a lookup table; the draw uses the sampler generator, so a control run is as reproducible from its seed as any other
@@ -545,6 +595,10 @@ def train(
                     token_mask,
                 )
                 loss = forecast_loss + config.reconstruction_weight * reconstruction_loss
+            elif horizon:
+                loss, head_losses = horizon_huber(
+                    model(features, species=cond_species, observed=observed), targets, target_mask
+                )
             else:
                 loss = normalised_huber(model(features, species=cond_species), targets)
             if config.trunk == "moe":
@@ -592,10 +646,12 @@ def train(
 
             if applied % log_every == 0 or applied == config.steps:
                 history.append(float(loss.detach()))
+                if horizon:
+                    head_history.append([float(v) for v in head_losses.detach()])
                 # report realised loss composition under the production loss
                 loss_shares.append(
                     _species_loss_share(
-                        model, features, targets, species, pool.names, config, cond_species
+                        model, features, targets, species, pool.names, config, cond_species, observed, target_mask
                     )
                 )
             # save only states the loop has actually reached
@@ -636,6 +692,7 @@ def train(
         loss_shares=loss_shares,
         grad_norms=grad_norms,
         nonfinite_steps=nonfinite_steps,
+        head_loss_history=head_history,
         skipped_steps=skipped_steps,
         resumed_from=start_step,
     )

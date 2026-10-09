@@ -225,3 +225,99 @@ def test_batch_is_a_species_mixture(tmp_path):
     )
     features, targets, scales = pool.sample(np.random.default_rng(0), batch_size=256)
     assert features.shape[0] == 256 and targets.shape == (256, 2) and scales.shape == (256,)
+
+
+from animal_movement_fm.data.enu import encode_window, enu_steps  # noqa: E402
+from animal_movement_fm.data.multispecies import HorizonWindows, history_positions  # noqa: E402
+import experiments.eda.cadence_horizons as ch  # noqa: E402
+
+HOUR = 3600
+HORIZONS = (1, 6, 24)
+# a 14-bin run, then 18, 19 and 36 occupied: anchors at bins 11, 12, 13 (the horizon-count tests' layout)
+DIRECT_BINS = np.concatenate((np.arange(14), [18, 19, 36]))
+
+
+def _hourly(tmp_path, segments: dict, name="hourly.parquet"):
+    """`segments` is {segment_id: (individual_id, bins)}; a jittered eastward walk on a 1 h grid."""
+    rng = np.random.default_rng(3)
+    rows = []
+    for segment_id, (individual, bins) in segments.items():
+        for b in bins:
+            rows.append({"segment_id": segment_id, "individual_id": individual, "bin_index": int(b),
+                         "timestamp": pd.Timestamp("2020-01-01", tz="UTC")
+                         + pd.Timedelta(seconds=HOUR * int(b) + int(rng.integers(0, 3000))),
+                         "lon": 10.0 + 0.002 * b + rng.normal(0, 2e-4), "lat": 50.0 + rng.normal(0, 2e-4)})
+    path = tmp_path / name
+    pd.DataFrame(rows).to_parquet(path)
+    return path
+
+
+def _horizon_windows(path, ids=("a",), context=12):
+    return HorizonWindows.build(path, list(ids), context=context, core=12, horizons=HORIZONS, bin_seconds=HOUR)
+
+
+def test_anchors_and_targets_follow_the_direct_rule(tmp_path):
+    windows = _horizon_windows(_hourly(tmp_path, {"a_s0": ("a", DIRECT_BINS)}))
+    hit = ch.targets_hit(DIRECT_BINS, 12, HORIZONS)
+    assert windows.n_windows == int(hit.any(axis=1).sum()) == 3
+    assert np.array_equal(windows.targets >= 0, hit[hit.any(axis=1)])
+    assert DIRECT_BINS[windows.anchors].tolist() == [11, 12, 13]
+    found = windows.targets >= 0
+    assert np.array_equal(DIRECT_BINS[windows.targets[found]] - DIRECT_BINS[np.nonzero(found)[0] + 11],
+                          np.broadcast_to(np.array(HORIZONS), found.shape)[found])
+    assert windows.for_horizon(6).n_windows == int(hit[:, 1].sum())
+
+
+def test_no_target_or_history_crosses_a_segment(tmp_path):
+    # the second segment continues the bins of the first, so only the segment id keeps them apart
+    path = _hourly(tmp_path, {"a_s0": ("a", np.arange(12)), "a_s1": ("a", np.arange(12, 40))})
+    windows = _horizon_windows(path, context=24)
+    assert windows.n_windows == 28 - 11 - 1  # anchors in a_s1 only, each needs bin t + 1 in a_s1
+    assert windows.anchors.min() == 23  # the 12th row of a_s1
+    grid = history_positions(windows.keys, windows.anchors[:1], 24)
+    assert (grid[grid >= 0] >= 12).all()  # the history never reaches back into a_s0
+
+
+def test_gather_measures_the_core_and_targets_as_the_main_design(tmp_path):
+    path = _hourly(tmp_path, {"a_s0": ("a", np.concatenate(([0, 1, 5], np.arange(10, 60))))})
+    main = _horizon_windows(path)
+    wide = _horizon_windows(path, context=24)
+    assert np.array_equal(main.anchors, wide.anchors)
+    ids = np.arange(main.n_windows)
+    f12, m12, t12, tm12, s12 = main.gather(ids)
+    f24, m24, t24, tm24, s24 = wide.gather(ids)
+    assert f12.shape == (len(ids), 11, 12) and f24.shape == (len(ids), 23, 12)
+    assert np.array_equal(f24[:, -11:], f12) and np.array_equal(s24, s12) and np.array_equal(t24, t12)
+    assert m12.all() and np.array_equal(tm12, tm24) and np.array_equal(tm12, main.targets >= 0)
+    a = main.anchors
+    core, scale = encode_window(main.lon[a[:, None] + np.arange(-11, 1)], main.lat[a[:, None] + np.arange(-11, 1)],
+                                timestamp_s=main.epoch_s[a[:, None] + np.arange(-11, 1)], bin_seconds=HOUR)
+    assert np.array_equal(f12, core) and np.array_equal(s12, scale)
+    j, rows = 1, np.flatnonzero(tm12[:, 1])
+    pair = np.stack([a[rows], main.targets[rows, j]], axis=1)
+    expected = enu_steps(main.lon[pair], main.lat[pair])[:, 0, :] / scale[rows, None]
+    assert np.array_equal(t12[rows, j], expected)
+    assert (t12[~tm12] == 0).all()
+    assert m24[0, :12].sum() < 12  # the early history has holes, masked
+
+
+def test_species_windows_draws_are_unchanged_by_the_generic_sample(tmp_path):
+    species = {
+        "x": SpeciesWindows.build(_segments(tmp_path, {"a": [40, 30]}, name="x.parquet", jitter_seed=1), ["a"]),
+        "y": SpeciesWindows.build(_segments(tmp_path, {"b": [50]}, name="y.parquet", jitter_seed=2), ["b"]),
+    }
+    pool = SourcePool(species, {"x": 0.3, "y": 0.7})
+    drawn = pool.sample(np.random.default_rng(5), 64)
+    rng = np.random.default_rng(5)  # the registered rule, step by step
+    picks = rng.choice(2, size=64, p=pool.probabilities)
+    manual = [species[n].gather(rng.integers(0, species[n].n_windows, size=int((picks == i).sum())))
+              for i, n in enumerate(pool.names) if (picks == i).any()]
+    assert len(drawn) == 3
+    for got, column in zip(drawn, zip(*manual)):
+        assert np.array_equal(got, np.concatenate(column))
+
+
+def test_sample_concatenates_horizon_batches(tmp_path):
+    windows = _horizon_windows(_hourly(tmp_path, {"a_s0": ("a", np.arange(80))}))
+    batch = SourcePool({"a": windows}, {"a": 1.0}).sample(np.random.default_rng(0), 16)
+    assert [x.shape for x in batch] == [(16, 11, 12), (16, 11), (16, 3, 2), (16, 3), (16,)]

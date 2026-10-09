@@ -10,13 +10,13 @@ registered/tier2_source_pool_weights.json (moved from results/ on 16-09-2026, A1
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from animal_movement_fm.data.enu import SCALE_FLOOR_M, encode_window, enu_steps, scale_target
+from animal_movement_fm.data.enu import SCALE_FLOOR_M, encode_history, encode_window, enu_steps, scale_target
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import id_key
 
@@ -35,6 +35,39 @@ def _contiguous_run_bounds(segment_id: np.ndarray, bin_index: np.ndarray) -> tup
     starts = np.flatnonzero(new_run)
     stops = np.append(starts[1:], n)
     return starts, stops
+
+
+def _read_segments(segments_parquet: str | Path, individual_ids) -> pd.DataFrame:
+    """
+    One species' segment rows for the selected individuals, ordered by segment then bin.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    present = con.execute(
+        f"SELECT DISTINCT individual_id FROM '{segments_parquet}'"
+    ).df()["individual_id"]
+    wanted = {id_key(i) for i in individual_ids}
+    selected = present[[id_key(value) in wanted for value in present]]
+    if wanted and selected.empty:
+        raise ValueError(
+            f"none of the {len(wanted)} requested individuals appear in {segments_parquet}; "
+            "this is a manifest/segments mismatch, not an empty split"
+        )
+
+    # register ids in the parquet columns own dtype then push the partition filter into DuckDB; coordinates belonging to
+    # validation or test individuals therefore never enter a source-training frame.
+    con.register("split_ids", pd.DataFrame({"individual_id": selected.to_numpy()}))
+    # get epoch seconds in DuckDB to avoid datetime unit mismatches in pandas
+    frame = con.execute(
+        f"""
+        SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat
+        FROM '{segments_parquet}' s
+        SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id
+        ORDER BY s.segment_id, s.bin_index
+        """
+    ).df()
+    return frame
 
 
 @dataclass
@@ -65,32 +98,7 @@ class SpeciesWindows:
         name: str | None = None,
     ) -> "SpeciesWindows":
         """Build the valid window index for selected individuals of one species."""
-        import duckdb
-
-        con = duckdb.connect()
-        present = con.execute(
-            f"SELECT DISTINCT individual_id FROM '{segments_parquet}'"
-        ).df()["individual_id"]
-        wanted = {id_key(i) for i in individual_ids}
-        selected = present[[id_key(value) in wanted for value in present]]
-        if wanted and selected.empty:
-            raise ValueError(
-                f"none of the {len(wanted)} requested individuals appear in {segments_parquet}; "
-                "this is a manifest/segments mismatch, not an empty split"
-            )
-
-        # register ids in the parquet columns own dtype then push the partition filter into DuckDB; coordinates belonging to
-        # validation or test individuals therefore never enter a source-training frame.
-        con.register("split_ids", pd.DataFrame({"individual_id": selected.to_numpy()}))
-        # Get epoch seconds in DuckDB to avoid datetime unit mismatches in pandas.
-        frame = con.execute(
-            f"""
-            SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat
-            FROM '{segments_parquet}' s
-            SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id
-            ORDER BY s.segment_id, s.bin_index
-            """
-        ).df()
+        frame = _read_segments(segments_parquet, individual_ids)
 
         segment_id = frame["segment_id"].to_numpy()
         bin_index = frame["bin_index"].to_numpy()
@@ -148,6 +156,209 @@ class SpeciesWindows:
         return features, scale_target(target_step, scale), scale
 
 
+SEGMENT_KEY_STRIDE = np.int64(1) << 32  # Separate key range for each segment.
+
+
+def _segment_keys(segment_id: np.ndarray, bin_index: np.ndarray) -> np.ndarray:
+    """
+    Offset bin indices by segment rank. Rows must be ordered by segment, then bin.
+    """
+    new_segment = np.ones(len(bin_index), dtype=bool)
+    new_segment[1:] = segment_id[1:] != segment_id[:-1]
+    segment_rank = np.cumsum(new_segment) - 1
+
+    return segment_rank.astype(np.int64) * SEGMENT_KEY_STRIDE + bin_index.astype(np.int64)
+
+
+def direct_anchors(
+    keys: np.ndarray,
+    core: int,
+    horizons: tuple[int, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Find anchors with a contiguous core and at least one requested target.
+
+    Return anchor positions and target positions, using -1 for missing targets.
+    """
+    anchors = np.arange(core - 1, len(keys))
+    anchors = anchors[keys[anchors] - keys[anchors - core + 1] == core - 1]
+
+    targets = np.full((len(anchors), len(horizons)), -1, dtype=np.int64)
+    for column, horizon in enumerate(horizons):
+        target_keys = keys[anchors] + horizon
+        target_positions = np.minimum(
+            np.searchsorted(keys, target_keys),
+            max(len(keys) - 1, 0),
+        )
+        targets[:, column] = np.where(
+            keys[target_positions] == target_keys,
+            target_positions,
+            -1,
+        )
+
+    keep = (targets >= 0).any(axis=1)
+    return anchors[keep], targets[keep]
+
+
+def history_positions(
+    keys: np.ndarray,
+    anchors: np.ndarray,
+    context: int,
+) -> np.ndarray:
+    """
+    Find history positions within each anchor's segment, oldest first.
+
+    Return an (n_anchors, context) array with -1 for missing bins.
+    """
+    positions = anchors[:, None] + np.arange(-context + 1, 1)[None, :]
+    safe_positions = np.maximum(positions, 0)
+    columns = keys[safe_positions] - (keys[anchors] - context + 1)[:, None]
+
+    same_segment = (
+        keys[safe_positions] // SEGMENT_KEY_STRIDE
+        == (keys[anchors] // SEGMENT_KEY_STRIDE)[:, None]
+    )
+    valid = (positions >= 0) & same_segment & (columns >= 0)
+
+    grid = np.full(positions.shape, -1, dtype=np.int64)
+    rows = np.broadcast_to(np.arange(len(anchors))[:, None], positions.shape)
+    grid[rows[valid], columns[valid]] = positions[valid]
+
+    return grid
+
+
+@dataclass
+class HorizonWindows:
+    """One species' windows, stored as anchor and target offsets into flat arrays."""
+
+    name: str
+    lon: np.ndarray
+    lat: np.ndarray
+    epoch_s: np.ndarray
+    keys: np.ndarray
+    individuals: np.ndarray  # canonical IDs, indexed by individual_index
+    individual_index: np.ndarray  # One index per anchor
+    anchors: np.ndarray
+    targets: np.ndarray  # (n_anchors, n_horizons); -1 for missing targets
+    context: int
+    core: int
+    horizons: tuple[int, ...]
+    bin_seconds: int
+    clip: float | None = None
+
+    @property
+    def n_windows(self) -> int:
+        return int(len(self.anchors))
+
+    @classmethod
+    def build(
+        cls,
+        segments_parquet: str | Path,
+        individual_ids,
+        *,
+        context: int,
+        core: int,
+        horizons: tuple[int, ...],
+        bin_seconds: int,
+        clip: float | None = None,
+        name: str | None = None,
+    ) -> "HorizonWindows":
+        """
+        Build windows for the selected individuals of one species.
+        """
+        if context < core:
+            raise ValueError(f"context {context} is shorter than the {core}-bin core")
+        # GenAI ref: completed a small part of this function
+        frame = _read_segments(segments_parquet, individual_ids)
+        bins = frame["bin_index"].to_numpy(np.int64)
+        if len(bins) and (bins.min() < 0 or bins.max() >= SEGMENT_KEY_STRIDE):
+            raise ValueError("bin indices must lie in [0, 2**32) for the segment keys")
+
+        keys = _segment_keys(frame["segment_id"].to_numpy(), bins)
+        horizons = tuple(int(h) for h in horizons)
+        anchors, targets = direct_anchors(keys, core, horizons)
+        individuals, individual_index = np.unique(
+            np.array([id_key(v) for v in frame["individual_id"]]),
+            return_inverse=True,
+        )
+
+        return cls(
+            name=name or Path(segments_parquet).stem,
+            lon=frame["lon"].to_numpy(float),
+            lat=frame["lat"].to_numpy(float),
+            epoch_s=frame["epoch_s"].to_numpy(float),
+            keys=keys,
+            individuals=individuals,
+            individual_index=individual_index[anchors],
+            anchors=anchors,
+            targets=targets,
+            context=int(context),
+            core=int(core),
+            horizons=horizons,
+            bin_seconds=int(bin_seconds),
+            clip=clip,
+        )
+
+    def for_horizon(self, h: int) -> "HorizonWindows":
+        """
+        Keep windows with a target at h, retaining all their horizon targets.
+        """
+        keep = self.targets[:, self.horizons.index(h)] >= 0
+
+        return replace(
+            self,
+            anchors=self.anchors[keep],
+            targets=self.targets[keep],
+            individual_index=self.individual_index[keep],
+        )
+
+    def gather(
+        self,
+        window_ids: np.ndarray,
+        *,
+        sigma: float = SCALE_FLOOR_M,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Return features, token mask, scaled targets, target mask and window scale.
+
+        Targets use the core's scale. Missing targets are zero and masked out.
+        """
+        window_ids = np.asarray(window_ids, dtype=np.int64)
+        anchors = self.anchors[window_ids]
+        history_grid = history_positions(self.keys, anchors, self.context)
+        history_indices = np.maximum(history_grid, 0)
+
+        features, token_mask, scale = encode_history(
+            self.lon[history_indices],
+            self.lat[history_indices],
+            timestamp_s=self.epoch_s[history_indices],
+            observed=history_grid >= 0,
+            core=self.core,
+            sigma=sigma,
+            bin_seconds=self.bin_seconds,
+            clip=self.clip,
+        )
+
+        target_positions = self.targets[window_ids]
+        target_mask = target_positions >= 0
+        pairs = np.stack(
+            [
+                np.broadcast_to(anchors[:, None], target_positions.shape),
+                np.maximum(target_positions, 0),
+            ],
+            axis=-1,
+        )
+
+        steps = enu_steps(self.lon[pairs], self.lat[pairs])[..., 0, :]
+        scaled_targets = np.where(
+            target_mask[..., None],
+            scale_target(steps, scale[:, None]),
+            0.0,
+        )
+
+        return features, token_mask, scaled_targets, target_mask, scale
+
+
 class SourcePool:
     """
     Registered source-species pool and draw probabilities.
@@ -176,23 +387,23 @@ class SourcePool:
             node = node[part]
         return cls({k: species[k] for k in node}, dict(node))
 
-    def sample(self, rng: np.random.Generator, batch_size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, rng: np.random.Generator, batch_size: int) -> tuple[np.ndarray, ...]:
         """
         Draw one mixed-species batch under the registered sampling rule.
+
+        Returns whatever the species' `gather` returns, concatenated: (features, targets, scale) for SpeciesWindows,
+        five arrays for HorizonWindows. The draws do not depend on which.
         """
         picks = rng.choice(len(self.names), size=batch_size, p=self.probabilities)
-        features, targets, scales = [], [], []
+        parts = []
         for index, name in enumerate(self.names):
             count = int((picks == index).sum())
             if not count:
                 continue
             windows = self.species[name]
             ids = rng.integers(0, windows.n_windows, size=count)
-            f, t, s = windows.gather(ids)
-            features.append(f)
-            targets.append(t)
-            scales.append(s)
-        return np.concatenate(features), np.concatenate(targets), np.concatenate(scales)
+            parts.append(windows.gather(ids))
+        return tuple(np.concatenate(column) for column in zip(*parts))
 
     def realised_species_shares(self, rng: np.random.Generator, draws: int = 100_000) -> dict[str, float]:
         """

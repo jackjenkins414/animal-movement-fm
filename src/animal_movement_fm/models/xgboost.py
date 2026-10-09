@@ -618,7 +618,9 @@ class WindowXGBoost:
         random_state: int = 0,
         n_jobs: int | None = None,
         name: str = "window_xgboost",
+        allow_missing: bool = False,
     ) -> None:
+        self.allow_missing = bool(allow_missing)
         self.params = {
             "n_estimators": int(n_estimators),
             "max_depth": int(max_depth),
@@ -645,8 +647,9 @@ class WindowXGBoost:
         y = np.asarray(targets, dtype=np.float32)
         if y.shape != (x.shape[0], 2):
             raise ValueError(f"targets must be (N, 2) normalised displacements; got {y.shape}")
-        if not (np.isfinite(x).all() and np.isfinite(y).all()):
-            raise ValueError("non-finite features or targets; the registered encoding should never produce them")
+        if not np.isfinite(y).all():
+            raise ValueError("non-finite targets; the registered encoding should never produce them")
+        self._check_features(x)
         self.models_ = [XGBRegressor(**self.params).fit(x, y[:, axis]) for axis in (0, 1)]
         self.n_features_ = x.shape[1]
         return self
@@ -657,7 +660,15 @@ class WindowXGBoost:
         x = self._flatten(features)
         if x.shape[1] != self.n_features_:
             raise ValueError(f"expected {self.n_features_} flattened features, got {x.shape[1]}")
+        self._check_features(x)
         return np.stack([model.predict(x) for model in self.models_], axis=-1).astype(float)
+
+    def _check_features(self, x: np.ndarray) -> None:
+        """Infinities are always refused; NaN only marks a missing bin, and only with allow_missing."""
+        if np.isinf(x).any():
+            raise ValueError("infinite features; the registered encoding should never produce them")
+        if not self.allow_missing and np.isnan(x).any():
+            raise ValueError("NaN features; the registered encoding should never produce them without allow_missing")
 
     def save(self, stem) -> None:
         """Write `<stem>_east.ubj`, `<stem>_north.ubj` and `<stem>_meta.json`."""
@@ -671,7 +682,11 @@ class WindowXGBoost:
         for axis, model in zip(("east", "north"), self.models_):
             model.save_model(f"{stem}_{axis}.ubj")
         Path(f"{stem}_meta.json").write_text(
-            json.dumps({"params": self.params, "n_features": self.n_features_, "name": self.name}, indent=2) + "\n"
+            json.dumps(
+                {"params": self.params, "n_features": self.n_features_, "name": self.name,
+                 "allow_missing": self.allow_missing},
+                indent=2,
+            ) + "\n"
         )
 
     @classmethod
@@ -681,7 +696,7 @@ class WindowXGBoost:
 
         meta = json.loads(Path(f"{stem}_meta.json").read_text())
         params = {k: v for k, v in meta["params"].items() if k not in ("objective", "tree_method")}
-        model = cls(**params, name=meta["name"])
+        model = cls(**params, name=meta["name"], allow_missing=bool(meta.get("allow_missing", False)))
         model.models_ = []
         for axis in ("east", "north"):
             regressor = XGBRegressor()

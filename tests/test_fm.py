@@ -251,3 +251,167 @@ def test_window_model_predictor_matches_the_fm_path_for_a_zero_model():
     pred = WindowModelPredictor(Zero()).predict_batch(history, stamps)
     # a zero displacement is persistence: the last observed fix
     np.testing.assert_allclose(pred, history[:, -1, :])
+
+
+LONG = 47  # a C = 48 history: 36 extended tokens, then the 11-token core
+
+
+def _padded(seed=0, batch=BATCH):
+    """Features with holes in the extended history; the core (last 11 tokens) is always observed."""
+    generator = torch.Generator().manual_seed(seed)
+    features = torch.randn(batch, LONG, N_FEATURES, generator=generator)
+    observed = torch.rand(batch, LONG, generator=generator) > 0.4
+    observed[:, -11:] = True
+    observed[0, :-11] = False  # one window with no extended token observed
+    return torch.where(observed[..., None], features, torch.zeros(())), observed
+
+
+def test_n_horizons_zero_is_the_old_model():
+    for kwargs in (dict(), dict(use_fm_package=False), dict(use_fm_package=False, trunk="lstm"),
+                   dict(use_reconstruction_head=True)):
+        torch.manual_seed(5)
+        old = MovementFM(d_model=32, num_layers=2, **kwargs).eval()
+        torch.manual_seed(5)
+        new = MovementFM(d_model=32, num_layers=2, n_horizons=0, observed_flag=False, **kwargs).eval()
+        old_state, new_state = old.state_dict(), new.state_dict()
+        assert old_state.keys() == new_state.keys()
+        assert all(torch.equal(old_state[k], new_state[k]) for k in old_state)
+        features, _ = _batch()
+        with torch.no_grad():
+            a, b = old(features), new(features)
+        a, b = (a, b) if isinstance(a, tuple) else ((a,), (b,))
+        assert all(torch.equal(x, y) for x, y in zip(a, b)) and a[0].shape == (BATCH, 2)
+
+
+def test_one_east_north_head_per_horizon():
+    model = MovementFM(d_model=32, num_layers=1, use_fm_package=False, n_horizons=3).eval()
+    assert model.head.out_features == 6
+    pred = model(_batch()[0])
+    assert pred.shape == (BATCH, 3, 2)
+    assert torch.equal(pred, model.head(model.encode(_batch()[0])[:, -1, :]).view(BATCH, 3, 2))
+    with pytest.raises(ValueError, match="output_dim"):
+        MovementFM(n_horizons=3, output_dim=4, use_fm_package=False)
+    with pytest.raises(ValueError, match="output_dim"):
+        MovementFM(n_horizons=-1, use_fm_package=False)
+
+
+@pytest.mark.parametrize("mode", ["eval", "train"])
+def test_padded_tokens_cannot_move_the_transformer_output(mode):
+    model = MovementFM(d_model=32, num_layers=2, dropout=0.0, use_fm_package=False, n_horizons=3)
+    model.train(mode == "train")
+    features, observed = _padded()
+    garbage = torch.where(observed[..., None], features, 1e3 * torch.randn(features.shape))
+    with torch.no_grad():
+        clean, noisy = model(features, observed=observed), model(garbage, observed=observed)
+        unmasked = model(garbage)
+    assert torch.allclose(clean, noisy, atol=1e-6, rtol=0)
+    assert not torch.allclose(clean, unmasked, atol=1e-3)  # without the mask the garbage does reach the read-out
+    assert torch.isfinite(clean).all()
+
+
+def test_a_fully_observed_mask_is_no_mask():
+    model = MovementFM(d_model=32, num_layers=2, use_fm_package=False, n_horizons=3).eval()
+    features, _ = _batch()
+    with torch.no_grad():
+        assert torch.allclose(model(features), model(features, observed=torch.ones(BATCH, SEQ, dtype=torch.bool)),
+                              atol=1e-6, rtol=0)
+
+
+def test_the_lstm_reads_the_observed_flag_as_its_last_channel():
+    torch.manual_seed(0)
+    model = MovementFM(input_dim=N_FEATURES + 1, d_model=16, num_layers=1, use_fm_package=False, trunk="lstm",
+                       n_horizons=3, observed_flag=True).eval()
+    features, observed = _padded()
+    assert model.input_proj.in_features == N_FEATURES + 1
+    with torch.no_grad():
+        pred = model(features, observed=observed)
+        flipped = observed.clone()
+        flipped[1, -12] = ~flipped[1, -12]  # the last extended token
+        moved = model(features, observed=flipped)
+        expected, _ = model.encoder(model.input_proj(torch.cat([features, observed[..., None].float()], dim=-1)))
+    assert pred.shape == (BATCH, 3, 2)
+    assert torch.equal(pred, model.head(expected[:, -1, :]).view(BATCH, 3, 2))
+    assert not torch.equal(pred[1], moved[1]) and torch.equal(pred[2:], moved[2:])
+    with pytest.raises(ValueError, match="needs `observed`"):
+        model(features)
+    plain = MovementFM(d_model=16, num_layers=1, use_fm_package=False, trunk="lstm")
+    with pytest.raises(ValueError, match="cannot mask"):
+        plain(features, observed=observed)
+
+
+def test_padding_is_refused_where_it_cannot_be_honoured():
+    features, observed = _padded()
+    with pytest.raises(ValueError, match="FM package"):
+        MovementFM(d_model=16, num_layers=1)(features, observed=observed)
+    with pytest.raises(ValueError, match="FM package"):
+        MovementFM(d_model=16, num_layers=1, use_fm_package=False, use_reconstruction_head=True)(
+            features, observed=observed)
+    with pytest.raises(ValueError, match="MoE"):
+        MovementFM(d_model=16, num_layers=1, use_fm_package=False, trunk="moe")(features, observed=observed)
+    with pytest.raises(ValueError, match="observed flag"):
+        MovementFM(d_model=16, num_layers=1, use_fm_package=False, observed_flag=True)
+
+
+def test_gradient_reaches_every_parameter_through_a_padded_history():
+    features, observed = _padded()
+    for model in (
+        MovementFM(d_model=16, num_layers=2, use_fm_package=False, n_horizons=3),
+        MovementFM(input_dim=N_FEATURES + 1, d_model=16, num_layers=2, use_fm_package=False, trunk="lstm",
+                   n_horizons=3, observed_flag=True),
+    ):
+        model(features, observed=observed).sum().backward()
+        assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+
+
+# GenAI reference: tests for horizon_huber (step 3.5, 10-10), from the behaviours I specified: missing targets ignored
+# in value and gradient, heads weighted equally whatever their counts, an empty head dropped, and the full case equal to
+# the mean of three normalised_huber.
+from animal_movement_fm.train.loss import horizon_huber  # noqa: E402
+
+
+def _horizon_targets(seed=0, batch=64):
+    generator = torch.Generator().manual_seed(seed)
+    pred = torch.randn(batch, 3, 2, generator=generator, requires_grad=True)
+    target = 3.0 * torch.randn(batch, 3, 2, generator=generator)
+    return pred, target
+
+
+def test_horizon_huber_is_the_mean_of_three_normalised_huber_when_full():
+    pred, target = _horizon_targets()
+    loss, per_head = horizon_huber(pred, target, torch.ones(64, 3, dtype=torch.bool))
+    heads = torch.stack([normalised_huber(pred[:, j], target[:, j]) for j in range(3)])
+    assert torch.allclose(per_head, heads, atol=1e-6, rtol=0)
+    assert torch.allclose(loss, heads.mean(), atol=1e-6, rtol=0)
+
+
+def test_horizon_huber_ignores_missing_targets_in_value_and_gradient():
+    pred, target = _horizon_targets()
+    mask = torch.rand(64, 3, generator=torch.Generator().manual_seed(1)) > 0.3
+    loss, per_head = horizon_huber(pred, target, mask)
+    poisoned = torch.where(mask[..., None], target, torch.full_like(target, float("nan")))
+    loss_nan, per_head_nan = horizon_huber(pred, poisoned, mask)
+    assert torch.equal(loss, loss_nan) and torch.equal(per_head, per_head_nan)
+    loss_nan.backward()
+    assert torch.isfinite(pred.grad).all() and (pred.grad[~mask] == 0).all()
+    for j in range(3):
+        assert torch.allclose(per_head[j], normalised_huber(pred[mask[:, j], j], target[mask[:, j], j]), atol=1e-6)
+
+
+def test_horizon_huber_weights_heads_equally_not_by_their_counts():
+    pred, target = _horizon_targets()
+    mask = torch.ones(64, 3, dtype=torch.bool)
+    mask[4:, 2] = False  # the third head keeps 4 windows of 64
+    loss, per_head = horizon_huber(pred, target, mask)
+    assert torch.allclose(loss, per_head.mean(), atol=1e-6, rtol=0)
+
+
+def test_an_empty_head_is_dropped_from_the_batch_mean():
+    pred, target = _horizon_targets()
+    mask = torch.ones(64, 3, dtype=torch.bool)
+    mask[:, 1] = False
+    loss, per_head = horizon_huber(pred, target, mask)
+    assert torch.isnan(per_head[1]) and torch.isfinite(per_head[[0, 2]]).all()
+    assert torch.allclose(loss, per_head[[0, 2]].mean(), atol=1e-6, rtol=0)
+    loss.backward()
+    assert (pred.grad[:, 1] == 0).all()
+    assert torch.isnan(horizon_huber(pred, target, torch.zeros(64, 3, dtype=torch.bool))[0])  # T3 withholds it

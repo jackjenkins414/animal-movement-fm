@@ -86,6 +86,7 @@ def encode_window(
     timestamp_s: np.ndarray,
     sigma: float = SCALE_FLOOR_M,
     bin_seconds: int = BIN_SECONDS,
+    clip: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Encode context positions into the registered feature tensor and return the reversible window scale.
@@ -95,7 +96,6 @@ def encode_window(
     """
     steps = enu_steps(lon_deg, lat_deg)  # (..., T-1, 2)
     scale = window_scale(steps, sigma=sigma) # (...,)
-    magnitude = np.linalg.norm(steps, axis=-1) # (..., T-1)
 
     timestamp_s = np.asarray(timestamp_s, dtype=float)
     if timestamp_s.shape != np.shape(lon_deg):
@@ -104,9 +104,38 @@ def encode_window(
             "per position, not per step"
         )
     elapsed_s = np.diff(timestamp_s, axis=-1)
+    features = _token_features(
+        steps, scale, elapsed_s, lon_deg[..., 1:], lat_deg[..., 1:], timestamp_s[..., 1:],
+        bin_seconds=bin_seconds, clip=clip,
+    )
+    return features, scale
 
+
+def _token_features(
+    steps: np.ndarray,
+    scale: np.ndarray,
+    elapsed_s: np.ndarray,
+    dest_lon: np.ndarray,
+    dest_lat: np.ndarray,
+    dest_ts: np.ndarray,
+    *,
+    bin_seconds: int,
+    clip: float | None = None,
+    span: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    The registered per token channels for steps in metres, each landing on its destination fix.
+
+    `span` divides the scaled step by the bins it covers (gap tokens); `clip` bounds the scaled step only so log_speed
+    and log_dt keep the true magnitude
+    """
+    magnitude = np.linalg.norm(steps, axis=-1) 
     inv = 1.0 / scale[..., None]
     d_scaled = steps * inv[..., None]
+    if span is not None:
+        d_scaled = d_scaled / span[..., None]
+    if clip is not None:
+        d_scaled = np.clip(d_scaled, -clip, clip)
 
     dt_bins = elapsed_s / bin_seconds  # in bins of the grid the window was built on
 
@@ -121,11 +150,10 @@ def encode_window(
     log_speed = np.log1p(magnitude / np.maximum(elapsed_s, 1.0))
 
     # clock features belong to the destination fix of each displacement
-    dest_lon, dest_lat, dest_ts = lon_deg[..., 1:], lat_deg[..., 1:], timestamp_s[..., 1:]
     solar_sin, solar_cos = local_solar_sincos_from_epoch(dest_ts, dest_lon)
     doy_sin, doy_cos = day_of_year_sincos_from_epoch(dest_ts, lat=dest_lat)
 
-    features = np.stack(
+    return np.stack(
         [
             d_scaled[..., 0],
             d_scaled[..., 1],
@@ -142,7 +170,66 @@ def encode_window(
         ],
         axis=-1,
     )
-    return features, scale
+
+
+def previous_observed(observed: np.ndarray, n_tokens: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    (source column, observed) for the tokens ending at columns 1 ... n_tokens of an (N, C) occupancy grid.
+
+    A token's source is the last observed column before its destination; it is observed when its destination is and
+    such a source exists. Unobserved tokens carry source 0.
+    """
+    column = np.arange(observed.shape[1])
+    last = np.maximum.accumulate(np.where(observed, column, -1), axis=1)
+    source = last[:, :n_tokens]  # last observed column strictly before columns 1 ... n_tokens
+    valid = observed[:, 1 : n_tokens + 1] & (source >= 0)
+    return np.where(valid, source, 0), valid
+
+
+def encode_history(
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    *,
+    timestamp_s: np.ndarray,
+    observed: np.ndarray,
+    core: int,
+    sigma: float = SCALE_FLOOR_M,
+    bin_seconds: int = BIN_SECONDS,
+    clip: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Encode movement history with missing observations into features, a mask, and a scale.
+
+    Last `core` bins must be observed and use the same encoding and scale as encode_window. Earlier steps use the previous observed 
+    position, with gaps accounted for in the scaled displacement and time features; missing tokens are zeroed and masked out.
+    """
+    lon, lat, ts = (np.asarray(a, dtype=float) for a in (lon_deg, lat_deg, timestamp_s))
+    observed = np.asarray(observed, dtype=bool)
+    if not observed[:, -core:].all():
+        raise ValueError(f"every window's last {core} bins must be observed; they are the contiguous core")
+    core_features, scale = encode_window(
+        lon[:, -core:], lat[:, -core:], timestamp_s=ts[:, -core:], sigma=sigma, bin_seconds=bin_seconds, clip=clip
+    )
+    core_mask = np.ones(core_features.shape[:2], dtype=bool)
+    n_extended = lon.shape[1] - core
+    if n_extended == 0:
+        return core_features, core_mask, scale
+
+    # unobserved bins take t's values so nothing non-finite reaches the arithmetic; their tokens are zeroed below
+    lon, lat, ts = (np.where(observed, a, a[:, -1:]) for a in (lon, lat, ts))
+    source, valid = previous_observed(observed, n_extended)
+    rows = np.arange(len(lon))[:, None]
+    dest = np.arange(1, n_extended + 1)[None, :]
+    lon_rad, lat_rad = np.radians(lon), np.radians(lat)
+    east = EARTH_RADIUS_M * np.cos(lat_rad[:, -1:]) * wrap_longitude(lon_rad[rows, dest] - lon_rad[rows, source])
+    north = EARTH_RADIUS_M * (lat_rad[rows, dest] - lat_rad[rows, source])
+    span = np.where(valid, dest - source, 1)
+    extended = _token_features(
+        np.stack([east, north], axis=-1), scale, ts[rows, dest] - ts[rows, source],
+        lon[rows, dest], lat[rows, dest], ts[rows, dest], bin_seconds=bin_seconds, clip=clip, span=span,
+    )
+    extended = np.where(valid[..., None], extended, 0.0)
+    return np.concatenate([extended, core_features], axis=1), np.concatenate([valid, core_mask], axis=1), scale
 
 
 def scale_target(target_step_m: np.ndarray, scale: np.ndarray) -> np.ndarray:

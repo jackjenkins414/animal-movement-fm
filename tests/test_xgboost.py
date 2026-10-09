@@ -607,3 +607,63 @@ def test_window_xgboost_rejects_bad_shapes():
         WindowXGBoost().fit(np.zeros((10, 132)), np.zeros((10, 2)))
     with pytest.raises(ValueError):
         WindowXGBoost().fit(np.zeros((10, 11, 12)), np.zeros((10, 3)))
+
+
+# GenAI reference: tests for WindowXGBoost's allow_missing (step 3.7, 10-10), from the behaviours I specified: NaN
+# features refused without the flag, fitted and predicted with it, the flag kept by save and load, and a meta file
+# written before the flag loading as False.
+def _missing_features(seed=0, n=1500):
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(n, 23, 12)).astype(np.float32)
+    y = np.stack([0.8 * x[:, -1, 0], -0.5 * x[:, -1, 1]], axis=-1)
+    holes = rng.random((n, 23)) < 0.3
+    holes[:, -11:] = False  # the core is always observed
+    x[holes] = np.nan
+    return x, y
+
+
+def test_window_xgboost_refuses_nan_without_allow_missing():
+    from animal_movement_fm.models.xgboost import WindowXGBoost
+
+    x, y = _missing_features()
+    with pytest.raises(ValueError, match="allow_missing"):
+        WindowXGBoost(n_estimators=5).fit(x, y)
+    fitted = WindowXGBoost(n_estimators=5).fit(np.nan_to_num(x), y)
+    with pytest.raises(ValueError, match="allow_missing"):
+        fitted.predict(x[:10])
+    with pytest.raises(ValueError, match="infinite"):
+        WindowXGBoost(n_estimators=5, allow_missing=True).fit(np.where(np.isnan(x), np.inf, x), y)
+    with pytest.raises(ValueError, match="non-finite targets"):
+        WindowXGBoost(n_estimators=5, allow_missing=True).fit(x, np.full_like(y, np.nan))
+
+
+def test_window_xgboost_fits_missing_bins_and_keeps_the_flag(tmp_path):
+    from animal_movement_fm.models.xgboost import WindowXGBoost
+
+    x, y = _missing_features()
+    model = WindowXGBoost(n_estimators=40, allow_missing=True).fit(x, y)
+    pred = model.predict(x[:50])
+    assert np.isfinite(pred).all() and np.corrcoef(pred[:, 0], y[:50, 0])[0, 1] > 0.9
+    model.save(tmp_path / "ablation")
+    loaded = WindowXGBoost.load(tmp_path / "ablation")
+    assert loaded.allow_missing and "allow_missing" not in loaded.params
+    np.testing.assert_allclose(loaded.predict(x[:50]), pred)
+
+
+def test_a_meta_file_written_before_allow_missing_loads_as_false(tmp_path):
+    import json
+
+    from animal_movement_fm.models.xgboost import WindowXGBoost
+
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=(500, 11, 12)).astype(np.float32)
+    y = np.stack([x[:, -1, 0], x[:, -1, 1]], axis=-1)
+    model = WindowXGBoost(n_estimators=10).fit(x, y)
+    model.save(tmp_path / "old")
+    meta_path = tmp_path / "old_meta.json"
+    meta = json.loads(meta_path.read_text())
+    del meta["allow_missing"]
+    meta_path.write_text(json.dumps(meta))
+    loaded = WindowXGBoost.load(tmp_path / "old")
+    assert loaded.allow_missing is False
+    np.testing.assert_allclose(loaded.predict(x[:20]), model.predict(x[:20]))

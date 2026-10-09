@@ -76,3 +76,27 @@ def masked_reconstruction_loss(
     error = recon_scaled - target_scaled
     per_token = radial_pseudo_huber(error, delta=delta, reduction="none")
     return per_token[mask].mean()
+
+
+def horizon_huber(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    delta: float = HUBER_DELTA,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Return `(loss, per_head)` for (batch, H, 2) predictions and targets with a (batch, H) target mask.
+
+    """
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+    # zeroed before the error so a non-finite missing target cannot reach the gradient through `where`
+    target = torch.where(mask.unsqueeze(-1), target, torch.zeros_like(target))
+    per_window = radial_pseudo_huber(pred - target, delta=delta, reduction="none")
+    counts = mask.sum(dim=0)
+    present = counts > 0
+    head_means = torch.where(mask, per_window, torch.zeros_like(per_window)).sum(dim=0) / counts.clamp(min=1)
+    loss = torch.where(present, head_means, torch.zeros_like(head_means)).sum() / present.sum()
+    per_head = torch.where(present, head_means, torch.full_like(head_means, float("nan")))
+    return loss, per_head

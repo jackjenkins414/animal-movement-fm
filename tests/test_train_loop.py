@@ -279,3 +279,295 @@ def test_the_loss_share_diagnostic_is_recorded(tmp_path):
     for share in result.loss_shares:
         assert set(share) == set(prepared.names)
         assert sum(share.values()) == pytest.approx(1.0, abs=1e-5)
+
+
+# GenAI reference: tests for the 1 h study's pools (step 3.3, 10-10), from the behaviours I specified: sample's draws
+# unchanged, sample_horizon on the same draws, targets divided by k_h, k_h one bird's np.median and independent of C,
+# the streaming pool equal to the prepared one on the core, and core_matches catching a perturbed core.
+from dataclasses import replace  # noqa: E402
+
+from animal_movement_fm.data.multispecies import HorizonWindows  # noqa: E402
+from animal_movement_fm.train.pool import (  # noqa: E402
+    StreamingPool,
+    core_matches,
+    horizon_k,
+    horizon_ratios,
+    weighted_median,
+)
+
+HOUR = 3600
+HORIZONS = (1, 6, 24)
+
+
+def _hourly(tmp_path, name, individual, bins, seed, step_deg=0.002):
+    rng = np.random.default_rng(seed)
+    rows = [
+        {"segment_id": f"{individual}_s0", "individual_id": individual, "bin_index": int(b),
+         "timestamp": pd.Timestamp("2020-01-01", tz="UTC") + pd.Timedelta(seconds=HOUR * int(b) + int(rng.integers(0, 3000))),
+         "lon": 10.0 + step_deg * b + rng.normal(0, 2e-4), "lat": 50.0 + rng.normal(0, 2e-4)}
+        for b in bins
+    ]
+    path = tmp_path / name
+    pd.DataFrame(rows).to_parquet(path)
+    return path
+
+
+def _horizon_pool(tmp_path, context=12, weights=(0.6, 0.4)):
+    # holes in both histories, and b moves five times as far per bin, so the two species' r_h differ
+    paths = {
+        "a": _hourly(tmp_path, "a.parquet", "a", np.concatenate(([0, 1, 5], np.arange(10, 140))), 1),
+        "b": _hourly(tmp_path, "b.parquet", "b", np.setdiff1d(np.arange(110), np.arange(40, 44)), 2, 0.01),
+    }
+    species = {
+        name: HorizonWindows.build(path, [name], context=context, core=12, horizons=HORIZONS, bin_seconds=HOUR)
+        for name, path in paths.items()
+    }
+    return SourcePool(species, dict(zip(("a", "b"), weights)))
+
+
+def test_sample_draws_are_the_registered_rule_written_out(tmp_path):
+    """The original sample(), inline: factoring the draws out must not move a single row."""
+    prepared = PreparedPool.from_source_pool(_pool(tmp_path))
+    features, targets, picks = prepared.sample(torch.Generator().manual_seed(11), 64)
+
+    generator = torch.Generator().manual_seed(11)
+    expected_picks = torch.multinomial(prepared.probabilities, 64, replacement=True, generator=generator)
+    starts = prepared.species_bounds[expected_picks, 0]
+    widths = prepared.species_bounds[expected_picks, 1] - starts
+    offsets = (torch.rand(64, generator=generator, dtype=torch.float64) * widths.to(torch.float64)).to(torch.int64)
+    rows = starts + torch.clamp(offsets, max=widths - 1)
+    assert torch.equal(picks, expected_picks)
+    assert torch.equal(features, prepared.features[rows]) and torch.equal(targets, prepared.targets[rows])
+
+
+def test_sample_horizon_draws_the_rows_sample_draws(tmp_path):
+    pool = _horizon_pool(tmp_path)
+    k = horizon_k(pool)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=k)
+    plain = PreparedPool(prepared.names, prepared.features, prepared.targets, prepared.species_bounds,
+                         prepared.probabilities)
+    features, token_mask, targets, target_mask, picks = prepared.sample_horizon(torch.Generator().manual_seed(3), 64)
+    old_features, old_targets, old_picks = plain.sample(torch.Generator().manual_seed(3), 64)
+    assert torch.equal(picks, old_picks) and torch.equal(features, old_features) and torch.equal(targets, old_targets)
+    assert token_mask.shape == (64, 11) and targets.shape == (64, 3, 2) and target_mask.shape == (64, 3)
+
+
+def test_horizon_pool_stores_gather_with_targets_divided_by_k(tmp_path):
+    pool = _horizon_pool(tmp_path)
+    k = horizon_k(pool)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=k)
+    assert prepared.horizon_k == k
+    first = pool.species[prepared.names[0]]
+    features, token_mask, targets, target_mask, _ = first.gather(np.arange(5))
+    assert torch.equal(prepared.features[:5], torch.as_tensor(features, dtype=torch.float32))
+    assert torch.equal(prepared.token_mask[:5], torch.as_tensor(token_mask))
+    assert torch.equal(prepared.target_mask[:5], torch.as_tensor(target_mask))
+    expected = targets / np.asarray(k)[None, :, None]
+    assert torch.equal(prepared.targets[:5], torch.as_tensor(expected, dtype=torch.float32))
+    assert (prepared.targets[~prepared.target_mask] == 0).all()
+
+
+def test_horizon_and_plain_pools_refuse_each_others_calls(tmp_path):
+    pool = _horizon_pool(tmp_path)
+    with pytest.raises(ValueError, match="horizon_k is required"):
+        PreparedPool.from_source_pool(pool)
+    with pytest.raises(ValueError, match="one finite positive k per horizon"):
+        PreparedPool.from_source_pool(pool, horizon_k=(1.0, 2.0))
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=(1.0, 2.0, 3.0))
+    with pytest.raises(ValueError, match="sample_horizon"):
+        prepared.sample(torch.Generator().manual_seed(0), 8)
+    with pytest.raises(ValueError, match="horizon_k is required"):
+        PreparedPool.from_source_pool(_pool(tmp_path), horizon_k=(1.0, 2.0, 3.0))
+    with pytest.raises(ValueError, match="HorizonWindows"):
+        PreparedPool.from_source_pool(_pool(tmp_path)).sample_horizon(torch.Generator().manual_seed(0), 8)
+
+
+def test_weighted_median_reduces_to_np_median():
+    rng = np.random.default_rng(0)
+    for n in (1, 2, 7, 10, 1001, 1000):
+        values = rng.lognormal(size=n)
+        assert weighted_median(values, np.full(n, 0.37 / n)) == np.median(values)
+    values, counts = np.array([3.0, 1.0, 2.0, 5.0]), np.array([1, 4, 2, 3])
+    assert weighted_median(values, counts) == np.median(np.repeat(values, counts))
+    assert weighted_median(values, np.array([1, 1, 1, 7])) == 5.0
+
+
+def test_horizon_k_of_one_species_is_its_median_r(tmp_path):
+    windows = _horizon_pool(tmp_path).species["a"]
+    _, _, targets, target_mask, _ = windows.gather(np.arange(windows.n_windows))
+    r = np.linalg.norm(targets, axis=-1)
+    k = horizon_k(SourcePool({"a": windows}, {"a": 1.0}))
+    assert k == tuple(float(np.median(r[target_mask[:, j], j])) for j in range(3))
+
+
+def test_horizon_k_weights_each_window_p_over_n_and_ignores_context(tmp_path):
+    pool = _horizon_pool(tmp_path, weights=(0.6, 0.4))
+    ratios = {name: horizon_ratios(pool.species[name]) for name in pool.names}
+    expected = tuple(
+        weighted_median(
+            np.concatenate([ratios[n][j] for n in pool.names]),
+            np.concatenate([np.full(len(ratios[n][j]), p / pool.species[n].n_windows)
+                            for n, p in zip(pool.names, pool.probabilities)]),
+        )
+        for j in range(3)
+    )
+    assert horizon_k(pool) == expected
+    assert horizon_k(_horizon_pool(tmp_path, weights=(0.1, 0.9))) != expected  # the weights matter here
+    assert horizon_k(_horizon_pool(tmp_path, context=48)) == expected
+
+
+def test_streaming_pool_equals_the_prepared_pool_on_the_core(tmp_path):
+    main = _horizon_pool(tmp_path)
+    k = horizon_k(main)
+    prepared = PreparedPool.from_source_pool(main, horizon_k=k)
+    same = StreamingPool.from_source_pool(main, horizon_k=k).sample_horizon(torch.Generator().manual_seed(9), 128)
+    expected = prepared.sample_horizon(torch.Generator().manual_seed(9), 128)
+    assert all(torch.equal(x, y) for x, y in zip(same, expected))
+
+    streamed = StreamingPool.from_source_pool(_horizon_pool(tmp_path, context=48), horizon_k=k)
+    assert streamed.n_windows == prepared.n_windows and streamed.n_features == prepared.n_features
+    features, token_mask, targets, target_mask, picks = streamed.sample_horizon(torch.Generator().manual_seed(9), 128)
+    assert features.shape == (128, 47, 12) and token_mask.shape == (128, 47)
+    assert torch.equal(features[:, -11:], expected[0]) and token_mask[:, -11:].all()
+    assert torch.equal(targets, expected[2]) and torch.equal(target_mask, expected[3]) and torch.equal(picks, expected[4])
+    assert not token_mask.all()  # the holes reach the extended history
+    assert (features[~token_mask] == 0).all()
+
+
+def test_core_matches_across_context_and_catches_a_perturbed_core(tmp_path):
+    main = _horizon_pool(tmp_path)
+    ids = {name: np.arange(main.species[name].n_windows) for name in main.names}
+    for context in (24, 48, 96):
+        assert core_matches(main, _horizon_pool(tmp_path, context=context), ids) == []
+
+    ablation = _horizon_pool(tmp_path, context=48)
+    a = ablation.species["a"]
+    lon = a.lon.copy()
+    lon[a.anchors[3] - 4] += 1e-5  # one core fix of one window, about a metre
+    ablation.species["a"] = replace(a, lon=lon)
+    failures = core_matches(main, ablation, ids)
+    assert "a: core tokens differ" in failures and not any(f.startswith("b:") for f in failures)
+    assert core_matches(main, main, {"a": ids["a"][:2], "b": ids["b"][:2]}) == []
+    assert core_matches(_horizon_pool(tmp_path, context=24), ablation, ids)[0].startswith("a: main context 24")
+
+
+# GenAI reference: tests for the horizon configuration and loop (step 3.6, 10-10), from the behaviours I specified: an
+# old configuration rebuilds and trains exactly as before (losses pinned from the loop before the 3.6 edit, Mac, torch
+# 2.5.1, CPU, one thread), a horizon configuration trains on prepared and streaming pools, a padded history reaches the
+# model as `observed`, and every mismatch between configuration and pool is refused.
+import json  # noqa: E402
+from dataclasses import asdict  # noqa: E402
+
+PRE_HORIZON_LOSSES = {
+    "B": (dict(use_fm_package=False), [0.7962692975997925, 0.4073374569416046, 0.6680665612220764]),
+    "Z_recon": (dict(use_reconstruction_head=True), [1.4976184368133545, 0.9505036473274231, 0.8956759572029114]),
+    "LSTM": (dict(use_fm_package=False, trunk="lstm"), [0.5296225547790527, 0.3056190013885498, 0.34819459915161133]),
+    "MoE": (dict(use_fm_package=False, trunk="moe"), [1.3469558954238892, 1.0312877893447876, 1.238032341003418]),
+}
+
+
+def _old_dict():
+    """A configuration as records written before the horizon fields hold it."""
+    saved = asdict(_config(trunk="lstm", use_fm_package=False))
+    for key in ("horizons", "history", "observed_flag"):
+        saved.pop(key)
+    return saved
+
+
+def test_an_old_config_dict_rebuilds_identically():
+    config = TrainConfig(**_old_dict())
+    assert config == _config(trunk="lstm", use_fm_package=False)
+    assert (config.horizons, config.history, config.observed_flag) == ((), 0, False)
+    torch.manual_seed(0)
+    built = config.build()
+    torch.manual_seed(0)
+    direct = MovementFM(input_dim=12, d_model=16, nhead=4, num_layers=1, dim_feedforward=32, dropout=0.1,
+                        use_fm_package=False, trunk="lstm")
+    assert built.n_horizons == 0 and built.input_proj.in_features == 12
+    assert all(torch.equal(a, b) for a, b in zip(built.state_dict().values(), direct.state_dict().values()))
+
+
+@pytest.mark.parametrize("name", sorted(PRE_HORIZON_LOSSES))
+def test_old_configs_reproduce_the_pre_horizon_losses_bitwise(tmp_path, name):
+    kwargs, expected = PRE_HORIZON_LOSSES[name]
+    result = train(_config(steps=3, **kwargs), PreparedPool.from_source_pool(_pool(tmp_path)), log_every=1,
+                   checkpoint_every=0)
+    assert result.loss_history == expected
+    assert result.head_loss_history == []
+
+
+def test_a_horizon_config_round_trips_through_json():
+    config = _config(horizons=(1, 6, 24), history=48, trunk="lstm", use_fm_package=False, observed_flag=True)
+    assert TrainConfig(**json.loads(json.dumps(asdict(config)))) == config
+    model = config.build()
+    assert model.n_horizons == 3 and model.observed_flag and model.input_proj.in_features == 13
+
+
+def test_horizon_configs_refuse_what_they_cannot_train():
+    plain = dict(use_fm_package=False, horizons=(1, 6, 24))
+    with pytest.raises(ValueError, match="reconstruction"):
+        _config(horizons=(1, 6, 24), use_reconstruction_head=True)
+    with pytest.raises(ValueError, match="distinct positive"):
+        _config(**plain | dict(horizons=(1, 1, 24)))
+    with pytest.raises(ValueError, match="set horizons"):
+        _config(use_fm_package=False, history=48)
+    with pytest.raises(ValueError, match="must exceed"):
+        _config(**plain, history=12)
+    with pytest.raises(ValueError, match="cannot mask"):
+        _config(horizons=(1, 6, 24), history=48)
+    with pytest.raises(ValueError, match="cannot mask"):
+        _config(**plain, history=48, trunk="moe")
+    with pytest.raises(ValueError, match="observed_flag"):
+        _config(**plain, history=48, trunk="lstm")
+    with pytest.raises(ValueError, match="observed_flag"):
+        _config(**plain, trunk="lstm", observed_flag=True)
+    with pytest.raises(ValueError, match="observed_flag"):
+        _config(**plain, history=48, observed_flag=True)
+
+
+def test_horizon_runs_refuse_a_mismatched_pool(tmp_path):
+    main = _horizon_pool(tmp_path)
+    k = horizon_k(main)
+    prepared = PreparedPool.from_source_pool(main, horizon_k=k)
+    horizon = _config(use_fm_package=False, horizons=(1, 6, 24), steps=2)
+    with pytest.raises(ValueError, match="needs a horizon pool"):
+        train(horizon, PreparedPool.from_source_pool(_pool(tmp_path)), checkpoint_every=0)
+    with pytest.raises(ValueError, match="needs a horizon pool"):
+        train(_config(use_fm_package=False, steps=2), prepared, checkpoint_every=0)
+    with pytest.raises(ValueError, match="3 horizons, the configuration 2"):
+        train(_config(use_fm_package=False, horizons=(1, 6), steps=2), prepared, checkpoint_every=0)
+    with pytest.raises(ValueError, match="history 0 needs 11"):
+        train(horizon, StreamingPool.from_source_pool(_horizon_pool(tmp_path, context=24), horizon_k=k),
+              checkpoint_every=0)
+    with pytest.raises(ValueError, match="history 48 needs 47"):
+        train(_config(use_fm_package=False, horizons=(1, 6, 24), history=48, steps=2), prepared, checkpoint_every=0)
+
+
+@pytest.mark.parametrize("trunk", ["transformer", "lstm"])
+def test_horizon_configs_train_on_prepared_and_streaming_pools(tmp_path, trunk):
+    k = horizon_k(_horizon_pool(tmp_path))
+    for context, make in ((12, PreparedPool), (24, StreamingPool)):
+        pool = make.from_source_pool(_horizon_pool(tmp_path, context=context), horizon_k=k)
+        padded = context > 12
+        config = _config(use_fm_package=False, trunk=trunk, horizons=(1, 6, 24), history=context if padded else 0,
+                         observed_flag=padded and trunk == "lstm", steps=6)
+        result = train(config, pool, log_every=2, checkpoint_every=0)
+        assert result.applied_updates == 6 and result.skipped_steps == 0
+        assert len(result.head_loss_history) == 3 and all(len(h) == 3 for h in result.head_loss_history)
+        assert np.isfinite(result.head_loss_history).all() and np.isfinite(result.loss_history).all()
+        shares = result.loss_shares[-1]
+        assert set(shares) == {"a", "b"} and sum(shares.values()) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_a_padded_history_reaches_the_transformer_as_observed(tmp_path):
+    """Garbage in the padded tokens changes nothing: the mask is applied, not just carried."""
+    pool = _horizon_pool(tmp_path, context=24)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    assert not prepared.token_mask.all()
+    config = _config(use_fm_package=False, horizons=(1, 6, 24), history=24, steps=4, dropout=0.0)
+    clean = train(config, prepared, log_every=1, checkpoint_every=0)
+    garbage = replace(prepared, features=torch.where(prepared.token_mask[..., None], prepared.features,
+                                                     torch.full_like(prepared.features, 500.0)))
+    noisy = train(config, garbage, log_every=1, checkpoint_every=0)
+    assert np.allclose(clean.loss_history, noisy.loss_history, atol=1e-6, rtol=0)
+    assert np.allclose(clean.head_loss_history, noisy.head_loss_history, atol=1e-6, rtol=0)

@@ -89,6 +89,8 @@ class MovementFM(nn.Module):
         n_species: int = 0,
         species_embed_dim: int = 0,
         trunk: str = "transformer",
+        n_horizons: int = 0,
+        observed_flag: bool = False,
     ) -> None:
         super().__init__()
         # `trunk="lstm"` is our Tier 3 baseline-ladder rung; we reuse the whole Tier 2 pipeline (representation, pools, loss, schedule, selection, 
@@ -107,6 +109,13 @@ class MovementFM(nn.Module):
         self.use_context_conditioning = bool(use_context_conditioning)
         self.n_species = int(n_species)
         self.species_embed_dim = int(species_embed_dim)
+        self.n_horizons = int(n_horizons)
+        if self.n_horizons < 0 or (self.n_horizons and output_dim != 2):
+            raise ValueError("n_horizons > 0 gives each horizon an (east, north) head; leave output_dim at 2")
+        # the flag is the last of input_dim's channels; the Transformer masks instead of flagging
+        self.observed_flag = bool(observed_flag)
+        if self.observed_flag and trunk != "lstm":
+            raise ValueError("the observed flag is the LSTM's input; a Transformer trunk takes the padding mask instead")
         dim_feedforward = int(dim_feedforward or 2 * d_model)
 
         # continuous token features use a linear projection rather than an embedding lookup
@@ -167,7 +176,7 @@ class MovementFM(nn.Module):
                 nn.Linear(d_model, 2 * d_model),
             )
 
-        self.head = nn.Linear(d_model, output_dim)
+        self.head = nn.Linear(d_model, 2 * self.n_horizons if self.n_horizons else output_dim)
 
         # optional per token reconstruction head and learned mask embedding
         self.recon_head = nn.Linear(d_model, 2) if self.use_reconstruction_head else None
@@ -213,17 +222,36 @@ class MovementFM(nn.Module):
         external_cond: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
         species: torch.Tensor | None = None,
+        *,
+        observed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
-        Encode a feature window and return per token Transformer states.
+        Encode a feature window and return per token hidden states.
 
-        `token_mask marks tokens hidden for the auxiliary reconstruction objective. Their projected embeddings are replaced by a learned mask \
-        token, while conditioning is still computed from the original unmasked window statistics.
+        `observed` marks valid history tokens. The Transformer ignores missing tokens, while the LSTM uses an observed flag. The final 
+        token is always observed.
+
+        `token_mask` marks tokens hidden for reconstruction, replacing their embeddings with a learned mask token. Conditioning still 
+        uses the original features.
         """
+        if observed is not None:
+            observed = observed.bool()
+            if self.use_fm_package or self.use_reconstruction_head:
+                raise ValueError(
+                    "the FM package takes no padded history: its conditioning averages over every token, padding included"
+                )
         if self.trunk == "lstm":
+            if self.observed_flag:
+                if observed is None:
+                    raise ValueError("this LSTM reads an observed flag, so it needs `observed`")
+                features = torch.cat([features, observed.unsqueeze(-1).to(features.dtype)], dim=-1)
+            elif observed is not None:
+                raise ValueError("an LSTM cannot mask a token; build it with observed_flag to read a padded history")
             # no sqrt(d_model) scaling; that pairs with the additive positional encoding, and the LSTM's tanh gates would saturate on it
             out, _ = self.encoder(self.input_proj(features))
             return out
+        if observed is not None and self.trunk == "moe":
+            raise ValueError("the MoE trunk has no padding mask")
         x = self.input_proj(features) * math.sqrt(self.d_model)
         if token_mask is not None:
             if token_mask.dtype != torch.bool:
@@ -231,7 +259,7 @@ class MovementFM(nn.Module):
             x = torch.where(token_mask.unsqueeze(-1), self.mask_token.to(x.dtype), x)
         x = self.pos_encoder(x)
         # no causal mask; every context token is in the past relative to the forecast target
-        out = self.encoder(x)
+        out = self.encoder(x) if observed is None else self.encoder(x, src_key_padding_mask=~observed)
 
         if self.use_fm_package:
             cond = self.conditioning_inputs(features, external_cond=external_cond, species=species)
@@ -245,12 +273,16 @@ class MovementFM(nn.Module):
         external_cond: torch.Tensor | None = None,
         token_mask: torch.Tensor | None = None,
         species: torch.Tensor | None = None,
+        *,
+        observed: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         out = self.encode(
-            features, external_cond=external_cond, token_mask=token_mask, species=species
+            features, external_cond=external_cond, token_mask=token_mask, species=species, observed=observed
         )
         # use the final token state as the window summary
         pred = self.head(out[:, -1, :])
+        if self.n_horizons:
+            pred = pred.view(-1, self.n_horizons, 2)
         if self.recon_head is not None:
             return pred, self.recon_head(out)
         return pred

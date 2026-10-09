@@ -200,3 +200,70 @@ def test_dt_bins_follows_the_grid_and_nothing_else_changes():
     others = [i for i in range(enu.N_FEATURES) if i != dt]
     assert np.array_equal(one_h[..., others], six_h[..., others])
     assert np.array_equal(scale_one, scale_six)
+
+
+HOUR = 3600
+# 24 bins t - 23 ... t on a steady eastward walk; history bins 0, 1 and 5 observed, then the 14-bin run 10 ... 23
+HISTORY_OBSERVED = np.isin(np.arange(24), np.concatenate(([0, 1, 5], np.arange(10, 24))))[None, :]
+HISTORY_LON = 10.0 + 0.001 * np.arange(24)[None, :]
+HISTORY_LAT = np.full((1, 24), 50.0)
+JITTER = np.array([0, 300, -200, 0, 0, 450, 0, 0, 0, 0, 100, -100, 0, 50, 0, -50, 0, 0, 20, 0, 0, -20, 0, 10])
+HISTORY_TS = _clock(1, 24)[:, :1] + np.arange(24) * HOUR + JITTER
+
+
+def _history(**kwargs):
+    lon = np.where(HISTORY_OBSERVED, HISTORY_LON, np.nan)  # unobserved bins carry NaN; nothing may leak from them
+    return enu.encode_history(lon, HISTORY_LAT, timestamp_s=HISTORY_TS, observed=HISTORY_OBSERVED, core=12,
+                              bin_seconds=HOUR, **kwargs)
+
+
+def test_history_core_is_encode_windows_bitwise_at_any_context():
+    core, scale = enu.encode_window(HISTORY_LON[:, -12:], HISTORY_LAT[:, -12:], timestamp_s=HISTORY_TS[:, -12:],
+                                    bin_seconds=HOUR, clip=1000.0)
+    features, mask, history_scale = _history(clip=1000.0)
+    assert features.shape == (1, 23, enu.N_FEATURES) and mask.shape == (1, 23)
+    assert np.array_equal(features[:, -11:], core) and np.array_equal(history_scale, scale)
+    assert mask[:, -11:].all()
+    alone, alone_mask, alone_scale = enu.encode_history(
+        HISTORY_LON[:, -12:], HISTORY_LAT[:, -12:], timestamp_s=HISTORY_TS[:, -12:],
+        observed=np.ones((1, 12), dtype=bool), core=12, bin_seconds=HOUR, clip=1000.0)
+    assert np.array_equal(alone, core) and alone_mask.all() and np.array_equal(alone_scale, scale)
+
+
+def test_gap_tokens_step_from_the_previous_observed_fix_divided_by_the_bin_span():
+    features, mask, _ = _history()
+    # extended tokens end at bins 1 ... 12: observed 1 (from 0), 5 (from 1, k = 4), 10 (from 5, k = 5), 11 and 12
+    assert np.flatnonzero(mask[0, :12]).tolist() == [0, 4, 9, 10, 11]
+    one_bin = features[0, 0, 0]
+    assert np.allclose(features[0, [4, 9], 0], one_bin, rtol=1e-9)  # per bin on a steady walk
+    assert np.allclose(features[0, [4, 9], 1], 0.0, atol=1e-12)
+    dt_bins = enu.FEATURES.index("dt_bins")
+    log_dt = enu.FEATURES.index("log_dt")
+    elapsed = HISTORY_TS[0, [5, 10]] - HISTORY_TS[0, [1, 5]]
+    assert np.allclose(features[0, [4, 9], dt_bins], elapsed / HOUR)  # timestamps, not the integer span
+    assert np.allclose(features[0, [4, 9], log_dt], np.log(elapsed))
+
+
+def test_unobserved_history_tokens_are_zero_and_masked():
+    features, mask, _ = _history()
+    assert np.isfinite(features).all()
+    assert (features[~mask] == 0).all()
+    assert (~mask[0, :12]).sum() == 7
+
+
+def test_clip_bounds_the_scaled_step_and_nothing_else():
+    lon = np.tile(10.0 + 0.0001 * np.arange(12), (1, 1))
+    lon[0, -1] += 5.0  # one step of about 357 km against a window scale of about 30 m
+    lat = np.full((1, 12), 50.0)
+    free, _ = enu.encode_window(lon, lat, timestamp_s=_clock(1, 12))
+    clipped, _ = enu.encode_window(lon, lat, timestamp_s=_clock(1, 12), clip=1000.0)
+    assert free[0, -1, 0] > 1000.0 and clipped[0, -1, 0] == 1000.0
+    assert np.array_equal(clipped[..., 2:], free[..., 2:])  # log_speed, log_dt and the rest keep the true magnitude
+    assert np.array_equal(clipped[0, :-1], free[0, :-1])
+
+
+def test_history_refuses_a_core_with_a_missing_bin():
+    observed = HISTORY_OBSERVED.copy()
+    observed[0, -3] = False
+    with pytest.raises(ValueError, match="core"):
+        enu.encode_history(HISTORY_LON, HISTORY_LAT, timestamp_s=HISTORY_TS, observed=observed, core=12)
