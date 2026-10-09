@@ -84,3 +84,32 @@ def test_schedule_change_needs_two_qualifying_months():
     assert cs.schedule_changed(months, steady) == 0.0
     assert cs.schedule_changed(months, switched) == 1.0
     assert np.isnan(cs.schedule_changed(np.zeros(130, dtype=int), steady))
+
+
+import experiments.eda.cadence_horizons as ch  # noqa: E402
+from animal_movement_fm.data.resample import resample_trajectory  # noqa: E402
+
+
+def test_direct_rule_at_one_step_is_the_survey_closed_form():
+    bins = np.asarray(BINS)
+    hit = ch.targets_hit(bins, 12, (1,))
+    assert hit.sum() == cs.windows(cs.run_lengths(bins), 12)
+
+
+def test_direct_rule_counts_targets_across_holes():
+    # anchors 11, 12, 13 end the 12-bin context; 18, 19 and 36 are occupied but start no context of their own
+    bins = np.concatenate((np.arange(14), [18, 19, 36]))
+    hit = ch.targets_hit(bins, 12, ch.HORIZONS)
+    assert hit.sum(axis=0).tolist() == [2, 2, 1]
+    assert ch.tally(hit) == {1: 2, 6: 2, 24: 1, "any": 3, "all": 1}
+
+
+def test_48_bin_split_keeps_a_24_h_target_the_8_bin_split_loses():
+    bins = list(range(13)) + [36]
+    fixes = fixes_at(bins, HOUR)
+    args = (fixes["timestamp"].to_numpy().astype("datetime64[us]"), fixes["lat"].to_numpy(), fixes["lon"].to_numpy())
+    raw = ch.targets_hit(np.asarray(bins), 12, ch.HORIZONS)
+    for max_gap, kept in ((48, 1), (8, 0)):
+        segments = resample_trajectory(*args, bin_seconds=HOUR, max_gap_bins=max_gap, min_segment_bins=MIN_SEGMENT_BINS)
+        assert ch.tally(ch.segment_targets_hit(segments, 12, ch.HORIZONS))[24] == kept
+    assert ch.tally(raw)[24] == 1
