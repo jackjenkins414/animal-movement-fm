@@ -1,6 +1,8 @@
 # GenAI reference: I used GenAI for this whole file, but have check it. Specifically I specified the built 1 h segments, for each bird and C = 24, 48, 
 # 72, 96, how full the extended history t - C + 1 ... t - 12 is behind the main study's anchors, anchors per occupancy stratum per partition, and the 
 # size of extended tokens' scaled steps (each from the previous observed fix) against the core's.
+# GenAI reference: on 09-10 I specified the two ablation strata (gappy < 0.9, full >= 0.9) and the gap tokens' p99 under
+# the per-bin encoding (step / bins spanned); GenAI added them.
 """
 Extended history occupancy for the 1 h context ablation (descriptive, no models).
 """
@@ -33,6 +35,7 @@ C_VALUES = (24, 48, 72, 96)
 CUTS = (0.5, 0.9)
 STRATA = ("none", "below_0.5", "0.5_to_0.9", "from_0.9")  # 0 | (0, 0.5) | [0.5, 0.9) | [0.9, 1]
 COUNTED = ("train", "val", "test_scored")
+ABLATION = ("gappy", "full")  # share < 0.9 | >= 0.9, the ablation's two strata (09-10)
 EDGES = np.logspace(-4, 7, 2201)  # |scaled step| histogram, about 1.2% per bin, for the p99
 OUT_CSV = cs.OUT / "history_occupancy.csv"
 OUT_MD = cs.OUT / "history_occupancy.md"
@@ -64,6 +67,11 @@ def stratum(share: np.ndarray) -> np.ndarray:
     return np.select([share == 0, share < CUTS[0], share < CUTS[1]], [0, 1, 2], 3)
 
 
+def ablation_strata(counts: np.ndarray) -> dict[str, int]:
+    """The four strata's anchor counts folded into the ablation's two: gappy (< 0.9) and full (>= 0.9)."""
+    return {"gappy": int(counts[:3].sum()), "full": int(counts[3])}
+
+
 def core_scale(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """The main study's window scale, from the 12 core positions only."""
     core = grid[:, -CORE:]
@@ -71,10 +79,11 @@ def core_scale(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray) -> np.ndarray
 
 
 def extended_steps(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, scale: np.ndarray):
-    """(|scaled step|, bridges a gap) for observed extended tokens, each step from the previous observed fix.
+    """(|scaled step|, bins spanned) for observed extended tokens, each step from the previous observed fix.
 
     Extended tokens end at bins t - C + 2 ... t - 11 (columns 1 ... C - 12); a token is observed when its bin and an
-    earlier history bin are. The tangent plane is anchored at t's latitude, as `enu_steps` anchors the core.
+    earlier history bin are. The tangent plane is anchored at t's latitude, as `enu_steps` anchors the core. A span
+    above 1 is a gap token; under the per-bin encoding (09-10) its step is divided by the span.
     """
     n, context = grid.shape
     column = np.arange(context)
@@ -88,8 +97,8 @@ def extended_steps(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, scale: np
     anchor_lat = np.radians(lat[grid[rows, -1]])
     east = EARTH_RADIUS_M * np.cos(anchor_lat) * wrap_longitude(np.radians(lon[dest] - lon[src]))
     north = EARTH_RADIUS_M * np.radians(lat[dest] - lat[src])
-    gap = (np.broadcast_to(ends, valid.shape)[valid] - previous[:, ends][valid]) > 1
-    return np.hypot(east, north) / scale[rows], gap
+    span = np.broadcast_to(ends, valid.shape)[valid] - previous[:, ends][valid]
+    return np.hypot(east, north) / scale[rows], span
 
 
 def core_steps(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, scale: np.ndarray) -> np.ndarray:
@@ -120,6 +129,7 @@ def survey_bird(bird: str, folds: dict, results: dict) -> list[dict]:
     shares = {c: [] for c in C_VALUES}
     ext_all = {c: np.zeros(len(EDGES) - 1, dtype=np.int64) for c in C_VALUES}
     ext_gap = {c: np.zeros(len(EDGES) - 1, dtype=np.int64) for c in C_VALUES}
+    ext_gap_bin = {c: np.zeros(len(EDGES) - 1, dtype=np.int64) for c in C_VALUES}  # per-bin encoding
     ext_max = {c: 0.0 for c in C_VALUES}
     ext_n = {c: [0, 0] for c in C_VALUES}  # observed extended tokens, of which bridging a gap
     core_hist = np.zeros(len(EDGES) - 1, dtype=np.int64)
@@ -140,9 +150,11 @@ def survey_bird(bird: str, folds: dict, results: dict) -> list[dict]:
             scale = core_scale(grid, lon, lat)
             if c == C_VALUES[0]:
                 core_hist += histogram(core_steps(grid, lon, lat, scale))
-            mag, gap = extended_steps(grid, lon, lat, scale)
+            mag, span = extended_steps(grid, lon, lat, scale)
+            gap = span > 1
             ext_all[c] += histogram(mag)
             ext_gap[c] += histogram(mag[gap])
+            ext_gap_bin[c] += histogram(mag[gap] / span[gap])
             ext_max[c] = max(ext_max[c], float(mag.max(initial=0.0)))
             ext_n[c][0] += len(mag)
             ext_n[c][1] += int(gap.sum())
@@ -153,11 +165,12 @@ def survey_bird(bird: str, folds: dict, results: dict) -> list[dict]:
         q = np.quantile(s, (0.1, 0.5, 0.9)) if len(s) else (np.nan,) * 3
         for p in COUNTED:
             row = {"species": bird, "context": c, "partition": p, "anchors": int(strata[(c, p)].sum())}
-            row |= dict(zip(STRATA, strata[(c, p)].tolist()))
+            row |= dict(zip(STRATA, strata[(c, p)].tolist())) | ablation_strata(strata[(c, p)])
             if p == "train":
                 row |= {"share_p10": q[0], "share_p50": q[1], "share_p90": q[2],
                         "ext_tokens": ext_n[c][0], "ext_gap_share": ext_n[c][1] / max(ext_n[c][0], 1),
-                        "ext_p99": p99(ext_all[c]), "ext_gap_p99": p99(ext_gap[c]), "ext_max": ext_max[c],
+                        "ext_p99": p99(ext_all[c]), "ext_gap_p99": p99(ext_gap[c]),
+                        "ext_gap_bin_p99": p99(ext_gap_bin[c]), "ext_max": ext_max[c],
                         "core_p99": p99(core_hist)}
             rows.append(row)
     return rows
@@ -183,9 +196,11 @@ def markdown(table: pd.DataFrame) -> str:
         "bins ending at t, at least one target). Share: observed bins among t − C + 1 … t − 12, within the segment. "
         "Training individuals for shares and magnitudes; val and test_scored are anchor counts. Strata: 0 | (0, 0.5) | "
         "[0.5, 0.9) | [0.9, 1]. |scaled step|: extended tokens' step from the previous observed fix over the core's "
-        "window scale; gap = the previous observed fix is more than one bin back; core = the 11 core tokens.", "",
+        "window scale; gap = the previous observed fix is more than one bin back; gap per bin = the gap token's step "
+        "divided by the bins it spans (the 09-10 encoding); core = the 11 core tokens.", "",
         "## Training anchors", "",
-        "| bird | C | share p10 / p50 / p90 | strata, share of anchors | gap tokens | p99 ext / gap / core | max ext |",
+        "| bird | C | share p10 / p50 / p90 | strata, share of anchors | gap tokens | p99 ext / gap / gap per bin / "
+        "core | max ext |",
         "|---|---:|---|---|---:|---|---:|",
     ]
     for _, r in train.iterrows():
@@ -193,7 +208,8 @@ def markdown(table: pd.DataFrame) -> str:
         counts = r[list(STRATA)].to_numpy(dtype=float)
         strata = " / ".join(f"{x:.2f}" for x in counts / max(counts.sum(), 1))
         lines.append(f"| {r.species} | {r.context} | {shares} | {strata} | {r.ext_gap_share:.2f} | "
-                     f"{r.ext_p99:.1f} / {r.ext_gap_p99:.1f} / {r.core_p99:.1f} | {r.ext_max:,.0f} |")
+                     f"{r.ext_p99:.1f} / {r.ext_gap_p99:.1f} / {r.ext_gap_bin_p99:.1f} / {r.core_p99:.1f} | "
+                     f"{r.ext_max:,.0f} |")
     lines += ["", "## Anchors per stratum (val / test_scored)", "",
               "| bird | C | val: 0 / <0.5 / 0.5–0.9 / ≥0.9 | test_scored: 0 / <0.5 / 0.5–0.9 / ≥0.9 |", "|---|---:|---|---|"]
     held = table.set_index(["species", "context", "partition"])
@@ -201,6 +217,11 @@ def markdown(table: pd.DataFrame) -> str:
         cells = [" / ".join(f"{int(held.loc[(r.species, r.context, p), s]):,}" for s in STRATA)
                  for p in ("val", "test_scored")]
         lines.append(f"| {r.species} | {r.context} | {cells[0]} | {cells[1]} |")
+    lines += ["", "## Ablation strata (gappy < 0.9 / full ≥ 0.9), anchors", "",
+              "| bird | C | train | val | test_scored |", "|---|---:|---|---|---|"]
+    for _, r in train.iterrows():
+        cells = [" / ".join(f"{int(held.loc[(r.species, r.context, p), s]):,}" for s in ABLATION) for p in COUNTED]
+        lines.append(f"| {r.species} | {r.context} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
 

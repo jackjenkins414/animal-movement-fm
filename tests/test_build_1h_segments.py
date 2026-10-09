@@ -31,3 +31,10 @@ def test_scaled_targets_cover_the_direct_rule_windows():
 def test_boundary_floor_binds_only_below_the_scale_floor():
     assert b1.floored(7.15) == {"a4_m": 7.15, "boundary_m": 30.0, "floor_binds": True}
     assert b1.floored(83.23) == {"a4_m": 83.23, "boundary_m": 83.23, "floor_binds": False}
+
+
+def test_a_species_run_writes_under_subset_never_over_the_full_build():
+    assert b1.output_dirs(False) == (b1.OUT_SEGMENTS, b1.OUT_RESULTS)
+    segments, results = b1.output_dirs(True)
+    assert (segments.parent, results.parent) == (b1.OUT_SEGMENTS, b1.OUT_RESULTS)
+    assert segments.name == results.name == "subset"

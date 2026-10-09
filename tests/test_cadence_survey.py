@@ -113,3 +113,8 @@ def test_48_bin_split_keeps_a_24_h_target_the_8_bin_split_loses():
         segments = resample_trajectory(*args, bin_seconds=HOUR, max_gap_bins=max_gap, min_segment_bins=MIN_SEGMENT_BINS)
         assert ch.tally(ch.segment_targets_hit(segments, 12, ch.HORIZONS))[24] == kept
     assert ch.tally(raw)[24] == 1
+
+
+def test_a_species_run_writes_horizon_counts_under_subset():
+    assert ch.output_dir(False) == cs.OUT
+    assert ch.output_dir(True) == cs.OUT / "subset"

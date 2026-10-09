@@ -44,6 +44,13 @@ CONTEXT = ch.CONTEXT
 CHECKED = ("individuals", "ge1", "geF", "ge_equal_time", "windows")
 
 
+def output_dirs(subset: bool) -> tuple[Path, Path]:
+    """
+    Segments and results folders; a --species run writes under subset/, never over the full build.
+    """
+    return (OUT_SEGMENTS / "subset", OUT_RESULTS / "subset") if subset else (OUT_SEGMENTS, OUT_RESULTS)
+
+
 def build_bird(bird: str) -> pd.DataFrame:
     """
     One bird's 1 h segments, every individual in its fixes file, in the 6 h builder's batches and columns.
@@ -209,6 +216,7 @@ def fold0_probabilities(folds: dict) -> dict[str, float]:
 
 
 def save_results(
+    out_results: Path,
     boundaries: list,
     ratio_rows: list,
     fold0: dict,
@@ -220,10 +228,10 @@ def save_results(
     """
     Write boundaries, reference ratios, sampling probabilities and the build summary.
     """
-    pd.DataFrame(boundaries).to_csv(OUT_RESULTS / "boundaries.csv", index=False)
-    pd.DataFrame(ratio_rows).to_csv(OUT_RESULTS / "r_reference.csv", index=False)
-    (OUT_RESULTS / "fold0_probabilities.json").write_text(json.dumps(fold0, indent=2) + "\n")
-    (OUT_RESULTS / "build_summary.json").write_text(
+    pd.DataFrame(boundaries).to_csv(out_results / "boundaries.csv", index=False)
+    pd.DataFrame(ratio_rows).to_csv(out_results / "r_reference.csv", index=False)
+    (out_results / "fold0_probabilities.json").write_text(json.dumps(fold0, indent=2) + "\n")
+    (out_results / "build_summary.json").write_text(
         json.dumps(
             {
                 "grid_s": GRID_S,
@@ -240,7 +248,9 @@ def save_results(
     )
 
 # GenAI reference: despite me first doing this implementation below for results and main method; I just got GenAI to complete it and that is what is below. 
-def print_results(boundaries: list, ratio_rows: list, fold0: dict, failures: dict, started: float) -> None:
+def print_results(
+    out_dirs: tuple[Path, Path], boundaries: list, ratio_rows: list, fold0: dict, failures: dict, started: float
+) -> None:
     """Print the travel boundaries, reference ratios and fold 0 probabilities."""
     boundary_table = pd.DataFrame(boundaries).pivot(index="species", columns="horizon", values="boundary_m")
     ratio_table = pd.DataFrame(ratio_rows).pivot(index="species", columns="horizon", values="r_p50")
@@ -261,7 +271,7 @@ def print_results(boundaries: list, ratio_rows: list, fold0: dict, failures: dic
 
     passed = sum(not v for v in failures.values())
     print(
-        f"\nwrote {OUT_SEGMENTS.relative_to(REPO)}/ and {OUT_RESULTS.relative_to(REPO)}/  "
+        f"\nwrote {out_dirs[0].relative_to(REPO)}/ and {out_dirs[1].relative_to(REPO)}/  "
         f"({passed} of {len(failures)} pass, {time.time() - started:.0f} s)"
     )
 
@@ -280,15 +290,16 @@ def main() -> None:
     expected = pd.read_csv(HORIZON_COUNTS, dtype={"horizon": str})
     birds = args.species or folds["birds"]
 
-    OUT_SEGMENTS.mkdir(parents=True, exist_ok=True)
-    OUT_RESULTS.mkdir(parents=True, exist_ok=True)
+    out_segments, out_results = output_dirs(bool(args.species))
+    out_segments.mkdir(parents=True, exist_ok=True)
+    out_results.mkdir(parents=True, exist_ok=True)
     started = time.time()
     boundaries, ratio_rows, summary, failures = [], [], {}, {}
 
     for bird in birds:
         bird_started = time.time()
         segments = build_bird(bird)
-        path = OUT_SEGMENTS / f"{bird}_segments.parquet"
+        path = out_segments / f"{bird}_segments.parquet"
         segments.to_parquet(path, index=False)
         parts = cs.partitions(bird, folds, results)
         counts, bird_boundaries, bird_ratios = survey_segments(bird, pd.read_parquet(path), parts, multiplier)
@@ -308,8 +319,8 @@ def main() -> None:
         )
 
     fold0 = fold0_probabilities(folds)
-    save_results(boundaries, ratio_rows, fold0, multiplier, started, summary, failures)
-    print_results(boundaries, ratio_rows, fold0, failures, started)
+    save_results(out_results, boundaries, ratio_rows, fold0, multiplier, started, summary, failures)
+    print_results((out_segments, out_results), boundaries, ratio_rows, fold0, failures, started)
 
     if any(failures.values()):
         raise SystemExit("FAIL: built windows differ from horizon_counts.csv; see above")

@@ -37,6 +37,13 @@ SURVEY_COUNTS = cs.OUT / "cadence_counts.csv"
 MEASURES = ("ge1", "geF", "ge_equal_time", "windows")
 
 
+def output_dir(subset: bool) -> Path:
+    """
+    Where horizon_counts.* go; a --species run writes under subset/, never over the full counts.
+    """
+    return cs.OUT / "subset" if subset else cs.OUT
+
+
 def targets_hit(bin_index: np.ndarray, context: int, horizons: tuple[int, ...]) -> np.ndarray:
     """
     (anchors, horizons) bool: anchor t ends C one-bin contiguous context bins; True where bin t + h is occupied.
@@ -215,6 +222,8 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"FAIL: not in the rotation's 30 birds: {unknown}")
 
+    out = output_dir(bool(args.species))
+    out.mkdir(parents=True, exist_ok=True)
     rows, checks = [], {}
     for bird in birds:
         started = time.time()
@@ -225,7 +234,7 @@ def main() -> None:
         print(f"{bird:<26} {time.time() - started:7.1f} s  {status}", flush=True)
 
     counts = pd.DataFrame(rows)
-    counts.to_csv(cs.OUT / "horizon_counts.csv", index=False)
+    counts.to_csv(out / "horizon_counts.csv", index=False)
 
     passed = sum(not v for v in checks.values())
     lines = [
@@ -269,10 +278,10 @@ def main() -> None:
     ]
 
     lines += bird_rows(counts)
-    (cs.OUT / "horizon_counts.md").write_text("\n".join(lines) + "\n")
+    (out / "horizon_counts.md").write_text("\n".join(lines) + "\n")
 
     print(
-        f"wrote {cs.OUT.relative_to(REPO)}/horizon_counts.*  ({passed} of "
+        f"wrote {out.relative_to(REPO)}/horizon_counts.*  ({passed} of "
         f"{len(checks)} pass)"
     )
 
