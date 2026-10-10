@@ -252,7 +252,10 @@ from pathlib import Path
 SEALED_PROBES = Path(inner_loop.__file__).resolve().parents[2] / "results" / "tier2_inner_loop_T3_excluded"
 ADDED_AFTER_THE_PROBES = [
     "freeze_except_species_embedding",
+    "history",
+    "horizons",
     "n_species",
+    "observed_flag",
     "random_species_labels",
     "species_embed_dim",
     "species_label_map",

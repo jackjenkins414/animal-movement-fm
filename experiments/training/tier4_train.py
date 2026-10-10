@@ -60,11 +60,13 @@ NO_MIROUNGA = SPW.TIER4_NO_MIROUNGA
 
 # TrainConfig is frozen for the duration of Tier 4. A field added mid-campaign changes asdict(config) and the resume
 # guard in train/loop.py then refuses to continue any checkpoint written before it, stranding every requeued subjob
+# horizons, history and observed_flag added for the 1 h study after every Tier 4 run had reported; each defaults the 
+# old behaviour, so our Tier 4s configurations rebuild unchanged
 FROZEN_TRAIN_CONFIG_FIELDS = (
     "batch_size", "d_model", "dropout", "freeze_except_species_embedding", "grad_clip", "lr", "mask_ratio",
     "n_species", "nhead", "num_layers", "random_species_labels", "reconstruction_weight", "seed",
     "species_embed_dim", "species_label_map", "steps", "trunk", "use_context_conditioning", "use_fm_package",
-    "use_reconstruction_head", "warmup_fraction",
+    "use_reconstruction_head", "warmup_fraction", "horizons", "history", "observed_flag",
 )
 
 # arm -> how it is built, in the shape tier3_train.ARMS uses. `pool` names the training data; `per_species` attaches

@@ -46,3 +46,10 @@ def test_core_scale_is_the_main_studys():
     for c in (24, 96):
         grid = ho.history_grid(BINS, anchors, c)
         assert np.array_equal(grid[:, -12:], ho.history_grid(BINS, anchors, 12))
+
+
+def test_a_species_run_writes_under_subset_never_over_the_full_count():
+    assert ho.output_paths(False) == (ho.OUT_CSV, ho.OUT_MD)
+    csv, md = ho.output_paths(True)
+    assert csv.parent == md.parent == ho.cs.OUT / "subset"
+    assert (csv.name, md.name) == (ho.OUT_CSV.name, ho.OUT_MD.name)

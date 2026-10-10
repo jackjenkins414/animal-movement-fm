@@ -41,6 +41,11 @@ OUT_CSV = cs.OUT / "history_occupancy.csv"
 OUT_MD = cs.OUT / "history_occupancy.md"
 
 
+def output_paths(subset: bool) -> tuple[Path, Path]:
+    """The .csv and .md; a --species run writes under subset/, never over the full count."""
+    return (cs.OUT / "subset" / OUT_CSV.name, cs.OUT / "subset" / OUT_MD.name) if subset else (OUT_CSV, OUT_MD)
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Windows on the history grid
 
@@ -233,6 +238,8 @@ def main() -> None:
     folds = json.loads(cs.FOLDS.read_text())
     results = json.loads(cs.ROTATION_RESULTS.read_text())
     birds = args.species or folds["birds"]
+    out_csv, out_md = output_paths(bool(args.species))
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     started, rows = time.time(), []
     for bird in birds:
         t0 = time.time()
@@ -240,9 +247,9 @@ def main() -> None:
         print(f"{bird:<26} {time.time() - t0:7.1f} s", flush=True)
     table = pd.DataFrame(rows)
     failures = check_anchors(table)
-    table.to_csv(OUT_CSV, index=False)
-    OUT_MD.write_text(markdown(table))
-    print(f"wrote {OUT_CSV.relative_to(REPO)} and .md  ({time.time() - started:.0f} s)")
+    table.to_csv(out_csv, index=False)
+    out_md.write_text(markdown(table))
+    print(f"wrote {out_csv.relative_to(REPO)} and .md  ({time.time() - started:.0f} s)")
     if failures:
         raise SystemExit("FAIL: anchors differ from horizon_counts.csv\n  " + "\n  ".join(failures[:10]))
 
