@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Default: add missing predictions for the main study and the ablation, and rebuild the report.
+#   qsub experiments/reporting/bird_1h_sealed_eval.pbs
+#
+# Main study only (indices 0-269), before the ablation has run:
+#   qsub -v PART=main experiments/reporting/bird_1h_sealed_eval.pbs
+#
+# Re-report only:
+#   qsub -v REPORT_ONLY=1 -l walltime=01:00:00 experiments/reporting/bird_1h_sealed_eval.pbs
+#
+# Re-score existing predictions:
+#   qsub -v OVERWRITE=1 experiments/reporting/bird_1h_sealed_eval.pbs
+#
+# Pre-seal diagnostic only; completeness, exclusions, scoring rules and the per-horizon floor, no predictions:
+#   qsub -v DIAGNOSTIC=1 -l walltime=01:00:00 experiments/reporting/bird_1h_sealed_eval.pbs
+#
+# Prediction mode requires the committed, clean 1 h freeze with those sections compelted. 
+# The Rbar_corr join (--join) is run separately on the Mac, after --report.
+
+#PBS -P um09
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bird_1h_sealed_eval
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+
+if [ "${DIAGNOSTIC:-0}" = "1" ]; then
+  phase_args=(--diagnostic)
+elif [ "${DIAGNOSTIC:-0}" != "0" ]; then
+  echo "FAIL: DIAGNOSTIC must be 1 when enabled; got '$DIAGNOSTIC'" >&2
+  exit 1
+elif [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+if [ "${OVERWRITE:-0}" = "1" ]; then
+  phase_args+=(--overwrite)
+elif [ "${OVERWRITE:-0}" != "0" ]; then
+  echo "FAIL: OVERWRITE must be 1 when enabled; got '$OVERWRITE'" >&2
+  exit 1
+fi
+
+case "${PART:-all}" in
+  main|ablation|all) phase_args+=(--part "${PART:-all}") ;;
+  *) echo "FAIL: PART must be main, ablation or all; got '$PART'" >&2; exit 1 ;;
+esac
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/bird_1h_sealed_eval.py "${phase_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

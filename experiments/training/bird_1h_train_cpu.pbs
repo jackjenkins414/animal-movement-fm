@@ -6,7 +6,7 @@
 #   510-629  ablation XGBBb  (C 24, 48, 72, 96 x folds 0-9 x horizons)
 # Neural runs use the GPU queue: bird_1h_train.pbs. The driver refuses the wrong queue.
 #
-# walltime below is a placeholder until the calibration runs set it; submit in blocks of at most 10:
+# walltime and mem from the fold 6, C = 96 calibration (10-10). Submit in blocks of at most 10:
 #   qsub -J 150-159 experiments/training/bird_1h_train_cpu.pbs
 #
 # Calibration (one fit to results/birds_1h_calibration/, no run record), XGBBb fold 6 24 h, C = 96:
@@ -18,9 +18,9 @@
 #PBS -P um09
 #PBS -q normal
 #PBS -l ncpus=16
-#PBS -l mem=64GB
+#PBS -l mem=32GB
 #PBS -l jobfs=10GB
-#PBS -l walltime=04:00:00
+#PBS -l walltime=01:00:00
 #PBS -l storage=scratch/um09+gdata/um09
 #PBS -l wd
 #PBS -N bird_1h_train_cpu

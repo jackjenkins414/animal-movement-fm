@@ -267,3 +267,20 @@ def test_history_refuses_a_core_with_a_missing_bin():
     observed[0, -3] = False
     with pytest.raises(ValueError, match="core"):
         enu.encode_history(HISTORY_LON, HISTORY_LAT, timestamp_s=HISTORY_TS, observed=observed, core=12)
+
+
+def test_the_exact_inverse_round_trips_a_target_step_where_the_anchor_inverse_does_not():
+    from animal_movement_fm.eval.metrics import haversine_distance
+
+    rng = np.random.default_rng(0)
+    anchor_lon, anchor_lat = rng.uniform(-180, 180, 500), rng.uniform(-75, 75, 500)
+    target_lon = anchor_lon + rng.uniform(-3, 3, 500)
+    target_lat = np.clip(anchor_lat + rng.uniform(-3, 3, 500), -80, 80)
+    target_lon[:5] = [179.9, -179.9, 179.5, -179.5, 180.0]  # across the antimeridian
+    anchor_lon[:5] = [-179.8, 179.8, -179.0, 179.0, -179.9]
+    step = enu.enu_steps(np.stack([anchor_lon, target_lon], -1), np.stack([anchor_lat, target_lat], -1))[:, 0, :]
+    lon, lat = enu.enu_to_lonlat_exact(step[:, 0], step[:, 1], anchor_lon, anchor_lat)
+    assert np.allclose(lat, target_lat, rtol=0, atol=1e-12)
+    assert haversine_distance(lon, lat, target_lon, target_lat).max() < 1e-6
+    lon, lat = enu.enu_to_lonlat(step[:, 0], step[:, 1], anchor_lon, anchor_lat)
+    assert haversine_distance(lon, lat, target_lon, target_lat).max() > 1_000

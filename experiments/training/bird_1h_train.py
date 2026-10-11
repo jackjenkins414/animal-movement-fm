@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO))
 import bird_rotation_train as RT  # noqa: E402
 import tier2_sealed_eval as S2  # noqa: E402
 
-from animal_movement_fm.data.enu import FEATURES, SCALE_FLOOR_M, enu_to_lonlat  # noqa: E402
+from animal_movement_fm.data.enu import FEATURES, SCALE_FLOOR_M, enu_to_lonlat_exact  # noqa: E402
 from animal_movement_fm.data.multispecies import HorizonWindows, SourcePool  # noqa: E402
 from animal_movement_fm.data.split import load_split  # noqa: E402
 from animal_movement_fm.eval.metrics import haversine_distance  # noqa: E402
@@ -556,29 +556,38 @@ def horizon_frames(
     windows: HorizonWindows, pred_m: np.ndarray | None
 ) -> dict[int, tuple[pd.DataFrame, pd.DataFrame]]:
     """
-    Per horizon, (model frame, persistence frame) over the windows with a target there: individual_id and error_m
-    (great-circle metres to the target). Persistence predicts the anchor; `pred_m` None gives persistence for both.
+    Per horizon, (model frame, persistence frame) over the windows with a target there, in window order: individual_id,
+    timestamp (the target fix's, UTC), target and predicted lon / lat, and error_m (great-circle metres to the target).
+    Persistence predicts the anchor; `pred_m` None gives persistence for both. The sealed evaluator scores through here.
+    Predictions invert at the predicted latitude (enu_to_lonlat_exact), the exact inverse of the target encoding
+    (11-10, option (a)).
     """
     frames = {}
     anchor_lon, anchor_lat = windows.lon[windows.anchors], windows.lat[windows.anchors]
     for head, horizon in enumerate(windows.horizons):
         rows = np.flatnonzero(windows.targets[:, head] >= 0)
         target = windows.targets[rows, head]
-        individuals = windows.individuals[windows.individual_index[rows]]
+        shared = {
+            "individual_id": windows.individuals[windows.individual_index[rows]],
+            "timestamp": pd.to_datetime(windows.epoch_s[target], unit="s", utc=True),
+            "target_lon": windows.lon[target],
+            "target_lat": windows.lat[target],
+        }
         persistence_error = haversine_distance(
             anchor_lon[rows], anchor_lat[rows], windows.lon[target], windows.lat[target]
         )
+        persistence = pd.DataFrame(
+            shared | {"pred_lon": anchor_lon[rows], "pred_lat": anchor_lat[rows], "error_m": persistence_error}
+        )
         if pred_m is None:
-            model_error = persistence_error
+            model = persistence.copy()
         else:
-            lon, lat = enu_to_lonlat(
+            lon, lat = enu_to_lonlat_exact(
                 pred_m[rows, head, 0], pred_m[rows, head, 1], anchor_lon[rows], anchor_lat[rows]
             )
             model_error = haversine_distance(lon, lat, windows.lon[target], windows.lat[target])
-        frames[horizon] = (
-            pd.DataFrame({"individual_id": individuals, "error_m": model_error}),
-            pd.DataFrame({"individual_id": individuals, "error_m": persistence_error}),
-        )
+            model = pd.DataFrame(shared | {"pred_lon": lon, "pred_lat": lat, "error_m": model_error})
+        frames[horizon] = (model, persistence)
     return frames
 
 
@@ -1095,6 +1104,11 @@ def check_all_birds(payload: dict) -> None:
 
 def dry_run(payload: dict, index: int | None) -> None:
     """Every bird's training windows against the pins, or one index's pool, k_h, clip shares and core check."""
+    # load_registered raised on any failed pin before this point
+    print(
+        "pins: PASS (registered folds; 90 boundaries vs boundaries.csv; fold 0 probabilities vs "
+        "fold0_probabilities.json and the rotation rule; 1 h training counts vs horizon_counts.csv)"
+    )
     if index is None:
         return check_all_birds(payload)
 

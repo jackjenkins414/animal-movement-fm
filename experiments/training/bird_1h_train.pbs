@@ -8,7 +8,7 @@
 #   390-509  ablation LSTMBb  (C 24, 48, 72, 96 x folds 0-9 x seeds 0-2)
 # XGBoost (150-269, 510-629) runs on the CPU queue; bird_1h_train_cpu.pbs. The driver refuses the wrong queue.
 #
-# walltime below is a placeholder until the calibration runs set it. Submit in blocks of at most 10:
+# walltime and mem from the fold 6, C = 96 calibration (10-10). Submit in blocks of at most 10:
 #   qsub -J 0-9 -v STEPS=20000 experiments/training/bird_1h_train.pbs
 #
 # calibration (1,000 updates to results/birds_1h_calibration/, no run record), fold 6 at C = 96:
@@ -22,9 +22,9 @@
 #PBS -q gpuvolta
 #PBS -l ngpus=1
 #PBS -l ncpus=12
-#PBS -l mem=48GB
+#PBS -l mem=32GB
 #PBS -l jobfs=10GB
-#PBS -l walltime=04:00:00
+#PBS -l walltime=01:00:00
 #PBS -l storage=scratch/um09+gdata/um09
 #PBS -l wd
 #PBS -N bird_1h_train

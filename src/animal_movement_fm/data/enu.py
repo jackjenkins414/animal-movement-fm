@@ -259,3 +259,14 @@ def enu_to_lonlat(
         np.asarray(anchor_lon_deg, dtype=float) + np.degrees(d_lon),
         np.asarray(anchor_lat_deg, dtype=float) + np.degrees(d_lat),
     )
+
+# targets are encoded by enu_steps on the (anchor, target) pair, so east is measured at the target's latitude; enu_to_lonlat inverts at the anchor's
+def enu_to_lonlat_exact(
+    d_east_m: np.ndarray, d_north_m: np.ndarray, anchor_lon_deg: np.ndarray, anchor_lat_deg: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The exact inverse of a target step from enu_steps: latitude from north first, then east at that latitude.
+    """
+    lat = np.asarray(anchor_lat_deg, dtype=float) + np.degrees(np.asarray(d_north_m, dtype=float) / EARTH_RADIUS_M)
+    d_lon = np.asarray(d_east_m, dtype=float) / (EARTH_RADIUS_M * np.cos(np.radians(lat)))
+    return np.asarray(anchor_lon_deg, dtype=float) + np.degrees(d_lon), lat
