@@ -149,7 +149,21 @@ Again we have $\pm$ 0.05 as no difference; "most" means more than half the score
 
 ## 7. As trained
 
-To fill from `bird_1h_sealed_eval.py --diagnostic` after the runs.
+From `bird_1h_sealed_eval.py --diagnostic --part main`, before our sealed evaluation. Main study only; the ablation is recorded when its runs are complete. GenAI drafeted species names and numbers from my terminal and I pasted in this section, but added wording and checked its writing. 
+
+| | |
+|---|---|
+| runs | 270 of 270 recorded, all exit status 0 |
+| neural (150) | 20,000 of 20,000 updates applied in every run; none withheld,and no non-finite steps |
+| XGBoost (120) | each fitted once; boosters present |
+| training exclusions | applied as registered: 270 runs checked, 5 species with exclusions |
+| identity rule | *A. alba* 8867928 |
+| val–test rule | *C. ciconia* 5, *C. aura* 1, *G. himalayensis* 2 |
+| scored test birds and counts | match sec 4 and `horizon_counts.csv` |
+| birds scored (150 window floor, $\geq$ 5 test_scored individuals) | 1 h 28, 6 h 27, 24 h 28; all three 27 |
+| unscored (individuals at the floor) | 1 h: *P. apivorus* 3, *M. americana* 4; 6 h: *P. apivorus* 1, *M. milvus* 1, *M. americana* 0; 24 h: *P. apivorus* 4, *M. americana* 4 |
+| test partition reads before this section | the diagnostic read test bird ids and window counts only; no predictions or outcomes |
+| deviations | none |
 
 ## 8. Limitations
 
