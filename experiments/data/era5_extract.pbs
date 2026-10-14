@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# ERA5 covariates for our 1 h env study (normal CPU): experiments/data/era5_extract.py. Reads /g/data/rt52, so storage
+# includes gdata/rt52. One script, four modes; each mode's resources go on the qsub line.
+#
+# probe (writes results/birds_1h_env_build/catalogue.json, which every other mode reads):
+#   qsub -v MODE=probe -l ncpus=8,mem=32GB,walltime=01:00:00 experiments/data/era5_extract.pbs
+# calibration, one month of every variable plus the static fields:
+#   qsub -v MODE=months,MONTHS=2020-06,WORKERS=8 -l ncpus=12,mem=48GB,walltime=01:00:00 experiments/data/era5_extract.pbs
+# Full run, resumable (walltime and WORKERS set from the calibration):
+#   qsub -v MODE=full,WORKERS=24 -l ncpus=48,mem=190GB,walltime=... experiments/data/era5_extract.pbs
+# assemble:
+#   qsub -v MODE=assemble -l ncpus=8,mem=32GB,walltime=01:00:00 experiments/data/era5_extract.pbs
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=8
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=gdata/um09+gdata/rt52
+#PBS -l wd
+#PBS -N era5_extract
+#PBS -j oe
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=1
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+WORKERS="${WORKERS:-1}"
+case "${MODE:-}" in
+  probe)    args=(--probe) ;;
+  months)
+    if [ -z "${MONTHS:-}" ]; then
+      echo "FAIL: MODE=months needs MONTHS, e.g. qsub -v MODE=months,MONTHS=2020-06 ..." >&2
+      exit 1
+    fi
+    args=(--months "$MONTHS" --workers "$WORKERS") ;;
+  full)     args=(--workers "$WORKERS") ;;
+  assemble) args=(--assemble) ;;
+  *)
+    echo "FAIL: MODE must be probe, months, full or assemble; got '${MODE:-}'" >&2
+    exit 1 ;;
+esac
+
+echo "=== era5_extract ${MODE}: ncpus ${PBS_NCPUS}, workers ${WORKERS} ==="
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/data/era5_extract.py "${args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

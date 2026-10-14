@@ -25,6 +25,7 @@ dependencies = [
     "pyyaml>=6.0",         # config files
     "tqdm>=4.66",          # progress bars
     "duckdb>=1.5.4",
+    "netcdf4>=1.7.4",
 ]
 
 [project.optional-dependencies]
