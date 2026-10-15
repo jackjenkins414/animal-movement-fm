@@ -251,6 +251,7 @@ from pathlib import Path
 
 SEALED_PROBES = Path(inner_loop.__file__).resolve().parents[2] / "results" / "tier2_inner_loop_T3_excluded"
 ADDED_AFTER_THE_PROBES = [
+    "env_channels",
     "freeze_except_species_embedding",
     "history",
     "horizons",

@@ -183,6 +183,8 @@ class TrainConfig:
     horizons: tuple[int, ...] = ()
     history: int = 0
     observed_flag: bool = False
+    # env study: ERA5 channels appended after the 12 movement channels (era5.N_ENV_CHANNELS); 0 is every earlier arm
+    env_channels: int = 0
 
     def __post_init__(self) -> None:
         # this dataclass is frozen, so normalisation goes through object.__setattr__. The map is stored as a tuple
@@ -201,6 +203,12 @@ class TrainConfig:
             raise ValueError("a padded history needs a plain Transformer or an LSTM; the FM package and MoE cannot mask")
         if self.observed_flag != (self.history > 0 and self.trunk == "lstm"):
             raise ValueError("observed_flag is required for an LSTM on a padded history, and only there")
+        if self.env_channels < 0:
+            raise ValueError(f"env_channels {self.env_channels} cannot be negative")
+        if self.env_channels and self.history:
+            raise ValueError("covariates are for the 12-bin core only; a padded history cannot take env_channels")
+        if self.env_channels and (self.use_fm_package or self.trunk == "moe" or self.use_reconstruction_head):
+            raise ValueError("env_channels needs a plain Transformer or an LSTM: no FM package, MoE or reconstruction head")
         if self.species_label_map and not self.species_embed_dim:
             raise ValueError("species_label_map routes species to lookup rows and needs a species embedding")
         if self.species_label_map and not all(0 <= row < self.n_species for row in self.species_label_map):
@@ -222,7 +230,10 @@ class TrainConfig:
                 "freeze_except_species_embedding would leave no trainable parameter at all unless the model carries a species embedding"
             )
 
-    def build(self, *, input_dim: int = N_FEATURES) -> MovementFM:
+    def build(self, *, input_dim: int | None = None) -> MovementFM:
+        """The model; `input_dim` defaults to the 12 movement channels plus `env_channels`."""
+        if input_dim is None:
+            input_dim = N_FEATURES + self.env_channels
         return MovementFM(
             input_dim=input_dim + int(self.observed_flag),
             d_model=self.d_model,
@@ -432,6 +443,11 @@ def train(
         raise ValueError("a horizon configuration needs a horizon pool, and a horizon pool a horizon configuration")
     if horizon and len(pool_k) != len(config.horizons):
         raise ValueError(f"the pool has {len(pool_k)} horizons, the configuration {len(config.horizons)}")
+    if pool.n_features != N_FEATURES + config.env_channels:
+        raise ValueError(
+            f"the pool has {pool.n_features} channels per token; env_channels {config.env_channels} needs "
+            f"{N_FEATURES + config.env_channels}"
+        )
     torch.manual_seed(config.seed)
 
     model = config.build(input_dim=pool.n_features).to(device)
@@ -471,7 +487,12 @@ def train(
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if state["config"] != asdict(config):
+        # GenAI reference: I aksed for a checkpoint written before env_channels existed resumes when the run's value is the default 0, as 
+        # compare_registered_config accepts an absent default field; any other difference is still refused. GenAI wrote it; I checked it.
+        stored = dict(state["config"])
+        if "env_channels" not in stored and config.env_channels == 0:
+            stored["env_channels"] = 0
+        if stored != asdict(config):
             raise ValueError(
                 f"{checkpoint_path} was written by a different configuration. A requeued subjob must "
                 "resume its own run; delete the checkpoint or fix the run id rather than continuing "

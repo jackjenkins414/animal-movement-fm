@@ -631,3 +631,143 @@ def test_env_stats_are_the_p_over_n_weighted_moments_of_observed_tokens(tmp_path
     assert horizon_k(with_env) == horizon_k(SourcePool({"c": c_off, "d": d_off}, {"c": 0.6, "d": 0.4}))
     with pytest.raises(ValueError, match="no covariates"):
         env_stats(SourcePool({"a": a_off, "b": b}, {"a": 0.6, "b": 0.4}))
+
+
+from animal_movement_fm.data.enu import N_FEATURES  # noqa: E402
+from animal_movement_fm.models.xgboost import WindowXGBoost  # noqa: E402
+
+PRE_ENV_HORIZON_LOSSES = {
+    "transformer": [1.0093885660171509, 0.9137147068977356, 0.9078122973442078],
+    "lstm": [0.5896711945533752, 0.535841166973114, 0.538352906703949],
+}
+ENV = era5.N_ENV_CHANNELS
+
+
+def _env_pool(tmp_path):
+    """Two straight-ish tracks with ERA5 (one missing token), standardised on their own pool's statistics."""
+    c, c_off, _ = _env_species(tmp_path, "c", 80, 0.01, 0.002, 3)
+    d, d_off, _ = _env_species(tmp_path, "d", 70, 0.003, 0.01, 4, missing_bin=30)
+    weights = {"c": 0.6, "d": 0.4}
+    stats = env_stats(SourcePool({"c": c, "d": d}, weights))
+    on = SourcePool({"c": replace(c, env_stats=stats), "d": replace(d, env_stats=stats)}, weights)
+    return on, SourcePool({"c": c_off, "d": d_off}, weights)
+
+
+def test_a_pre_env_config_dict_rebuilds_identically():
+    saved = asdict(_config(trunk="lstm", use_fm_package=False, horizons=(1, 6, 24)))
+    assert saved.pop("env_channels") == 0
+    config = TrainConfig(**saved)
+    assert config == _config(trunk="lstm", use_fm_package=False, horizons=(1, 6, 24))
+    torch.manual_seed(0)
+    built = config.build()
+    torch.manual_seed(0)
+    explicit = config.build(input_dim=N_FEATURES)
+    assert built.input_proj.in_features == 12
+    assert all(torch.equal(a, b) for a, b in zip(built.state_dict().values(), explicit.state_dict().values()))
+
+
+@pytest.mark.parametrize("trunk", sorted(PRE_ENV_HORIZON_LOSSES))
+def test_horizon_configs_reproduce_the_pre_env_losses_bitwise(tmp_path, trunk):
+    pool = _horizon_pool(tmp_path)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    result = train(_config(use_fm_package=False, trunk=trunk, horizons=(1, 6, 24), steps=3), prepared, log_every=1,
+                   checkpoint_every=0)
+    assert result.loss_history == PRE_ENV_HORIZON_LOSSES[trunk]
+
+
+@pytest.mark.parametrize("trunk", ["transformer", "lstm"])
+def test_env_configs_train_on_a_27_channel_pool(tmp_path, trunk):
+    on, off = _env_pool(tmp_path)
+    k = horizon_k(off)
+    assert horizon_k(on) == k
+    prepared = PreparedPool.from_source_pool(on, horizon_k=k)
+    plain = PreparedPool.from_source_pool(off, horizon_k=k)
+    assert prepared.n_features == N_FEATURES + ENV == 27
+    assert torch.equal(prepared.features[..., :N_FEATURES], plain.features)
+    config = _config(use_fm_package=False, trunk=trunk, horizons=(1, 6, 24), env_channels=ENV, steps=4)
+    assert TrainConfig(**json.loads(json.dumps(asdict(config)))) == config
+    assert config.build().input_proj.in_features == 27
+    result = train(config, prepared, log_every=1, checkpoint_every=0)
+    assert result.applied_updates == 4 and result.skipped_steps == 0
+    assert np.isfinite(result.loss_history).all() and np.isfinite(result.head_loss_history).all()
+    assert result.model.input_proj.in_features == 27
+    # the covariates reach the model: zeroing them changes its predictions
+    x = prepared.features[:32]
+    result.model.eval()
+    with torch.no_grad():
+        blank = x.clone()
+        blank[..., N_FEATURES:] = 0
+        assert not torch.equal(result.model(x), result.model(blank))
+
+
+def test_xgb_fits_on_27_channel_features(tmp_path):
+    on, _ = _env_pool(tmp_path)
+    windows = on.species["c"].for_horizon(6)
+    features, token_mask, targets, _, _ = windows.gather(np.arange(windows.n_windows))
+    assert features.shape[1:] == (11, 27) and token_mask.all()
+    x = np.where(token_mask[..., None], features, np.nan).astype(np.float32)  # the 1 h driver's rule; nothing is NaN
+    model = WindowXGBoost(n_estimators=5).fit(x, targets[:, 1])
+    assert model.n_features_ == 11 * 27 and model.predict(x).shape == (len(x), 2)
+    with pytest.raises(ValueError, match="flattened features"):
+        model.predict(x[..., :N_FEATURES])
+
+
+def test_channels_that_disagree_with_the_config_are_refused(tmp_path):
+    on, off = _env_pool(tmp_path)
+    k = horizon_k(off)
+    env_config = _config(use_fm_package=False, horizons=(1, 6, 24), env_channels=ENV, steps=2)
+    with pytest.raises(ValueError, match="12 channels per token; env_channels 15 needs 27"):
+        train(env_config, PreparedPool.from_source_pool(off, horizon_k=k), checkpoint_every=0)
+    with pytest.raises(ValueError, match="27 channels per token; env_channels 0 needs 12"):
+        train(replace(env_config, env_channels=0), PreparedPool.from_source_pool(on, horizon_k=k), checkpoint_every=0)
+    with pytest.raises(ValueError, match="env_channels 14 needs 26"):
+        train(replace(env_config, env_channels=14), PreparedPool.from_source_pool(on, horizon_k=k), checkpoint_every=0)
+
+
+def test_env_configs_refuse_what_they_cannot_take():
+    plain = dict(use_fm_package=False, horizons=(1, 6, 24), env_channels=ENV)
+    with pytest.raises(ValueError, match="padded history"):
+        _config(**plain, history=48)
+    with pytest.raises(ValueError, match="padded history"):
+        _config(**plain, history=48, trunk="lstm", observed_flag=True)
+    with pytest.raises(ValueError, match="no FM package"):
+        _config(**plain | dict(use_fm_package=True))
+    with pytest.raises(ValueError, match="no FM package"):
+        _config(**plain, trunk="moe")
+    with pytest.raises(ValueError, match="no FM package"):
+        _config(use_fm_package=False, use_reconstruction_head=True, env_channels=ENV)
+    with pytest.raises(ValueError, match="negative"):
+        _config(**plain | dict(env_channels=-1))
+
+
+def test_a_pre_env_training_checkpoint_resumes_only_without_covariates(tmp_path):
+    pool = _horizon_pool(tmp_path)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    config = _config(use_fm_package=False, horizons=(1, 6, 24), steps=8, seed=2)
+    uninterrupted = train(config, prepared, log_every=4, checkpoint_every=0)
+
+    class Killed(Exception):
+        pass
+
+    def die_at_4(step, _loss):
+        if step >= 4:
+            raise Killed
+
+    path = tmp_path / "run.pt"
+    with pytest.raises(Killed):
+        train(config, prepared, log_every=4, checkpoint_every=4, checkpoint_path=path, progress=die_at_4)
+    state = torch.load(path, weights_only=False)
+    assert state["config"].pop("env_channels") == 0  # as a checkpoint written before E4 holds it
+    torch.save(state, path)
+
+    on, _ = _env_pool(tmp_path)  # 27 channels, so the run reaches the resume check
+    with pytest.raises(ValueError, match="different configuration"):
+        train(replace(config, env_channels=ENV), PreparedPool.from_source_pool(on, horizon_k=horizon_k(on)),
+              checkpoint_every=4, checkpoint_path=path)
+    with pytest.raises(ValueError, match="different configuration"):
+        train(replace(config, lr=2e-3), prepared, checkpoint_every=4, checkpoint_path=path)
+    resumed = train(config, prepared, log_every=4, checkpoint_every=4, checkpoint_path=path)
+    assert resumed.resumed_from == 4 and resumed.steps_run == 4
+    for name, tensor in uninterrupted.model.state_dict().items():
+        assert torch.allclose(tensor, resumed.model.state_dict()[name], atol=1e-6), name
+    assert torch.load(path, weights_only=False)["config"]["env_channels"] == 0  # rewritten whole from here on

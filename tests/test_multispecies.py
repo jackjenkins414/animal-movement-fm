@@ -483,3 +483,14 @@ def test_env_refusals(tmp_path):
     twice.to_parquet(tmp_path / "twice.parquet", index=False)
     with pytest.raises(ValueError, match="repeats"):
         _env_windows(seg, tmp_path / "twice.parquet")
+
+def test_env_channels_refuse_a_missing_history_position(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(40))})
+    on = _env_windows(seg, _env_parquet(tmp_path, seg))
+    ids = np.arange(3)
+    features = on.gather(ids)[0][..., :12]
+    rows = _destinations(on)[ids]
+    np.testing.assert_array_equal(on._env_channels(rows, features), on.env_tokens(ids))
+    rows[1, 0] = -1  # direct_anchors never leaves a hole in the core; this stands in for one
+    with pytest.raises(ValueError, match="missing history position"):
+        on._env_channels(rows, features)

@@ -401,7 +401,7 @@ class HorizonWindows:
         if self.env is not None:
             if self.env_stats is None:
                 raise ValueError(f"{self.name}: env is set but env_stats is not; take them from pool.env_stats")
-            channels = self._env_channels(history_indices[:, 1:], features)
+            channels = self._env_channels(history_grid[:, 1:], features)  # unclamped, so a missing row is refused
             features = np.concatenate([features, era5.standardise(channels, *self.env_stats)], axis=-1)
 
         return features, token_mask, scaled_targets, target_mask, scale
@@ -421,6 +421,9 @@ class HorizonWindows:
         """Token channels from the ERA5 rows each token lands on (n, tokens) and its movement features."""
         if self.context != self.core:
             raise ValueError(f"covariates are for the {self.core}-bin core only, not context {self.context}")
+        # direct_anchors requires a full core, so this cannot happen at C = 12; it would read the wrong row if it did
+        if (np.asarray(rows) < 0).any():
+            raise ValueError(f"{self.name}: a token lands on a missing history position; covariates need every row")
         return era5.token_channels(
             self.env[rows],
             features[..., FEATURES.index("heading_cos")],

@@ -660,3 +660,38 @@ def test_the_join_refuses_an_unsealed_report_or_a_missing_rbar_row():
     report, table = _join_report()
     with pytest.raises(SystemExit, match="no row"):
         E.rbar_join(report, table.iloc[1:])
+
+import torch  # noqa: E402
+from dataclasses import asdict  # noqa: E402
+
+
+@pytest.mark.parametrize("index", [18, 48, 498])  # main Bb, main LSTM-Bb, ablation LSTM-Bb at C = 96 (flagged)
+def test_a_pre_env_reported_checkpoint_rebuilds_and_loads(tmp_path, monkeypatch, index):
+    run = b1h.PLAN[index]
+    config = b1h.build_config(run, GRID, b1h.REGISTERED_STEPS, ["a", "b"], PAYLOAD)
+    stored = asdict(config)
+    assert stored.pop("env_channels") == 0  # what a record written before E4 holds
+    torch.manual_seed(index)
+    trained = config.build(input_dim=12)  # train() before E4: build(input_dim=pool.n_features), 12 channels
+    with torch.no_grad():
+        for parameter in trained.parameters():
+            parameter.add_(torch.randn_like(parameter))  # weights no fresh build could reproduce
+    k = [0.8, 3.7, 5.4]
+    torch.save({"run_id": run.run_id, "config": stored, "grid_index": GRID, "pool_species": ["a", "b"],
+                "horizon_k": k, "context": run.context, "selection": {"rule": "final_checkpoint"},
+                "model": trained.state_dict()}, tmp_path / f"{run.run_id}_reported.pt")
+    monkeypatch.setattr(E.b1h, "RESULTS", tmp_path)
+
+    neural, xgb = E.load_models([run], {run.run_id: {"horizon_k": k}}, torch.device("cpu"), run.context)
+    assert xgb == [] and len(neural) == 1
+    model = neural[0][1]
+    assert TrainConfig(**stored) == config and TrainConfig(**stored).env_channels == 0
+    assert model.input_proj.in_features == 12 + int(config.observed_flag)
+    loaded, saved = model.state_dict(), trained.state_dict()
+    assert loaded.keys() == saved.keys() and all(torch.equal(loaded[n], saved[n]) for n in saved)
+    tokens = (config.history or b1h.CORE) - 1
+    x = torch.randn(4, tokens, 12)
+    observed = torch.ones(4, tokens, dtype=torch.bool) if config.history else None
+    trained.eval()
+    with torch.no_grad():
+        assert torch.equal(model(x, observed=observed), trained(x, observed=observed))

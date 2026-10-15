@@ -1,0 +1,66 @@
+#!/bin/bash
+# GenAI reference: GenAI intially drafted this file which i checked.
+#
+# Env study, CPU jobs (normal), one per PBS subjob. Plan: `bird_1h_env_train.py --list` (150 runs).
+#   120-149  XGBBbE   (folds 0-9 x horizons 1, 6, 24)
+# Neural runs use the GPU queue: bird_1h_env_train.pbs. The driver refuses the wrong queue.
+#
+# walltime and mem below are PROVISIONAL until the calibration; pass them on every qsub with -l until they are set.
+# Dry run, every bird's env files and coverage (no INDEX), then one subjob per fold (indices 0, 3, ..., 27):
+#   qsub -v DRY_RUN=1 -l walltime=01:00:00,mem=64GB experiments/training/bird_1h_env_train_cpu.pbs
+#   qsub -J 0-27:3 -v DRY_RUN=1 -l walltime=01:00:00,mem=64GB experiments/training/bird_1h_env_train_cpu.pbs
+# Calibration (one fit to results/birds_1h_env_calibration/, no run record), XGBBbE fold 6, 24 h:
+#   qsub -v CALIBRATE=1,INDEX=140 -l walltime=01:00:00,mem=48GB experiments/training/bird_1h_env_train_cpu.pbs
+# After the freeze is committed, in blocks of at most 10:
+#   qsub -J 120-129 -l walltime=<from calibration>,mem=<from calibration> experiments/training/bird_1h_env_train_cpu.pbs
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=48GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=gdata/um09
+#PBS -l wd
+#PBS -N bird_1h_env_train_cpu
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+
+if [ "${DRY_RUN:-0}" = "1" ] && [ "${CALIBRATE:-0}" = "1" ]; then
+  echo "FAIL: DRY_RUN and CALIBRATE are separate modes; pass one" >&2
+  exit 1
+fi
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+if [ "${CALIBRATE:-0}" = "1" ]; then
+  extra_args+=(--calibrate)
+elif [ "${CALIBRATE:-0}" != "0" ]; then
+  echo "FAIL: CALIBRATE must be 1 when enabled; got '$CALIBRATE'" >&2
+  exit 1
+fi
+
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/bird_1h_env_train.py "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
