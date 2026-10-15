@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
+from animal_movement_fm.data import era5
 from animal_movement_fm.data.enu import N_FEATURES, SCALE_FLOOR_M
 from animal_movement_fm.data.multispecies import HorizonWindows, SourcePool
 
@@ -257,7 +258,9 @@ def horizon_ratios(windows: HorizonWindows, *, sigma: float = SCALE_FLOOR_M, chu
     """
     r_h = |target| / window scale for every window with a target at h, per horizon, from the 12-bin core alone.
     """
-    core = replace(windows, context=windows.core)  # Targets and scale come from the core, so C cannot move them. 
+    core = replace(windows, context=windows.core)  # targets and scale come from the core, so C cannot move them
+    if windows.env is not None:
+        core = replace(core, env=None, env_stats=None)  # nor can covariates (env study)
     ratios = [[] for _ in windows.horizons]
     for start in range(0, core.n_windows, chunk):
         ids = np.arange(start, min(start + chunk, core.n_windows), dtype=np.int64)
@@ -284,6 +287,25 @@ def horizon_k(pool: SourcePool, *, sigma: float = SCALE_FLOOR_M, chunk: int = EN
             values[j].append(r)
             weights[j].append(np.full(len(r), p / windows.n_windows))
     return tuple(weighted_median(np.concatenate(v), np.concatenate(w)) for v, w in zip(values, weights))
+
+def env_stats(pool: SourcePool, *, sigma: float = SCALE_FLOOR_M, chunk: int = ENCODE_CHUNK) -> tuple[np.ndarray, ...]:
+    """
+    (mean, sd) of the 14 standardised ERA5 channels over the pool's windows, streamed through era5.moment_sums.
+
+    A token weighs its window's p_s / n_s when observed and nothing when not; the pool must be the training pool, as its statistics standardise validation 
+    and test windows too.
+    """
+    if not _horizon_pool(pool):
+        raise ValueError("env_stats needs a pool of HorizonWindows")
+    sums = np.zeros((3, era5.N_STANDARDISED))
+    for name, p in zip(pool.names, pool.probabilities):
+        windows = pool.species[name]
+        if windows.env is None:
+            raise ValueError(f"species {name!r} has no covariates")
+        for start in range(0, windows.n_windows, chunk):
+            ids = np.arange(start, min(start + chunk, windows.n_windows), dtype=np.int64)
+            sums += era5.moment_sums(windows.env_tokens(ids, sigma=sigma), np.full(len(ids), p / windows.n_windows))
+    return era5.stats_from_sums(sums)
 
 
 @dataclass

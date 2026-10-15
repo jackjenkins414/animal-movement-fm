@@ -321,3 +321,165 @@ def test_sample_concatenates_horizon_batches(tmp_path):
     windows = _horizon_windows(_hourly(tmp_path, {"a_s0": ("a", np.arange(80))}))
     batch = SourcePool({"a": windows}, {"a": 1.0}).sample(np.random.default_rng(0), 16)
     assert [x.shape for x in batch] == [(16, 11, 12), (16, 11), (16, 3, 2), (16, 3), (16,)]
+
+
+from dataclasses import replace  # noqa: E402
+
+import duckdb  # noqa: E402
+
+from animal_movement_fm.data import era5  # noqa: E402
+from animal_movement_fm.data.multispecies import _read_segments  # noqa: E402
+
+# _read_segments' query with env off, as it was before the env study
+ENV_OFF_SQL = (
+    "\n        SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat"
+    "\n        FROM '{path}' s"
+    "\n        SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id"
+    "\n        ORDER BY s.segment_id, s.bin_index"
+    "\n        "
+)
+UNIT = (np.zeros(era5.N_STANDARDISED), np.ones(era5.N_STANDARDISED))  # standardised = raw on observed tokens
+
+
+def _env_parquet(tmp_path, segments_path, *, seed=0, drop_bins=(), nan_bins=(), fixed=None, name="env.parquet"):
+    """ERA5 columns per segment row as the assembled file stores them (float32); `fixed` pins columns to constants."""
+    frame = pd.read_parquet(segments_path)[["segment_id", "bin_index"]].reset_index(drop=True)
+    values = np.random.default_rng(seed).uniform(1.0, 10.0, size=(len(frame), len(era5.RAW)))
+    frame = frame.assign(**{name: values[:, i].astype(np.float32) for i, name in enumerate(era5.RAW)})
+    for column, value in (fixed or {}).items():
+        frame[column] = np.float32(value)
+    frame.loc[frame["bin_index"].isin(nan_bins), "tp"] = np.nan
+    frame = frame[~frame["bin_index"].isin(drop_bins)]
+    path = tmp_path / name
+    frame.to_parquet(path, index=False)
+    return path
+
+
+def _env_windows(segments_path, env_path, stats=UNIT):
+    windows = HorizonWindows.build(segments_path, ["a"], context=12, core=12, horizons=HORIZONS, bin_seconds=HOUR,
+                                   env_parquet=env_path)
+    return replace(windows, env_stats=stats)
+
+
+def _destinations(windows):
+    """The row each token lands on; one segment from bin 0, so rows are bins."""
+    return windows.anchors[:, None] + np.arange(-10, 1)[None, :]
+
+
+def test_env_off_query_is_unchanged_and_env_on_only_adds_columns(tmp_path, monkeypatch):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(40))})
+    env = _env_parquet(tmp_path, seg)
+    seen, connect = [], duckdb.connect
+
+    class Spy:
+        def __init__(self, con):
+            self.con = con
+
+        def execute(self, sql, *args):
+            seen.append(sql)
+            return self.con.execute(sql, *args)
+
+        def register(self, *args):
+            return self.con.register(*args)
+
+    monkeypatch.setattr(duckdb, "connect", lambda *a, **k: Spy(connect(*a, **k)))
+    off = _read_segments(seg, ["a"])
+    assert seen[-1] == ENV_OFF_SQL.format(path=seg)
+    on = _read_segments(seg, ["a"], env_parquet=env)
+    assert "LEFT JOIN" in seen[-1] and list(on.columns) == list(off.columns) + list(era5.RAW)
+    pd.testing.assert_frame_equal(on[off.columns], off)
+
+
+def test_env_appends_15_channels_after_the_unchanged_movement_channels(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(60))})
+    off, on = _horizon_windows(seg), _env_windows(seg, _env_parquet(tmp_path, seg))
+    ids = np.arange(off.n_windows)
+    assert on.n_windows == off.n_windows and np.array_equal(on.anchors, off.anchors)
+    got, expected = on.gather(ids), off.gather(ids)
+    assert got[0].shape == (len(ids), 11, 12 + era5.N_ENV_CHANNELS) == (len(ids), 11, 27)
+    assert np.array_equal(got[0][..., :12], expected[0])
+    for a, b in zip(got[1:], expected[1:]):
+        assert np.array_equal(a, b)
+    raw = on.env_tokens(ids)
+    assert np.array_equal(got[0][..., 12:], raw) and (raw[..., -1] == 1).all()
+    np.testing.assert_array_equal(raw[..., : len(era5.RAW)], on.env[_destinations(on)])
+    mean, sd = np.arange(1.0, 15.0), np.arange(2.0, 16.0)
+    scaled = replace(on, env_stats=(mean, sd)).gather(ids)[0]
+    np.testing.assert_allclose(scaled[..., 12:26], (raw[..., :-1] - mean) / sd, rtol=1e-12)
+    assert np.array_equal(scaled[..., 26], raw[..., -1])
+
+
+def test_env_is_read_at_context_fixes_only(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(60))})
+    base = _env_windows(seg, _env_parquet(tmp_path, seg))
+    ids = np.arange(base.n_windows)
+    reference = base.gather(ids)[0]
+    for w in (0, 17, base.n_windows - 1):
+        anchor, targets = base.anchors[w], base.targets[w][base.targets[w] >= 0]
+        others = np.setdiff1d(np.arange(len(base.env)), _destinations(base)[w])
+        # the window's target rows, every row after its anchor and its first context fix (no token lands there)
+        assert np.isin(targets, others).all() and np.isin(np.arange(anchor + 1, len(base.env)), others).all()
+        assert anchor - 11 in others
+        perturbed = base.env.copy()
+        perturbed[others] += 1000.0
+        assert np.array_equal(replace(base, env=perturbed).gather([w])[0], reference[[w]])
+    row = int(base.anchors[5]) - 3
+    perturbed = base.env.copy()
+    perturbed[row] *= 2.0
+    features = replace(base, env=perturbed).gather(ids)[0]
+    changed = (features != reference).any(axis=-1)
+    assert changed.any() and np.array_equal(changed, _destinations(base) == row)
+    assert np.array_equal(features[..., :12], reference[..., :12])
+
+
+def _straight(tmp_path, d_lon, d_lat, name):
+    """A clean track on a 1 h grid: exactly east, exactly north, or still."""
+    bins = np.arange(30)
+    path = tmp_path / name
+    pd.DataFrame({"segment_id": "a_s0", "individual_id": "a", "bin_index": bins,
+                  "timestamp": [pd.Timestamp("2020-01-01", tz="UTC") + pd.Timedelta(hours=int(b)) for b in bins],
+                  "lon": 10.0 + d_lon * bins, "lat": 50.0 + d_lat * bins}).to_parquet(path)
+    return path
+
+
+@pytest.mark.parametrize("track, expected", [
+    ((0.01, 0.0), (5.0, 2.0, 7.0, -3.0)),  # east: tail = u, cross = v (positive to the left, north)
+    ((0.0, 0.01), (2.0, -5.0, -3.0, -7.0)),  # north: tail = v, cross = -u (left is west)
+    ((0.0, 0.0), (0.0, 0.0, 0.0, 0.0)),  # still: heading gated, so no tail or cross wind
+])
+def test_tail_and_cross_wind_follow_each_tokens_heading(tmp_path, track, expected):
+    seg = _straight(tmp_path, *track, name="track.parquet")
+    env = _env_parquet(tmp_path, seg, fixed={"u10": 5.0, "v10": 2.0, "u100": 7.0, "v100": -3.0})
+    windows = _env_windows(seg, env)
+    features = windows.gather(np.arange(windows.n_windows))[0]
+    derived = features[..., [12 + era5.ENV_CHANNELS.index(c) for c in era5.DERIVED]]
+    assert np.array_equal(derived, np.broadcast_to(np.array(expected), derived.shape))
+    assert (features[..., -1] == 1).all()
+
+
+def test_missing_era5_keeps_the_window_with_zeros_and_flag_0(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(40))})
+    env = _env_parquet(tmp_path, seg, drop_bins=(20,), nan_bins=(25,))  # no env row at 20; tp missing at 25
+    on = _env_windows(seg, env, stats=(np.full(era5.N_STANDARDISED, 5.0), np.full(era5.N_STANDARDISED, 2.0)))
+    assert np.isnan(on.env[20]).all() and np.isnan(on.env[25]).sum() == 1
+    assert on.n_windows == _horizon_windows(seg).n_windows
+    channels = on.gather(np.arange(on.n_windows))[0][..., 12:]
+    missing = np.isin(_destinations(on), [20, 25])
+    assert missing.any() and (channels[missing] == 0).all()
+    assert (channels[~missing][:, -1] == 1).all() and (channels[~missing][:, :-1] != 0).any(axis=-1).all()
+
+
+def test_env_refusals(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(40))})
+    env = _env_parquet(tmp_path, seg)
+    with pytest.raises(ValueError, match="core only"):
+        HorizonWindows.build(seg, ["a"], context=24, core=12, horizons=HORIZONS, bin_seconds=HOUR, env_parquet=env)
+    with pytest.raises(ValueError, match="env_stats"):
+        _env_windows(seg, env, stats=None).gather(np.arange(3))
+    with pytest.raises(ValueError, match="no covariates"):
+        _horizon_windows(seg).env_tokens(np.arange(3))
+    twice = pd.read_parquet(env)
+    twice = pd.concat([twice, twice.iloc[:1]])
+    twice.to_parquet(tmp_path / "twice.parquet", index=False)
+    with pytest.raises(ValueError, match="repeats"):
+        _env_windows(seg, tmp_path / "twice.parquet")

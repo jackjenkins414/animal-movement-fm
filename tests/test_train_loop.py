@@ -571,3 +571,63 @@ def test_a_padded_history_reaches_the_transformer_as_observed(tmp_path):
     noisy = train(config, garbage, log_every=1, checkpoint_every=0)
     assert np.allclose(clean.loss_history, noisy.loss_history, atol=1e-6, rtol=0)
     assert np.allclose(clean.head_loss_history, noisy.head_loss_history, atol=1e-6, rtol=0)
+
+from animal_movement_fm.data import era5  # noqa: E402
+from animal_movement_fm.train.pool import env_stats  # noqa: E402
+
+
+def _env_species(tmp_path, name, n_bins, d_lon, d_lat, seed, missing_bin=None):
+    """A straight track (exactly east or north) on a 1 h grid and its synthetic ERA5 file; with and without env."""
+    bins = np.arange(n_bins)
+    path = tmp_path / f"{name}.parquet"
+    pd.DataFrame({"segment_id": f"{name}_s0", "individual_id": name, "bin_index": bins,
+                  "timestamp": [pd.Timestamp("2020-01-01", tz="UTC") + pd.Timedelta(hours=int(b)) for b in bins],
+                  "lon": 10.0 + d_lon * bins, "lat": 50.0 + d_lat * bins}).to_parquet(path)
+    values = np.random.default_rng(seed).normal(50.0, 10.0, size=(n_bins, len(era5.RAW))).astype(np.float32)
+    if missing_bin is not None:
+        values[missing_bin, era5.RAW.index("blh")] = np.nan
+    env = pd.DataFrame({"segment_id": f"{name}_s0", "bin_index": bins,
+                        **{v: values[:, i] for i, v in enumerate(era5.RAW)}})
+    env.to_parquet(tmp_path / f"{name}_env.parquet", index=False)
+    build = dict(context=12, core=12, horizons=HORIZONS, bin_seconds=HOUR)
+    return (HorizonWindows.build(path, [name], **build, env_parquet=tmp_path / f"{name}_env.parquet"),
+            HorizonWindows.build(path, [name], **build), values.astype(float))
+
+
+def test_env_stats_are_the_p_over_n_weighted_moments_of_observed_tokens(tmp_path):
+    # a moves east (tail = u, cross = v), b north (tail = v, cross = -u); b's bin 11 lacks blh
+    a, a_off, a_env = _env_species(tmp_path, "a", 16, 0.01, 0.0, 1)
+    b, b_off, b_env = _env_species(tmp_path, "b", 14, 0.0, 0.01, 2, missing_bin=11)
+    pool = SourcePool({"a": a, "b": b}, {"a": 0.6, "b": 0.4})
+    assert (a.n_windows, b.n_windows) == (4, 2)
+
+    def wind(x, east):
+        u10, v10, u100, v100 = x[:4]
+        return [u10, v10, u100, v100] if east else [v10, -u10, v100, -u100]
+
+    tokens, weights = [], []
+    for windows, values, p, east in ((a, a_env, 0.6, True), (b, b_env, 0.4, False)):
+        for anchor in windows.anchors:
+            for row in range(anchor - 10, anchor + 1):
+                if np.isfinite(values[row]).all():
+                    tokens.append(np.concatenate([values[row], wind(values[row], east)]))
+                    weights.append(p / windows.n_windows)
+    tokens, weights = np.array(tokens), np.array(weights)
+    assert len(tokens) == 6 * 11 - 2  # bin 11 is a token in both of b's windows
+    mean = weights @ tokens / weights.sum()
+    sd = np.sqrt(weights @ (tokens - mean) ** 2 / weights.sum())
+
+    got_mean, got_sd = env_stats(pool)
+    np.testing.assert_allclose(got_mean, mean, rtol=1e-12)
+    np.testing.assert_allclose(got_sd, sd, rtol=1e-9)
+    chunked = env_stats(pool, chunk=1)
+    np.testing.assert_allclose(chunked[0], got_mean, rtol=1e-12)
+    np.testing.assert_allclose(chunked[1], got_sd, rtol=1e-12)
+    assert not np.allclose(env_stats(SourcePool({"a": a, "b": b}, {"a": 0.1, "b": 0.9}))[0], got_mean)
+
+    c, c_off, _ = _env_species(tmp_path, "c", 60, 0.01, 0.002, 3)  # long enough for 24 h targets
+    d, d_off, _ = _env_species(tmp_path, "d", 50, 0.003, 0.01, 4, missing_bin=30)
+    with_env = SourcePool({"c": c, "d": d}, {"c": 0.6, "d": 0.4})
+    assert horizon_k(with_env) == horizon_k(SourcePool({"c": c_off, "d": d_off}, {"c": 0.6, "d": 0.4}))
+    with pytest.raises(ValueError, match="no covariates"):
+        env_stats(SourcePool({"a": a_off, "b": b}, {"a": 0.6, "b": 0.4}))

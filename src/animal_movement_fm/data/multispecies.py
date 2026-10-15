@@ -16,7 +16,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from animal_movement_fm.data.enu import SCALE_FLOOR_M, encode_history, encode_window, enu_steps, scale_target
+from animal_movement_fm.data import era5
+from animal_movement_fm.data.enu import (
+    FEATURES,
+    SCALE_FLOOR_M,
+    encode_history,
+    encode_window,
+    enu_steps,
+    scale_target,
+)
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
 from animal_movement_fm.data.split import id_key
 
@@ -37,9 +45,11 @@ def _contiguous_run_bounds(segment_id: np.ndarray, bin_index: np.ndarray) -> tup
     return starts, stops
 
 
-def _read_segments(segments_parquet: str | Path, individual_ids) -> pd.DataFrame:
+def _read_segments(segments_parquet: str | Path, individual_ids, env_parquet: str | Path | None = None) -> pd.DataFrame:
     """
     One species' segment rows for the selected individuals, ordered by segment then bin.
+
+    With `env_parquet`, the ERA5 columns (era5.RAW) are left joined on (segment_id, bin_index); a row with no env row keeps NaN there.
     """
     import duckdb
 
@@ -59,6 +69,8 @@ def _read_segments(segments_parquet: str | Path, individual_ids) -> pd.DataFrame
     # validation or test individuals therefore never enter a source-training frame.
     con.register("split_ids", pd.DataFrame({"individual_id": selected.to_numpy()}))
     # get epoch seconds in DuckDB to avoid datetime unit mismatches in pandas
+    if env_parquet is not None:
+        return _read_segments_env(con, segments_parquet, env_parquet)
     frame = con.execute(
         f"""
         SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat
@@ -67,6 +79,27 @@ def _read_segments(segments_parquet: str | Path, individual_ids) -> pd.DataFrame
         ORDER BY s.segment_id, s.bin_index
         """
     ).df()
+    return frame
+
+
+# GenAI reference: I specified ERA5 covariates for the env study; a left join of the env file on (segment_id, bin_index) only when one is given, so 
+# the env off query is the one above, unchanged. GenAI wrote this; I checked it
+def _read_segments_env(con, segments_parquet: str | Path, env_parquet: str | Path) -> pd.DataFrame:
+    """
+    `_read_segments`' rows with the ERA5 columns left-joined; `split_ids` must already be registered on `con`.
+    """
+    columns = ", ".join(f"e.{name}" for name in era5.RAW)
+    frame = con.execute(
+        f"""
+        SELECT s.segment_id, s.individual_id, s.bin_index, epoch(s.timestamp) AS epoch_s, s.lon, s.lat, {columns}
+        FROM '{segments_parquet}' s
+        SEMI JOIN split_ids ids ON s.individual_id = ids.individual_id
+        LEFT JOIN '{env_parquet}' e ON s.segment_id = e.segment_id AND s.bin_index = e.bin_index
+        ORDER BY s.segment_id, s.bin_index
+        """
+    ).df()
+    if frame.duplicated(["segment_id", "bin_index"]).any():
+        raise ValueError(f"{env_parquet} repeats a (segment_id, bin_index) key; the join would duplicate fixes")
     return frame
 
 
@@ -245,6 +278,8 @@ class HorizonWindows:
     horizons: tuple[int, ...]
     bin_seconds: int
     clip: float | None = None
+    env: np.ndarray | None = None  # (rows, len(era5.RAW)) ERA5 at each row, NaN where missing; context = core only
+    env_stats: tuple[np.ndarray, np.ndarray] | None = None  # (mean, sd) of the standardised channels, training pool's
 
     @property
     def n_windows(self) -> int:
@@ -262,14 +297,19 @@ class HorizonWindows:
         bin_seconds: int,
         clip: float | None = None,
         name: str | None = None,
+        env_parquet: str | Path | None = None,
     ) -> "HorizonWindows":
         """
         Build windows for the selected individuals of one species.
+
+        With `env_parquet`, each row keeps its ERA5 covariates; `gather` then needs `env_stats` (see pool.env_stats).
         """
         if context < core:
             raise ValueError(f"context {context} is shorter than the {core}-bin core")
+        if env_parquet is not None and context != core:
+            raise ValueError(f"covariates are for the {core}-bin core only, not context {context}")
         # GenAI ref: completed a small part of this function
-        frame = _read_segments(segments_parquet, individual_ids)
+        frame = _read_segments(segments_parquet, individual_ids, env_parquet=env_parquet)
         bins = frame["bin_index"].to_numpy(np.int64)
         if len(bins) and (bins.min() < 0 or bins.max() >= SEGMENT_KEY_STRIDE):
             raise ValueError("bin indices must lie in [0, 2**32) for the segment keys")
@@ -297,6 +337,7 @@ class HorizonWindows:
             horizons=horizons,
             bin_seconds=int(bin_seconds),
             clip=clip,
+            env=None if env_parquet is None else frame[list(era5.RAW)].to_numpy(float),
         )
 
     def for_horizon(self, h: int) -> "HorizonWindows":
@@ -321,7 +362,8 @@ class HorizonWindows:
         """
         Return features, token mask, scaled targets, target mask and window scale.
 
-        Targets use the core's scale. Missing targets are zero and masked out.
+        Targets use the core's scale. Missing targets are zero and masked out. With `env`, the 15 standardised ERA5 channels follow the 12 
+        movement channels on every token (era5.ENV_CHANNELS).
         """
         window_ids = np.asarray(window_ids, dtype=np.int64)
         anchors = self.anchors[window_ids]
@@ -356,7 +398,34 @@ class HorizonWindows:
             0.0,
         )
 
+        if self.env is not None:
+            if self.env_stats is None:
+                raise ValueError(f"{self.name}: env is set but env_stats is not; take them from pool.env_stats")
+            channels = self._env_channels(history_indices[:, 1:], features)
+            features = np.concatenate([features, era5.standardise(channels, *self.env_stats)], axis=-1)
+
         return features, token_mask, scaled_targets, target_mask, scale
+
+    def env_tokens(self, window_ids: np.ndarray, *, sigma: float = SCALE_FLOOR_M) -> np.ndarray:
+        """
+        Unstandardised (n, tokens, 15) ERA5 channels of the windows, for the pool's statistics.
+        """
+        if self.env is None:
+            raise ValueError(f"{self.name} has no covariates")
+        window_ids = np.asarray(window_ids, dtype=np.int64)
+        features = replace(self, env=None, env_stats=None).gather(window_ids, sigma=sigma)[0]
+        rows = history_positions(self.keys, self.anchors[window_ids], self.context)[:, 1:]
+        return self._env_channels(rows, features)
+
+    def _env_channels(self, rows: np.ndarray, features: np.ndarray) -> np.ndarray:
+        """Token channels from the ERA5 rows each token lands on (n, tokens) and its movement features."""
+        if self.context != self.core:
+            raise ValueError(f"covariates are for the {self.core}-bin core only, not context {self.context}")
+        return era5.token_channels(
+            self.env[rows],
+            features[..., FEATURES.index("heading_cos")],
+            features[..., FEATURES.index("heading_sin")],
+        )
 
 
 class SourcePool:
