@@ -47,7 +47,7 @@ FREEZE = "birds_1h_env_exploratory_freeze.md"
 TAG = "birds_1h_env"
 
 ENV_CHANNELS = era5.N_ENV_CHANNELS  # 15: 8 hourly, 2 static, 4 derived winds, the observed flag
-TAIL_SD = 10.0  # the dry run reports the share of standardised values beyond this
+TAIL_SD = era5.CLIP_SD  # the dry run reports the share of standardised values beyond this, before and after the clip
 CORE, HORIZONS, FOLDS, BIRDS = b1h.CORE, b1h.HORIZONS, b1h.FOLDS, b1h.BIRDS
 SEEDS, XGB_SEED = b1h.SEEDS, b1h.XGB_SEED
 REGISTERED_STEPS, CALIBRATION_STEPS = b1h.REGISTERED_STEPS, b1h.CALIBRATION_STEPS
@@ -610,27 +610,43 @@ def env_matches(main: SourcePool, env: SourcePool, chunk: int = b1h.GATHER_CHUNK
 def tail_shares(pool: SourcePool, chunk: int = b1h.GATHER_CHUNK) -> dict:
     """
     Per standardised channel, the share of observed training tokens beyond +-TAIL_SD and the largest |value| (token
-    counts, unweighted), with total precipitation's share per species.
+    counts, unweighted), before the clip (era5.standardise with clip=None) and after it (what gather gives the model),
+    with total precipitation's share before the clip per species.
     """
-    beyond, largest, total = np.zeros(era5.N_STANDARDISED), np.zeros(era5.N_STANDARDISED), 0
-    tp, tp_by_species = era5.ENV_CHANNELS.index("tp"), {}
+    # GenAI reference: I asked for the shares both before and after the 16-10 clip; GenAI split this into the two passes as follows; 
+    # i inserted its code and checked it. 
+    n = era5.N_STANDARDISED
+    beyond = {"before": np.zeros(n), "after": np.zeros(n)}
+    largest = {"before": np.zeros(n), "after": np.zeros(n)}
+    tp, tp_by_species, total = era5.ENV_CHANNELS.index("tp"), {}, 0
     for name in pool.names:
         windows, hits, count = pool.species[name], 0, 0
         for start in range(0, windows.n_windows, chunk):
-            z = windows.gather(np.arange(start, min(start + chunk, windows.n_windows)))[0][..., N_FEATURES:]
-            values = np.abs(z[z[..., -1] > 0][:, :-1])
-            beyond += (values > TAIL_SD).sum(axis=0)
-            if len(values):
-                largest = np.maximum(largest, values.max(axis=0))
-            total += len(values)
-            hits, count = hits + int((values[:, tp] > TAIL_SD).sum()), count + len(values)
+            ids = np.arange(start, min(start + chunk, windows.n_windows))
+            z = {
+                "before": era5.standardise(windows.env_tokens(ids), *windows.env_stats, clip=None),
+                "after": windows.gather(ids)[0][..., N_FEATURES:],
+            }
+            for stage, values in z.items():
+                values = np.abs(values[values[..., -1] > 0][:, :-1])
+                beyond[stage] += (values > TAIL_SD).sum(axis=0)
+                if len(values):
+                    largest[stage] = np.maximum(largest[stage], values.max(axis=0))
+                if stage == "before":
+                    total += len(values)
+                    hits, count = hits + int((values[:, tp] > TAIL_SD).sum()), count + len(values)
         tp_by_species[name] = hits / count if count else None
     return {
         "tail_sd": TAIL_SD,
+        "clip_sd": era5.CLIP_SD,
         "observed_tokens": total,
         "channels": {
-            c: {"share_beyond": float(beyond[i] / total) if total else None, "max_abs": float(largest[i])}
-            for i, c in enumerate(era5.ENV_CHANNELS[: era5.N_STANDARDISED])
+            c: {
+                stage: {"share_beyond": float(beyond[stage][i] / total) if total else None,
+                        "max_abs": float(largest[stage][i])}
+                for stage in ("before", "after")
+            }
+            for i, c in enumerate(era5.ENV_CHANNELS[:n])
         },
         "tp_share_beyond_by_species": tp_by_species,
     }
@@ -686,9 +702,11 @@ def dry_run(payload: dict, index: int | None) -> None:
           + ", ".join(f"{n} {c['token_share']:.4f}" for n, c in sorted(coverage.items(),
                                                                        key=lambda kv: kv[1]["token_share"])[:3]))
     tails = tail_shares(env_pool)
-    print(f"  beyond +-{TAIL_SD:g} SD : share of {tails['observed_tokens']:,} observed training tokens, and max |z|")
+    print(f"  beyond +-{TAIL_SD:g} SD : share of {tails['observed_tokens']:,} observed training tokens, and max |z|, "
+          f"before / after the +-{era5.CLIP_SD:g} SD clip")
     for c, t in tails["channels"].items():
-        print(f"    {c:<10} {t['share_beyond']:>10.2e} {t['max_abs']:>10.1f}")
+        b, a = t["before"], t["after"]
+        print(f"    {c:<10} {b['share_beyond']:>10.2e} {b['max_abs']:>8.1f}  /  {a['share_beyond']:>10.2e} {a['max_abs']:>8.1f}")
     tp_top = sorted(((v, n) for n, v in tails["tp_share_beyond_by_species"].items() if v), reverse=True)[:5]
     print("    tp by species: " + (", ".join(f"{n} {v:.2e}" for v, n in tp_top) or "none beyond"))
     plain_bytes, env_bytes = bytes_on_device(env_pool, N_FEATURES), bytes_on_device(env_pool, N_FEATURES + ENV_CHANNELS)

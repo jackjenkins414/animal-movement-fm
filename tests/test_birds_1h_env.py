@@ -187,7 +187,8 @@ def test_env_stats_come_from_the_training_pool_only(synthetic):
     val = env.env_windows("x", ["b_x"], stats)
     features = val.gather(np.arange(val.n_windows))[0]
     raw = val.env_tokens(np.arange(val.n_windows))
-    np.testing.assert_allclose(features[..., 12:26], (raw[..., :-1] - stats[0]) / stats[1], rtol=1e-12)
+    z = np.clip((raw[..., :-1] - stats[0]) / stats[1], -era5.CLIP_SD, era5.CLIP_SD)
+    np.testing.assert_allclose(features[..., 12:26], z, rtol=1e-12)
 
 
 def test_a_missing_env_file_is_refused(synthetic):
@@ -257,15 +258,23 @@ def test_env_matches_passes_on_the_main_pool_and_catches_a_perturbed_core(synthe
 
 
 def test_tail_shares_and_coverage_count_what_gather_gives(synthetic):
-    pool, _, stats = env.training_source(env.PLAN[0], PAYLOAD)
+    pool, _, (mean, sd) = env.training_source(env.PLAN[0], PAYLOAD)
+    pool = SourcePool({n: replace(w, env_stats=(mean, sd / 8)) for n, w in pool.species.items()}, WEIGHTS)  # fatter tails
     tails = env.tail_shares(pool, chunk=7)
-    assert tails == env.tail_shares(pool)
-    z = np.concatenate([w.gather(np.arange(w.n_windows))[0][..., 12:] for w in (pool.species[n] for n in pool.names)])
-    values = np.abs(z[z[..., -1] > 0][:, :-1])
-    assert tails["observed_tokens"] == len(values)
-    for i, c in enumerate(era5.ENV_CHANNELS[:14]):
-        assert tails["channels"][c]["share_beyond"] == float((values[:, i] > 10).mean())
-        assert tails["channels"][c]["max_abs"] == float(values[:, i].max())
+    assert tails == env.tail_shares(pool) and tails["tail_sd"] == tails["clip_sd"] == era5.CLIP_SD == 10
+    species = [pool.species[n] for n in pool.names]
+    after = np.concatenate([w.gather(np.arange(w.n_windows))[0][..., 12:] for w in species])
+    before = np.concatenate([era5.standardise(w.env_tokens(np.arange(w.n_windows)), mean, sd / 8, clip=None)
+                             for w in species])
+    assert np.array_equal(np.clip(before[..., :-1], -10, 10), after[..., :-1])
+    for stage, z in (("before", before), ("after", after)):
+        values = np.abs(z[z[..., -1] > 0][:, :-1])
+        assert tails["observed_tokens"] == len(values)
+        for i, c in enumerate(era5.ENV_CHANNELS[:14]):
+            assert tails["channels"][c][stage]["share_beyond"] == float((values[:, i] > 10).mean())
+            assert tails["channels"][c][stage]["max_abs"] == float(values[:, i].max())
+    assert any(t["before"]["share_beyond"] > 0 for t in tails["channels"].values())
+    assert all(t["after"]["share_beyond"] == 0 and t["after"]["max_abs"] <= 10 for t in tails["channels"].values())
     x = pool.species["x"]
     rows = x.anchors[:, None] + np.arange(-10, 1)
     missing = np.isin(x.keys[rows] % (1 << 32), [20, 30])  # the training individual's bins 20 and 30

@@ -228,6 +228,24 @@ def test_weighted_statistics_and_standardisation():
     assert (out[0, 0] == 0).all() and (out[..., -1] == channels[..., -1]).all()
 
 
+def test_standardise_clips_beyond_10_sd_and_leaves_the_flag_and_unobserved_zeros():
+    assert era5.CLIP_SD == 10.0
+    rng = np.random.default_rng(3)
+    channels = _channels(rng, 5, 4)
+    mean, sd = channels[1:, :, :-1].reshape(-1, era5.N_STANDARDISED).mean(axis=0), np.full(era5.N_STANDARDISED, 0.5)
+    unclipped = era5.standardise(channels, mean, sd, clip=None)
+    np.testing.assert_allclose(unclipped[1:, :, :-1], (channels[1:, :, :-1] - mean) / sd)
+    assert (np.abs(unclipped[..., :-1]) > 10).any() and (np.abs(unclipped[..., :-1]) < 10).any()
+
+    out = era5.standardise(channels, mean, sd)
+    assert np.array_equal(out[..., :-1], np.clip(unclipped[..., :-1], -10, 10))
+    inside = np.abs(unclipped[..., :-1]) <= 10
+    assert np.array_equal(out[..., :-1][inside], unclipped[..., :-1][inside])  # values within the clip are untouched
+    assert (out[..., :-1][unclipped[..., :-1] > 10] == 10).all() and (out[..., :-1][unclipped[..., :-1] < -10] == -10).all()
+    assert (out[0, 0] == 0).all() and (out[..., -1] == channels[..., -1]).all()  # unobserved token, flag
+    assert np.array_equal(era5.standardise(channels, mean, sd, clip=2.0)[..., :-1], np.clip(unclipped[..., :-1], -2, 2))
+
+
 def test_a_channel_without_spread_is_refused():
     rng = np.random.default_rng(2)
     channels = _channels(rng, 4, 2)

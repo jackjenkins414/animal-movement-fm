@@ -401,12 +401,42 @@ def test_env_appends_15_channels_after_the_unchanged_movement_channels(tmp_path)
     for a, b in zip(got[1:], expected[1:]):
         assert np.array_equal(a, b)
     raw = on.env_tokens(ids)
-    assert np.array_equal(got[0][..., 12:], raw) and (raw[..., -1] == 1).all()
+    clipped = np.clip(raw[..., :-1], -era5.CLIP_SD, era5.CLIP_SD)  # unit statistics: standardised = raw, then clipped
+    assert np.array_equal(got[0][..., 12:26], clipped) and np.array_equal(got[0][..., 26], raw[..., -1])
+    assert (raw[..., -1] == 1).all()
     np.testing.assert_array_equal(raw[..., : len(era5.RAW)], on.env[_destinations(on)])
     mean, sd = np.arange(1.0, 15.0), np.arange(2.0, 16.0)
     scaled = replace(on, env_stats=(mean, sd)).gather(ids)[0]
     np.testing.assert_allclose(scaled[..., 12:26], (raw[..., :-1] - mean) / sd, rtol=1e-12)
     assert np.array_equal(scaled[..., 26], raw[..., -1])
+
+
+def test_gather_clips_env_channels_and_leaves_the_flag(tmp_path):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(60))})
+    on = _env_windows(seg, _env_parquet(tmp_path, seg, nan_bins=(20,)))
+    ids = np.arange(on.n_windows)
+    raw = on.env_tokens(ids)
+    mean, sd = np.zeros(era5.N_STANDARDISED), np.full(era5.N_STANDARDISED, 0.05)  # |z| up to ~280
+    got = replace(on, env_stats=(mean, sd)).gather(ids)[0][..., 12:]
+    observed = raw[..., -1] > 0
+    z = (raw[..., :-1] - mean) / sd
+    assert (np.abs(z[observed]) > era5.CLIP_SD).any() and (~observed).any()
+    expected = np.where(observed[..., None], np.clip(z, -era5.CLIP_SD, era5.CLIP_SD), 0.0)
+    np.testing.assert_allclose(got[..., :-1], expected, rtol=1e-12)
+    assert np.abs(got[..., :-1]).max() == era5.CLIP_SD
+    assert np.array_equal(got[..., -1], raw[..., -1]) and (got[~observed] == 0).all()
+
+
+def test_env_off_gather_never_standardises(tmp_path, monkeypatch):
+    seg = _hourly(tmp_path, {"a_s0": ("a", np.arange(60))})
+    before = _horizon_windows(seg).gather(np.arange(_horizon_windows(seg).n_windows))
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("env-off gather called era5.standardise")
+
+    monkeypatch.setattr(era5, "standardise", refuse)
+    after = _horizon_windows(seg).gather(np.arange(_horizon_windows(seg).n_windows))
+    assert all(np.array_equal(a, b) for a, b in zip(before, after))
 
 
 def test_env_is_read_at_context_fixes_only(tmp_path):

@@ -27,6 +27,10 @@ ENV_CHANNELS = RAW + DERIVED + ("env_observed",)
 N_ENV_CHANNELS = len(ENV_CHANNELS)
 N_STANDARDISED = N_ENV_CHANNELS - 1  # leave observation flag unscaled
 
+# GenAI reference: GenAI suggested I add this clip, after looking through the the dry run; since total precipitation beyond 10 SD on 
+# 0.10-0.13% of training tokens, max |z| 82-90)
+CLIP_SD = 10.0  # standardised channels are clipped to +-CLIP_SD; the statistics stay those of the raw values
+
 _WIND = {
     "10": (RAW.index("u10"), RAW.index("v10")),
     "100": (RAW.index("u100"), RAW.index("v100")),
@@ -304,9 +308,17 @@ def stats_from_sums(sums: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return mean, sd
 
 
-def standardise(channels: np.ndarray, mean: np.ndarray, sd: np.ndarray) -> np.ndarray:
+def standardise(
+    channels: np.ndarray,
+    mean: np.ndarray,
+    sd: np.ndarray,
+    *,
+    clip: float | None = CLIP_SD,
+) -> np.ndarray:
     """
     Standardise environmental channels, preserving the flag and zeroing unobserved tokens.
+
+    Standardised values are clipped to +-clip (CLIP_SD by default); clip=None returns them unclipped, for reporting the tails.
     """
     channels = np.asarray(channels, dtype=float)
     mean, sd = np.asarray(mean, dtype=float), np.asarray(sd, dtype=float)
@@ -315,4 +327,6 @@ def standardise(channels: np.ndarray, mean: np.ndarray, sd: np.ndarray) -> np.nd
 
     observed = channels[..., -1:] > 0
     scaled = np.where(observed, (channels[..., :N_STANDARDISED] - mean) / sd, 0.0)
+    if clip is not None:
+        scaled = np.clip(scaled, -clip, clip)
     return np.concatenate([scaled, channels[..., -1:]], axis=-1)
