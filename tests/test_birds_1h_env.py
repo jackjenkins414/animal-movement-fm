@@ -222,6 +222,7 @@ def test_neural_records_and_reported_checkpoints(synthetic, monkeypatch, index):
         assert record["env_channels"] == 15 == state["env_channels"] and config.env_channels == 15
         assert record["env_channel_names"] == list(era5.ENV_CHANNELS)
         assert record["env_stats"] == state["env_stats"] and len(record["env_stats"]["mean"]) == 14
+        assert record["env_clip_sd"] == state["env_clip_sd"] == era5.CLIP_SD == 10.0
         assert record["env_files"] == {s: _sha(root / "env" / f"{s}_env.parquet") for s in ("x", "y")}
         coverage = record["env_coverage"]["x"]
         assert coverage["windows"] > 0 and 0 < coverage["token_share"] < 1 and coverage["row_share"] == pytest.approx(1 - 2 / 70)
@@ -229,6 +230,7 @@ def test_neural_records_and_reported_checkpoints(synthetic, monkeypatch, index):
     else:
         assert record["env_channels"] == 0 and record["env_stats"] is None and record["env_files"] is None
         assert record["env_coverage"] is None and config.env_channels == 0 and model.input_proj.in_features == 12
+        assert record["env_clip_sd"] is None and state["env_clip_sd"] is None
 
 
 def test_the_xgb_record_uses_the_pools_statistics_and_27_channels(synthetic, monkeypatch):
@@ -238,6 +240,7 @@ def test_the_xgb_record_uses_the_pools_statistics_and_27_channels(synthetic, mon
     record = json.loads((env.RESULTS / f"{run.run_id}.json").read_text())
     assert record["queue"] == "normal" and record["channels"] == 27 and record["training_windows"] == 300
     assert record["compared_with"] == "XGBBb_f0_h24" and not record["allow_missing"]
+    assert record["env_clip_sd"] == era5.CLIP_SD
     pool, _, stats = env.training_source(run, PAYLOAD)
     assert record["env_stats"] == env.stats_payload(stats)
     assert all(np.array_equal(a, b) for a, b in zip(env.stats_from_payload(record["env_stats"]), stats))

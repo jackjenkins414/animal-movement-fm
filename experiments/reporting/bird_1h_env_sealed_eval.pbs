@@ -1,0 +1,69 @@
+#!/bin/bash
+# GenAI reference: GenAI wrote this from bird_1h_sealed_eval.pbs for time reasons. 
+#
+# Env study sealed evaluation (bird_1h_env_sealed_eval.py). walltime and mem below are PROVISIONAL: pass both on every
+# qsub with -l, as the env training scripts do.
+#
+# Default: add missing predictions and build the report.
+#   qsub -l walltime=06:00:00,mem=48GB experiments/reporting/bird_1h_env_sealed_eval.pbs
+#
+# Re-report only:
+#   qsub -v REPORT_ONLY=1 -l walltime=02:00:00,mem=48GB experiments/reporting/bird_1h_env_sealed_eval.pbs
+#
+# Re-score existing predictions:
+#   qsub -v OVERWRITE=1 -l walltime=06:00:00,mem=48GB experiments/reporting/bird_1h_env_sealed_eval.pbs
+#
+# Diagnostic only (run records and env files; opens no test partition), for the freeze's sec 7:
+#   qsub -v DIAGNOSTIC=1 -l walltime=01:00:00,mem=48GB experiments/reporting/bird_1h_env_sealed_eval.pbs
+#
+# Prediction mode requires preregistration/birds_1h_env_exploratory_freeze.md committed, clean, with sec 6 and 7 filled.
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=48GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=06:00:00
+#PBS -l storage=gdata/um09
+#PBS -l wd
+#PBS -N bird_1h_env_sealed_eval
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+
+if [ "${DIAGNOSTIC:-0}" = "1" ]; then
+  phase_args=(--diagnostic)
+elif [ "${DIAGNOSTIC:-0}" != "0" ]; then
+  echo "FAIL: DIAGNOSTIC must be 1 when enabled; got '$DIAGNOSTIC'" >&2
+  exit 1
+elif [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+if [ "${OVERWRITE:-0}" = "1" ]; then
+  phase_args+=(--overwrite)
+elif [ "${OVERWRITE:-0}" != "0" ]; then
+  echo "FAIL: OVERWRITE must be 1 when enabled; got '$OVERWRITE'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/bird_1h_env_sealed_eval.py "${phase_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

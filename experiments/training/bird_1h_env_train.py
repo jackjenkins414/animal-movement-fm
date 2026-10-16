@@ -373,6 +373,7 @@ def run_torch(
             "context": CORE,
             "env_channels": config.env_channels,
             "env_stats": stats_payload(stats),
+            "env_clip_sd": era5.CLIP_SD if run.env else None,
             "selection": selection,
             "model": result.model.state_dict(),
         },
@@ -548,6 +549,7 @@ def base_record(
         "env_channel_names": list(era5.ENV_CHANNELS) if run.env else [],
         "env_stats": stats_payload(stats),
         "env_stats_source": "the run's training pool, window weight p_s / n_s" if run.env else None,
+        "env_clip_sd": era5.CLIP_SD if run.env else None,  # standardised env channels clipped to +- this 
         "env_coverage": coverage,
         "env_files": env_files(pool_names) if run.env else None,
         "queue": queue_of(index),
