@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# GenAI reference: I specified a normal-queue (CPU) PBS script for the transformer collapse diagnosis, one fold per
+# subjob, walltime and mem as variables; GenAI wrote it after bird_1h_train_cpu.pbs.
+#
+# Transformer collapse diagnosis (exploratory; existing 1 h checkpoints; training and validation windows only).
+# One fold per subjob: array index 0, 1, 2 = folds 0, 3, 6. Output: results/transformer_diagnosis/fold{K}.json.
+#   qsub -J 0-2 experiments/diagnostics/transformer_collapse.pbs
+# One fold without an array:
+#   qsub -v FOLD=6 experiments/diagnostics/transformer_collapse.pbs
+# Model-free dry run (samples, guards, magnitudes, last-step skill; writes nothing):
+#   qsub -v FOLD=6,DRY_RUN=1 -l walltime=00:15:00 experiments/diagnostics/transformer_collapse.pbs
+# Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...
+# The Mac dry run built a fold in about 30 s; the forward passes are about 15 min per fold on 8 Mac threads.
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:30:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N transformer_collapse
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+FOLDS=(0 3 6)
+if [ -n "${PBS_ARRAY_INDEX:-}" ]; then
+  if [ -n "${FOLD:-}" ]; then
+    echo "FAIL: pass FOLD or an array, not both" >&2
+    exit 1
+  fi
+  FOLD="${FOLDS[$PBS_ARRAY_INDEX]}"
+fi
+if [ -z "${FOLD:-}" ]; then
+  echo "FAIL: submit with -J 0-2 or -v FOLD=K (K in 0, 3, 6)" >&2
+  exit 1
+fi
+
+extra_args=()
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/diagnostics/transformer_collapse.py --fold "$FOLD" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
