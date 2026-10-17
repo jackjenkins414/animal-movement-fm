@@ -1,0 +1,63 @@
+#!/bin/bash
+# GenAI reference: I outlined a gpuhopper PBS script for the transformer repair probe; GenAI wrote it from my prev scripts.
+#
+# Transformer repair probe (gpuhopper, full FP32), one model per PBS subjob. Plan: `transformer_repair_train.py --list`
+# (14 runs, fold 6, seed 0).
+#   0-9      C = 12 Bb V0-V4, LSTM-Bb V0, V3; C = 96 Bb V0-V2
+#   10-13    C = 96 Bb V3, V4, LSTM-Bb V0, V3
+#
+# Calibration first (1,000 updates to results/transformer_repair_calibration/, no run record), Bb V4 at C = 96:
+#   qsub -v CALIBRATE=1,INDEX=11 experiments/training/transformer_repair_train.pbs
+# After the calibration (validation-only model development; no freeze):
+#   qsub -J 0-9 -v STEPS=20000 experiments/training/transformer_repair_train.pbs
+#   qsub -J 10-13 -v STEPS=20000 experiments/training/transformer_repair_train.pbs
+# Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=48GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=gdata/um09
+#PBS -l wd
+#PBS -N transformer_repair
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+
+if [ "${CALIBRATE:-0}" = "1" ]; then
+  extra_args+=(--calibrate)
+  STEPS=0
+elif [ "${CALIBRATE:-0}" != "0" ]; then
+  echo "FAIL: CALIBRATE must be 1 when enabled; got '$CALIBRATE'" >&2
+  exit 1
+fi
+
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/transformer_repair_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

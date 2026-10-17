@@ -771,3 +771,169 @@ def test_a_pre_env_training_checkpoint_resumes_only_without_covariates(tmp_path)
     for name, tensor in uninterrupted.model.state_dict().items():
         assert torch.allclose(tensor, resumed.model.state_dict()[name], atol=1e-6), name
     assert torch.load(path, weights_only=False)["config"]["env_channels"] == 0  # rewritten whole from here on
+
+
+# GenAI reference: I specified the repair probe's config tests etc
+from animal_movement_fm.models.fm import signed_log1p  # noqa: E402
+from animal_movement_fm.train.loop import RESUME_DEFAULTS  # noqa: E402
+from animal_movement_fm.train.loss import horizon_huber  # noqa: E402
+
+REPAIR_FIELDS = {"input_scale": "sqrt_d", "norm_first": False, "step_transform": "none"}
+# recorded on 17-10 with the code before the repair fields existed: 3 steps, C = 24, StreamingPool
+PRE_REPAIR_HISTORY_LOSSES = {
+    "transformer": [1.0384384393692017, 0.9649322628974915, 0.9255337715148926],
+    "lstm": [0.3777693212032318, 0.3303797245025635, 0.3404565155506134],
+}
+
+
+def _plain(**kwargs):
+    return _config(use_fm_package=False, horizons=(1, 6, 24), **kwargs)
+
+
+@pytest.mark.parametrize("trunk", sorted(PRE_REPAIR_HISTORY_LOSSES))
+def test_defaults_reproduce_the_pre_repair_losses_on_a_padded_history_bitwise(tmp_path, trunk):
+    pool = _horizon_pool(tmp_path, context=24)
+    streamed = StreamingPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    config = _plain(trunk=trunk, history=24, observed_flag=trunk == "lstm", steps=3)
+    assert {name: getattr(config, name) for name in REPAIR_FIELDS} == REPAIR_FIELDS
+    assert train(config, streamed, log_every=1, checkpoint_every=0).loss_history == PRE_REPAIR_HISTORY_LOSSES[trunk]
+
+
+@pytest.mark.parametrize("trunk", ["transformer", "lstm"])
+def test_a_pre_repair_config_dict_rebuilds_identically(trunk):
+    saved = asdict(_plain(trunk=trunk))
+    for name, default in REPAIR_FIELDS.items():
+        assert saved.pop(name) == default
+    config = TrainConfig(**saved)
+    assert config == _plain(trunk=trunk)
+    torch.manual_seed(0)
+    built = config.build()
+    torch.manual_seed(0)
+    explicit = MovementFM(input_dim=12, d_model=16, nhead=2, num_layers=1, dim_feedforward=32, dropout=0.1,
+                          use_fm_package=False, trunk=trunk, n_horizons=3)
+    assert list(built.state_dict()) == list(explicit.state_dict())
+    assert all(torch.equal(a, b) for a, b in zip(built.state_dict().values(), explicit.state_dict().values()))
+    assert built.encoder.norm is None if trunk == "transformer" else True
+
+
+def _inputs(n=6, tokens=11, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randn(n, tokens, 12, generator=generator) * 50
+
+
+def test_input_scale_none_drops_exactly_the_factor_of_sqrt_d_model():
+    torch.manual_seed(3)
+    scaled = _plain(d_model=16).build().eval()
+    torch.manual_seed(3)
+    plain = _plain(d_model=16, input_scale="none").build().eval()
+    assert list(scaled.state_dict()) == list(plain.state_dict())
+    assert all(torch.equal(a, b) for a, b in zip(scaled.state_dict().values(), plain.state_dict().values()))
+    seen = {}
+    for name, model in (("scaled", scaled), ("plain", plain)):
+        model.pos_encoder.register_forward_hook(lambda m, args, out, name=name: seen.__setitem__(name, args[0]))
+        with torch.no_grad():
+            model(_inputs())
+    torch.testing.assert_close(seen["scaled"], seen["plain"] * 4.0)  # sqrt(16)
+
+
+def test_norm_first_sets_every_layer_and_adds_only_the_final_norm():
+    torch.manual_seed(0)
+    post = _plain(num_layers=3).build()
+    torch.manual_seed(0)
+    pre = _plain(num_layers=3, norm_first=True).build()
+    assert all(not layer.norm_first for layer in post.encoder.layers) and post.encoder.norm is None
+    assert all(layer.norm_first for layer in pre.encoder.layers) and isinstance(pre.encoder.norm, torch.nn.LayerNorm)
+    assert set(pre.state_dict()) - set(post.state_dict()) == {"encoder.norm.weight", "encoder.norm.bias"}
+    assert all(torch.equal(post.state_dict()[k], pre.state_dict()[k]) for k in post.state_dict())
+    with torch.no_grad():
+        assert not torch.allclose(post.eval()(_inputs()), pre.eval()(_inputs()))
+
+
+def test_signed_log1p_is_odd_monotone_and_touches_only_the_two_step_channels():
+    x = _inputs(n=4)
+    x[:, :3] = 0.0  # masked tokens are zero and must stay zero
+    y = signed_log1p(x)
+    assert torch.equal(y[..., 2:], x[..., 2:])
+    assert torch.equal(y[:, :3], x[:, :3])
+    torch.testing.assert_close(signed_log1p(-x)[..., :2], -y[..., :2])
+    grid = torch.linspace(-1000, 1000, 2001)
+    values = signed_log1p(torch.stack([grid, grid] + [torch.zeros_like(grid)] * 10, dim=-1))[:, 0]
+    assert torch.all(torch.diff(values) > 0)
+    assert values[-1] == pytest.approx(np.log1p(1000.0))
+
+
+@pytest.mark.parametrize("trunk", ["transformer", "lstm"])
+def test_step_transform_changes_the_model_input_and_nothing_else(trunk):
+    torch.manual_seed(1)
+    plain = _plain(trunk=trunk).build().eval()
+    torch.manual_seed(1)
+    logged = _plain(trunk=trunk, step_transform="signed_log1p").build().eval()
+    assert all(torch.equal(a, b) for a, b in zip(plain.state_dict().values(), logged.state_dict().values()))
+    x = _inputs()
+    with torch.no_grad():
+        torch.testing.assert_close(logged(x), plain(signed_log1p(x)))
+        assert not torch.allclose(logged(x), plain(x))
+
+
+def test_step_transform_leaves_the_targets_and_loss_definition_alone(tmp_path):
+    pool = _horizon_pool(tmp_path)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    features, token_mask, targets, target_mask, _ = prepared.sample_horizon(torch.Generator().manual_seed(4), 32)
+    torch.manual_seed(5)
+    logged = _plain(step_transform="signed_log1p").build().eval()
+    torch.manual_seed(5)
+    plain = _plain().build().eval()
+    with torch.no_grad():
+        assert horizon_huber(logged(features), targets, target_mask)[0] == horizon_huber(
+            plain(signed_log1p(features)), targets, target_mask)[0]
+    assert torch.equal(prepared.sample_horizon(torch.Generator().manual_seed(4), 32)[2], targets)
+
+
+def test_the_repair_switches_are_refused_where_they_do_not_belong():
+    for bad in (dict(input_scale="half"), dict(step_transform="log")):
+        with pytest.raises(ValueError, match="must be one of"):
+            _plain(**bad)
+    for bad in (dict(input_scale="none"), dict(norm_first=True)):
+        with pytest.raises(ValueError, match="Transformer trunk only"):
+            _plain(trunk="lstm", **bad)
+        with pytest.raises(ValueError, match="Transformer trunk only"):
+            _plain(trunk="moe", **bad)
+    with pytest.raises(ValueError, match="forecast arms"):
+        _config(use_reconstruction_head=True, step_transform="signed_log1p")
+    assert _plain(trunk="lstm", step_transform="signed_log1p").build().step_transform == "signed_log1p"
+
+
+def test_resume_defaults_cover_every_field_added_after_checkpoints_existed():
+    assert RESUME_DEFAULTS == {"env_channels": 0} | REPAIR_FIELDS
+    defaults = asdict(_config())
+    assert all(defaults[name] == value for name, value in RESUME_DEFAULTS.items())
+
+
+@pytest.mark.parametrize("variant", [dict(input_scale="none"), dict(norm_first=True), dict(step_transform="signed_log1p")])
+def test_a_pre_repair_checkpoint_resumes_only_at_the_defaults(tmp_path, variant):
+    pool = _horizon_pool(tmp_path)
+    prepared = PreparedPool.from_source_pool(pool, horizon_k=horizon_k(pool))
+    config = _plain(steps=8, seed=2)
+    uninterrupted = train(config, prepared, log_every=4, checkpoint_every=0)
+
+    class Killed(Exception):
+        pass
+
+    def die_at_4(step, _loss):
+        if step >= 4:
+            raise Killed
+
+    path = tmp_path / "run.pt"
+    with pytest.raises(Killed):
+        train(config, prepared, log_every=4, checkpoint_every=4, checkpoint_path=path, progress=die_at_4)
+    state = torch.load(path, weights_only=False)
+    for name in REPAIR_FIELDS:
+        state["config"].pop(name)  # as a checkpoint written before the repair probe holds it
+    torch.save(state, path)
+
+    with pytest.raises(ValueError, match="different configuration"):
+        train(replace(config, **variant), prepared, checkpoint_every=4, checkpoint_path=path)
+    resumed = train(config, prepared, log_every=4, checkpoint_every=4, checkpoint_path=path)
+    assert resumed.resumed_from == 4 and resumed.steps_run == 4
+    for name, tensor in uninterrupted.model.state_dict().items():
+        assert torch.allclose(tensor, resumed.model.state_dict()[name], atol=1e-6), name

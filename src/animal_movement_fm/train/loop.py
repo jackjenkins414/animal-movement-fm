@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - older torch on some machines
 
 from animal_movement_fm.data.enu import N_FEATURES
 from animal_movement_fm.data.resample import CONTEXT_LENGTH
-from animal_movement_fm.models.fm import MovementFM
+from animal_movement_fm.models.fm import INPUT_SCALES, STEP_TRANSFORMS, MovementFM
 from animal_movement_fm.train.loss import (
     HUBER_DELTA,
     horizon_huber,
@@ -38,6 +38,9 @@ WARMUP_FRACTION = 0.1  # Tier 1 Transformer; `lr` is the peak reached at the end
 GRAD_CLIP = 1.0  # Tier 1 Transformer
 DROPOUT = 0.1  # Tier 1 Transformer
 NHEAD = 4  # Tier 1 Transformer
+# trainConfig fields added after checkpoints already existed, with the value every older checkpoint was written under;
+# a stored config missing one resumes only when the run holds that default (env study E5.0, repair probe 17-10)
+RESUME_DEFAULTS = {"env_channels": 0, "input_scale": "sqrt_d", "norm_first": False, "step_transform": "none"}
 FEEDFORWARD_MULTIPLIER = 2  # dim_feedforward = 2 x d_model, as `MovementFM` already defaults
 
 # fixed auxiliary reconstruction settings
@@ -185,6 +188,11 @@ class TrainConfig:
     observed_flag: bool = False
     # env study: ERA5 channels appended after the 12 movement channels (era5.N_ENV_CHANNELS); 0 is every earlier arm
     env_channels: int = 0
+    # transformer repair probe; "sqrt_d", False and "none" are every earlier arm. input_scale and norm_first are
+    # the transformer trunk's; step_transform (signed log1p on the two step channels) applies to any neural trunk
+    input_scale: str = "sqrt_d"
+    norm_first: bool = False
+    step_transform: str = "none"
 
     def __post_init__(self) -> None:
         # this dataclass is frozen, so normalisation goes through object.__setattr__. The map is stored as a tuple
@@ -209,6 +217,14 @@ class TrainConfig:
             raise ValueError("covariates are for the 12-bin core only; a padded history cannot take env_channels")
         if self.env_channels and (self.use_fm_package or self.trunk == "moe" or self.use_reconstruction_head):
             raise ValueError("env_channels needs a plain Transformer or an LSTM: no FM package, MoE or reconstruction head")
+        if self.input_scale not in INPUT_SCALES or self.step_transform not in STEP_TRANSFORMS:
+            raise ValueError(
+                f"input_scale must be one of {INPUT_SCALES} and step_transform one of {STEP_TRANSFORMS}"
+            )
+        if self.trunk != "transformer" and (self.input_scale != "sqrt_d" or self.norm_first):
+            raise ValueError("input_scale and norm_first belong to the Transformer trunk only")
+        if self.step_transform != "none" and self.use_reconstruction_head:
+            raise ValueError("step_transform is for the forecast arms; the reconstruction head's targets are the raw steps")
         if self.species_label_map and not self.species_embed_dim:
             raise ValueError("species_label_map routes species to lookup rows and needs a species embedding")
         if self.species_label_map and not all(0 <= row < self.n_species for row in self.species_label_map):
@@ -249,6 +265,9 @@ class TrainConfig:
             trunk=self.trunk,
             n_horizons=len(self.horizons),
             observed_flag=self.observed_flag,
+            input_scale=self.input_scale,
+            norm_first=self.norm_first,
+            step_transform=self.step_transform,
         )
 
 
@@ -487,11 +506,14 @@ def train(
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     if checkpoint_path is not None and checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        # GenAI reference: I aksed for a checkpoint written before env_channels existed resumes when the run's value is the default 0, as 
+        # GenAI reference: I aksed for a checkpoint written before env_channels existed resumes when the run's value is the default 0, as
         # compare_registered_config accepts an absent default field; any other difference is still refused. GenAI wrote it; I checked it.
+        # Extended for the repair probe; the same rule for every field in RESUME_DEFAULTS, so a checkpoint missing input_scale, norm_first 
+        # or step_transform resumes only when the run holds that field's default.
         stored = dict(state["config"])
-        if "env_channels" not in stored and config.env_channels == 0:
-            stored["env_channels"] = 0
+        for name, default in RESUME_DEFAULTS.items():
+            if name not in stored and getattr(config, name) == default:
+                stored[name] = default
         if stored != asdict(config):
             raise ValueError(
                 f"{checkpoint_path} was written by a different configuration. A requeued subjob must "

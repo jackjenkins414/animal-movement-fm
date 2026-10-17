@@ -10,6 +10,8 @@
 #   qsub -v FOLD=6 experiments/diagnostics/transformer_collapse.pbs
 # Model-free dry run (samples, guards, magnitudes, last-step skill; writes nothing):
 #   qsub -v FOLD=6,DRY_RUN=1 -l walltime=00:15:00 experiments/diagnostics/transformer_collapse.pbs
+# Transformer repair probe, after its 14 runs (results/transformer_repair/validation/fold6.json):
+#   qsub -v FOLD=6,REPAIR=1 experiments/diagnostics/transformer_collapse.pbs
 # Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...
 # The Mac dry run built a fold in about 30 s; the forward passes are about 15 min per fold on 8 Mac threads.
 
@@ -51,6 +53,13 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   extra_args+=(--dry-run)
 elif [ "${DRY_RUN:-0}" != "0" ]; then
   echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+# REPAIR=1: the transformer repair probe's runs (fold 6) to results/transformer_repair/validation/fold6.json
+if [ "${REPAIR:-0}" = "1" ]; then
+  extra_args+=(--repair)
+elif [ "${REPAIR:-0}" != "0" ]; then
+  echo "FAIL: REPAIR must be 1 when enabled; got '$REPAIR'" >&2
   exit 1
 fi
 

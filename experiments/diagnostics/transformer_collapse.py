@@ -1,7 +1,8 @@
-
-
 # GenAI reference: The beauty of GenAI; I suspected the Transformer was collapsing/underperforming, so I outlined the checks I wanted 
-# around loss, prediction behaviour, masking, context and validation skill, and got GenAI to write this diagnostic script. 
+# around loss, prediction behaviour, masking, context and validation skill, and got GenAI to write this diagnostic script. I later used 
+# GenAI to help with a repair mode that scores the transformer repair probe's runs with the same samples and diagnostics (loss / zero, 
+# input sensitivity, |pred| / |actual|, cos(pred, actual), validation skill, paired logged loss against V0) and GenAI generalised 
+# run_fold to a list of runs and wrote the repair report.
 """
 Transformer collapse diagnosis for the 1 h pooled birds (exploratory; no training; training and validation only).
 
@@ -42,6 +43,7 @@ sys.path.insert(0, str(REPO))
 
 import bird_1h_train as b1h  # noqa: E402
 import tier3_sealed_eval as E3  # noqa: E402
+import transformer_repair_train as TR  # noqa: E402
 
 from animal_movement_fm.data.multispecies import HorizonWindows, SourcePool, history_positions  # noqa: E402
 from animal_movement_fm.data.split import id_key, load_split  # noqa: E402
@@ -53,6 +55,9 @@ CORE, HORIZONS, BOUNDARY_M, FOLDS = b1h.CORE, b1h.HORIZONS, b1h.BOUNDARY_M, b1h.
 OUT = REPO / "results" / "transformer_diagnosis"
 REPORT_JSON = OUT / "transformer_diagnosis.json"
 REPORT_MD = OUT / "transformer_diagnosis.md"
+REPAIR_OUT = TR.RESULTS / "validation"  # beside the repair probe's run records
+REPAIR_JSON = REPAIR_OUT / "transformer_repair.json"
+REPAIR_MD = REPAIR_OUT / "transformer_repair.md"
 
 DIAGNOSIS_FOLDS = (0, 3, 6)
 SEED = 0  # the runs' training seed
@@ -110,20 +115,26 @@ def diagnosis_run(arm: str, fold: int, context: int):
     return run
 
 
-def load_run(run) -> tuple[nn.Module, np.ndarray, dict]:
-    """(model in eval mode, k_h, record), checked against the record: clean, 20,000 updates, k_h and C agree."""
-    path = b1h.RESULTS / f"{run.run_id}.json"
+def load_run(run, results_dir: Path | None = None, tier: str | None = None) -> tuple[nn.Module, np.ndarray, dict]:
+    """
+    (model in eval mode, k_h, record), checked against the record: clean, 20,000 updates, k_h and C agree, and the
+    record's tier when one is given. The 1 h study's runs by default; the repair probe's with its results and tag.
+    """
+    results_dir = b1h.RESULTS if results_dir is None else results_dir
+    path = results_dir / f"{run.run_id}.json"
     if not path.exists():
         raise SystemExit(f"FAIL: {path} does not exist")
     record = json.loads(path.read_text())
     problems = []
     if record.get("opened_test_partition") is not False:
         problems.append("opened_test_partition is not false")
+    if tier is not None and record.get("tier") != tier:
+        problems.append(f"record tier {record.get('tier')!r}, not {tier!r}")
     if record.get("context") != run.context:
         problems.append(f"record context {record.get('context')}")
     if record.get("applied_updates") != b1h.REGISTERED_STEPS:
         problems.append(f"applied_updates {record.get('applied_updates')}")
-    loaded = E3.load_reported(b1h.RESULTS, run.run_id)
+    loaded = E3.load_reported(results_dir, run.run_id)
     if loaded is None:
         problems.append("no reported checkpoint")
     else:
@@ -133,6 +144,27 @@ def load_run(run) -> tuple[nn.Module, np.ndarray, dict]:
     if problems:
         raise SystemExit(f"FAIL: {run.run_id}: " + "; ".join(problems))
     return model.eval(), np.asarray(record["horizon_k"], dtype=float), record
+
+
+def diagnosis_entries(fold: int) -> list[dict]:
+    """The diagnosis' runs: Bb and LSTM-Bb at every C. `pair` links a C > 12 run to its C = 12 run for core-only."""
+    entries = []
+    for arm in ARMS:
+        for context in CONTEXTS:
+            run = diagnosis_run(arm, fold, context)
+            entries.append({"label": f"{arm}_C{context}", "run_id": run.run_id, "context": context, "pair": arm,
+                            "transformer": arm == "Bb", "load": lambda run=run: load_run(run)})
+    return entries
+
+
+def repair_entries(fold: int) -> list[dict]:
+    """The repair probe's runs on this fold, read from its own results with its tag checked."""
+    runs = [run for run in TR.PLAN if run.fold == fold]
+    if not runs:
+        raise SystemExit(f"FAIL: the repair plan has no run on fold {fold}; it covers {TR.PROBE_FOLDS}")
+    return [{"label": f"{run.base}{run.variant}_C{run.context}", "run_id": run.run_id, "context": run.context,
+             "pair": f"{run.base}{run.variant}", "transformer": run.base == "Bb",
+             "load": lambda run=run: load_run(run, TR.RESULTS, TR.TAG)} for run in runs]
 
 
 # Windows and samples.
@@ -457,8 +489,11 @@ def _slice(batch: dict, rows) -> dict:
 
 # One fold.
 def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_check: int = N_CHECK,
-             dry_run: bool = False) -> dict:
-    if fold not in DIAGNOSIS_FOLDS:
+             dry_run: bool = False, repair: bool = False) -> dict:
+    """One fold's diagnostics for the diagnosis' runs, or with `repair` for the repair probe's (same samples)."""
+    if repair and fold not in TR.PROBE_FOLDS:
+        raise SystemExit(f"FAIL: the repair probe covers folds {TR.PROBE_FOLDS}, not {fold}")
+    if not repair and fold not in DIAGNOSIS_FOLDS:
         raise SystemExit(f"FAIL: the diagnosis covers folds {DIAGNOSIS_FOLDS}, not {fold}")
     started = time.time()
     payload = b1h.load_registered()
@@ -466,8 +501,9 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
     b1h.assert_fold_sources(fold, probabilities)
     pool_names, held_out = sorted(probabilities), list(FOLDS[fold])
     group_of = {s: "pool" for s in pool_names} | {s: "held_out" for s in held_out}
-    runs = {(arm, c): diagnosis_run(arm, fold, c) for arm in ARMS for c in CONTEXTS}
-    loaded = {} if dry_run else {key: load_run(run) for key, run in runs.items()}  # fail before building anything
+    entries = repair_entries(fold) if repair else diagnosis_entries(fold)
+    contexts = sorted({e["context"] for e in entries})
+    loaded = {} if dry_run else {e["label"]: e["load"]() for e in entries}  # fail before building anything
 
     train_windows = {s: build(s, "train", payload) for s in pool_names}
     b1h.check_window_counts(SourcePool(train_windows, probabilities))
@@ -493,14 +529,15 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
           f"built in {time.time() - started:.0f}s", flush=True)
 
     out = {
-        "fold": fold, "seed": SEED, "contexts": list(CONTEXTS), "arms": list(ARMS), "held_out": held_out,
+        "mode": "repair" if repair else "diagnosis", "labels": [e["label"] for e in entries],
+        "fold": fold, "seed": SEED, "contexts": contexts, "arms": list(ARMS), "held_out": held_out,
         "pool": pool_names, "exploratory": True, "opened_test_partition": False, "dry_run": dry_run,
         "samples": {"n_train": int(len(train_species)), "max_val_per_bird": max_val, "n_val": int(offsets[-1]),
                     "n_check": int(len(check_rows)), "sample_seed": SAMPLE_SEED,
                     "val_windows": {b: int(val_parts[b].n_windows) for b in birds}},
         "context_reuse": reuse, "group_of": group_of,
         "loss_curves": {}, "losses": {"train": {}, "val": {}}, "behaviour": {}, "checks": {}, "magnitudes": {},
-        "core_only": {}, "skill": {},
+        "core_only": {}, "skill": {}, "loss_histories": {},
     }
 
     core_val = stack([gather(val_parts[b], CORE) for b in birds])
@@ -509,7 +546,7 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
     pred_m_by_label = {"last_step": last_m}
     c12_check = {}
 
-    for context in CONTEXTS:
+    for context in contexts:
         train = stack([gather(train_parts[s], context) for s in train_parts])
         val = stack([gather(val_parts[b], context) for b in birds]) if context != CORE else core_val
         if context > CORE:
@@ -517,11 +554,13 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
         if dry_run:
             print(f"  C = {context}: gathered ({time.time() - started:.0f}s)", flush=True)
             continue
-        for arm in ARMS:
-            model, k, record = loaded[(arm, context)]
-            key, run_id = f"{arm}_C{context}", runs[(arm, context)].run_id
+        for e in (e for e in entries if e["context"] == context):
+            model, k, record = loaded[e["label"]]
+            key, run_id = e["label"], e["run_id"]
             t0 = time.time()
             out["loss_curves"][key] = loss_curve(record)
+            if repair:
+                out["loss_histories"][key] = record.get("loss_history")
             pred_train = predict(model, train["features"], train["token_mask"], context)
             out["losses"]["train"][key] = reference_losses(pred_train, train["features"], train["scaled"],
                                                            train["target_mask"], k)
@@ -544,18 +583,18 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
             entry = {"run_id": run_id, "token_sensitivity": token_sensitivity(model, check, context)}
             if context > CORE:
                 entry["masked_noise"] = masked_noise_check(model, check, context, rng)
-            if arm == "Bb":
+            if e["transformer"]:
                 entry["fast_path"] = fast_path_check(model, check, context)
             out["checks"][key] = entry
             if context == CORE:
-                c12_check[arm] = to_metres(pred_val[check_rows], k, check["scale"])
+                c12_check[e["pair"]] = to_metres(pred_val[check_rows], k, check["scale"])
             else:
                 full = to_metres(pred_val[check_rows], k, check["scale"])
                 alone = to_metres(core_only(model, check, context), k, check["scale"])
-                out["core_only"][key] = {
-                    name: _per_head(np.linalg.norm(v, axis=-1))
-                    for name, v in (("full_history", full), ("core_only", alone), ("c12_model", c12_check[arm]))
-                }
+                compared = [("full_history", full), ("core_only", alone)]
+                if e["pair"] in c12_check:
+                    compared.append(("c12_model", c12_check[e["pair"]]))
+                out["core_only"][key] = {name: _per_head(np.linalg.norm(v, axis=-1)) for name, v in compared}
             print(f"  {run_id}: done in {time.time() - t0:.0f}s", flush=True)
 
     for b, r in bird_rows.items():
@@ -761,21 +800,142 @@ def report() -> None:
     print(f"wrote {REPORT_JSON}\nwrote {REPORT_MD}")
 
 
+# Repair probe report.
+REPAIR_READING = """\
+Reading (notes.md 17-10; validation-only model development, no freeze). The readings are input sensitivity (the
+last-token swap), |pred| / |actual|, cos(pred, actual) and validation travel p90 skill; every variant is reported,
+including any that stay collapsed. Loss / zero barely separates even LSTM-Bb (0.98 in the diagnosis), and skill gaps
+inside +-0.05 on one seed are unresolved. Runs of one seed draw identical batches, so the logged losses are paired with
+V0's batch for batch. Not tested here: the loss itself as a pull toward zero. Any repaired transformer scored on test
+needs its own freeze first."""
+
+
+def paired_loss(variant: list | None, reference: list | None, last: int = 10) -> dict | None:
+    """Variant minus V0 at each logged point (identical batches): median over all points and the last `last`, and the
+    share of points where the variant is below V0."""
+    if not variant or not reference or len(variant) != len(reference):
+        return None
+    diff = np.asarray(variant, float) - np.asarray(reference, float)
+    return {"points": int(len(diff)), "median": float(np.median(diff)), f"median_last_{last}": float(np.median(diff[-last:])),
+            "share_below": float((diff < 0).mean())}
+
+
+def repair_summary(folds: list[dict]) -> dict:
+    """Per run label: losses, sensitivity and checks (median over folds); behaviour and skill (median over bird x fold
+    cells, by group); the paired logged loss against V0."""
+    labels = folds[0]["labels"]
+    out = {}
+    for label in labels:
+        base, context = label.split("_C")
+        v0 = f"{base[:-2]}V0_C{context}"
+        entry = {
+            "loss_over_zero": {}, "sensitivity_h6": {}, "checks": {}, "behaviour": {}, "skill": {},
+            "paired_loss": None if base.endswith("V0") else [paired_loss(f["loss_histories"].get(label),
+                                                                         f["loss_histories"].get(v0)) for f in folds],
+        }
+        for head in ("mean", "h6"):
+            entry["loss_over_zero"][f"train_{head}"] = _median(_cells(folds, lambda f: _ratio(
+                _get(f, "losses", "train", label, "model", head), _get(f, "losses", "train", label, "zero", head))))
+        for group in ("pool", "held_out"):
+            entry["loss_over_zero"][f"val_{group}"] = _median(_cells(folds, lambda f: _ratio(
+                _get(f, "losses", "val", label, group, "model", "mean"),
+                _get(f, "losses", "val", label, group, "zero", "mean"))))
+        for name in ("median_abs_output", "last_plus_1", "last_swapped"):
+            entry["sensitivity_h6"][name] = _median(_cells(folds, lambda f: _get(
+                f, "checks", label, "token_sensitivity", name, "h6")))
+        entry["checks"] = {
+            "masked_noise_max": _median(_cells(folds, lambda f: _get(f, "checks", label, "masked_noise", "max_abs_diff"))),
+            "fast_path_max": _median(_cells(folds, lambda f: _get(f, "checks", label, "fast_path", "max_abs_diff"))),
+        }
+        for h in map(str, HORIZONS):
+            for group in ("pool", "held_out"):
+                def birds_of(f, group=group):
+                    return [b for b in f["behaviour"].get(label, {}) if f["group_of"][b] == group]
+                entry["behaviour"].setdefault(h, {})[group] = {
+                    metric: _median(_cells(folds, lambda f: [_get(f, "behaviour", label, b, "all", h, metric)
+                                                             for b in birds_of(f)]))
+                    for metric in ("ratio", "cos_actual", "median_pred_m")}
+                entry["skill"].setdefault(h, {})[group] = _median(_cells(folds, lambda f: [
+                    _get(f, "skill", b, h, label) for b in f["skill"] if f["group_of"][b] == group]))
+        out[label] = entry
+    return out
+
+
+def _ratio(a, b):
+    return None if a is None or not b else a / b
+
+
+def write_repair_markdown(folds: list[dict], summary: dict, path: Path) -> None:
+    labels = folds[0]["labels"]
+    lines = [
+        "# Transformer repair probe: validation diagnostics (exploratory, validation only)", "",
+        f"Fold(s) {', '.join(str(f['fold']) for f in folds)}, seed {SEED}; the repair plan's runs "
+        f"(`transformer_repair_train.py --list`). Same samples as the collapse diagnosis: {N_TRAIN:,} A8 training "
+        f"draws, up to {MAX_VAL:,} validation windows per bird, {N_CHECK:,} for the checks. No test partition read. "
+        "Validation skill is on a capped sample without the floor; not comparable to any sealed number.", "",
+        REPAIR_READING, "",
+        "## 1. Loss, input sensitivity and checks (6 h head for sensitivity; model units)", "",
+        "| run | train loss / zero | 6 h train loss / zero | val pool loss / zero | val held-out loss / zero | "
+        "median \\|out\\| | last +1 | last swapped | masked noise max \\|Δ\\| | fast path max \\|Δ\\| |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for label in labels:
+        s = summary[label]
+        lz, sens, checks = s["loss_over_zero"], s["sensitivity_h6"], s["checks"]
+        lines.append(f"| {label} | {_m([lz['train_mean']])} | {_m([lz['train_h6']])} | {_m([lz['val_pool']])} | "
+                     f"{_m([lz['val_held_out']])} | {_m([sens['median_abs_output']])} | {_m([sens['last_plus_1']])} | "
+                     f"{_m([sens['last_swapped']])} | {_m([checks['masked_noise_max']])} | {_m([checks['fast_path_max']])} |")
+    lines += ["", "## 2. Validation behaviour and travel p90 skill against P (travel windows; median over birds)", "",
+              "| run | h | \\|pred\\| / \\|actual\\| pool | held-out | cos(pred, actual) pool | held-out | "
+              "median \\|pred\\| m pool | skill pool | skill held-out |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for label in labels:
+        for h in map(str, HORIZONS):
+            b, k = summary[label]["behaviour"][h], summary[label]["skill"][h]
+            lines.append(f"| {label} | {h} | {_m([b['pool']['ratio']])} | {_m([b['held_out']['ratio']])} | "
+                         f"{_m([b['pool']['cos_actual']])} | {_m([b['held_out']['cos_actual']])} | "
+                         f"{_m([b['pool']['median_pred_m']])} | {_m([k['pool']])} | {_m([k['held_out']])} |")
+    lines += ["", "## 3. Logged training loss against V0 on identical batches (variant − V0; per fold)", "",
+              "| run | fold | points | median Δ | median Δ, last 10 | share below V0 |", "|---|---:|---:|---:|---:|---:|"]
+    for label in labels:
+        for fold, p in zip(folds, summary[label]["paired_loss"] or []):
+            if p:
+                lines.append(f"| {label} | {fold['fold']} | {p['points']} | {p['median']:.3g} | "
+                             f"{p['median_last_10']:.3g} | {p['share_below']:.2f} |")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def repair_report() -> None:
+    files = [REPAIR_OUT / f"fold{k}.json" for k in TR.PROBE_FOLDS]
+    missing = [p.name for p in files if not p.exists()]
+    if missing:
+        raise SystemExit(f"FAIL: missing {', '.join(missing)}; run --repair --fold first")
+    folds = [json.loads(p.read_text()) for p in files]
+    if any(f.get("mode") != "repair" for f in folds):
+        raise SystemExit("FAIL: a repair fold file was not written by --repair")
+    summary = repair_summary(folds)
+    REPAIR_JSON.write_text(json.dumps({"exploratory": True, "opened_test_partition": False, "summary": summary,
+                                       "folds": folds}, indent=1, default=str) + "\n")
+    write_repair_markdown(folds, summary, REPAIR_MD)
+    print(f"wrote {REPAIR_JSON}\nwrote {REPAIR_MD}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--fold", type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", action="store_true")
+    parser.add_argument("--repair", action="store_true", help="the repair probe's runs (results/transformer_repair/)")
     parser.add_argument("--n-train", type=int, default=N_TRAIN)
     parser.add_argument("--max-val", type=int, default=MAX_VAL)
     parser.add_argument("--n-check", type=int, default=N_CHECK)
     args = parser.parse_args()
     if args.report:
-        return report()
+        return repair_report() if args.repair else report()
     if args.fold is None:
         parser.error("--fold or --report")
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
-    result = run_fold(args.fold, n_train=args.n_train, max_val=args.max_val, n_check=args.n_check, dry_run=args.dry_run)
+    result = run_fold(args.fold, n_train=args.n_train, max_val=args.max_val, n_check=args.n_check, dry_run=args.dry_run,
+                      repair=args.repair)
     if args.dry_run:
         print(json.dumps({k: result[k] for k in ("context_reuse", "magnitudes")}, indent=1))
         for group in ("pool", "held_out"):
@@ -784,8 +944,9 @@ def main() -> None:
                 print(f"last-step validation skill, {group}, {h} h: median {_m(cells)} over {len(cells)} birds")
         print(f"dry run done in {result['seconds']:.0f}s")
         return
-    OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / f"fold{args.fold}.json"
+    out_dir = REPAIR_OUT if args.repair else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"fold{args.fold}.json"
     path.write_text(json.dumps(result, indent=1, default=str) + "\n")
     print(f"wrote {path} ({result['seconds']:.0f}s)")
 

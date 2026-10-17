@@ -63,11 +63,14 @@ NO_MIROUNGA = SPW.TIER4_NO_MIROUNGA
 # horizons, history and observed_flag added for the 1 h study after every Tier 4 run had reported; each defaults the 
 # old behaviour, so our Tier 4s configurations rebuild unchanged
 # env_channels added for the env study after every Tier 4 run had reported; it defaults to 0, the old behaviour
+# input_scale, norm_first and step_transform added for the transformer repair probe; each defaults to the old
+# behaviour, and loop.RESUME_DEFAULTS lets a checkpoint written before them resume at those defaults
 FROZEN_TRAIN_CONFIG_FIELDS = (
     "batch_size", "d_model", "dropout", "freeze_except_species_embedding", "grad_clip", "lr", "mask_ratio",
     "n_species", "nhead", "num_layers", "random_species_labels", "reconstruction_weight", "seed",
     "species_embed_dim", "species_label_map", "steps", "trunk", "use_context_conditioning", "use_fm_package",
     "use_reconstruction_head", "warmup_fraction", "horizons", "history", "observed_flag", "env_channels",
+    "input_scale", "norm_first", "step_transform",
 )
 
 # arm -> how it is built, in the shape tier3_train.ARMS uses. `pool` names the training data; `per_species` attaches

@@ -29,6 +29,19 @@ MOVEMENT_CHANNELS = tuple(
 # context summary; mean log scale, mean dt, max dt
 CONTEXT_COND_DIM = 3
 
+# transformer repair probe; each switch defaults to the behaviour every earlier arm was trained with
+INPUT_SCALES = ("sqrt_d", "none")
+STEP_TRANSFORMS = ("none", "signed_log1p")
+STEP_CHANNELS = (FEATURES.index("d_east_scaled"), FEATURES.index("d_north_scaled"))
+if STEP_CHANNELS != (0, 1):
+    raise RuntimeError("signed_log1p assumes the two displacement channels lead the token")
+
+
+def signed_log1p(features: torch.Tensor) -> torch.Tensor:
+    """sign(x) log1p(|x|) on d_east_scaled and d_north_scaled of every token; every other channel is untouched"""
+    steps = features[..., :2]
+    return torch.cat([torch.sign(steps) * torch.log1p(steps.abs()), features[..., 2:]], dim=-1)
+
 
 class _PositionalEncoding(nn.Module):
     """
@@ -91,6 +104,9 @@ class MovementFM(nn.Module):
         trunk: str = "transformer",
         n_horizons: int = 0,
         observed_flag: bool = False,
+        input_scale: str = "sqrt_d",
+        norm_first: bool = False,
+        step_transform: str = "none",
     ) -> None:
         super().__init__()
         # `trunk="lstm"` is our Tier 3 baseline-ladder rung; we reuse the whole Tier 2 pipeline (representation, pools, loss, schedule, selection, 
@@ -116,6 +132,18 @@ class MovementFM(nn.Module):
         self.observed_flag = bool(observed_flag)
         if self.observed_flag and trunk != "lstm":
             raise ValueError("the observed flag is the LSTM's input; a Transformer trunk takes the padding mask instead")
+        # repair probe switches; input_scale and norm_first are the Transformer trunk's; step_transform reads any trunk's input
+        if input_scale not in INPUT_SCALES:
+            raise ValueError(f"input_scale {input_scale!r}; use one of {INPUT_SCALES}")
+        if step_transform not in STEP_TRANSFORMS:
+            raise ValueError(f"step_transform {step_transform!r}; use one of {STEP_TRANSFORMS}")
+        if trunk != "transformer" and (input_scale != "sqrt_d" or norm_first):
+            raise ValueError("input_scale and norm_first belong to the Transformer trunk only")
+        if step_transform != "none" and use_reconstruction_head:
+            raise ValueError("the reconstruction head's targets are the raw steps; step_transform is for the forecast arms")
+        self.input_scale = input_scale
+        self.norm_first = bool(norm_first)
+        self.step_transform = step_transform
         dim_feedforward = int(dim_feedforward or 2 * d_model)
 
         # continuous token features use a linear projection rather than an embedding lookup
@@ -143,8 +171,16 @@ class MovementFM(nn.Module):
                 dim_feedforward=dim_feedforward,
                 dropout=dropout,
                 batch_first=True,
+                norm_first=self.norm_first,
             )
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            if self.norm_first:
+                # Pre-LN leaves the residual stream unnormalised, so the stack ends in its own LayerNorm before the head;
+                # torch skips the nested tensor path for norm_first layers, so it is switched off rather than warned about
+                self.encoder = nn.TransformerEncoder(
+                    encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(d_model), enable_nested_tensor=False
+                )
+            else:
+                self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # A learned per-species lookup; it exists only for species that were trained on, so an arm carrying it is not zero-shot on a species 
         # with no row; that is the whole point of the Tier E experiment it was added for, and it is why nothing registered uses it
@@ -240,6 +276,10 @@ class MovementFM(nn.Module):
                 raise ValueError(
                     "the FM package takes no padded history: its conditioning averages over every token, padding included"
                 )
+        if self.step_transform == "signed_log1p":
+            # repair probe V3; the two step channels only, after the data's +-1,000 clip; masked tokens are 0 and stay 0,
+            # and the conditioning path's log_scale and dt channels are untouched
+            features = signed_log1p(features)
         if self.trunk == "lstm":
             if self.observed_flag:
                 if observed is None:
@@ -252,7 +292,9 @@ class MovementFM(nn.Module):
             return out
         if observed is not None and self.trunk == "moe":
             raise ValueError("the MoE trunk has no padding mask")
-        x = self.input_proj(features) * math.sqrt(self.d_model)
+        x = self.input_proj(features)
+        if self.input_scale == "sqrt_d":  # every arm before the repair probe; "none" is its V1
+            x = x * math.sqrt(self.d_model)
         if token_mask is not None:
             if token_mask.dtype != torch.bool:
                 token_mask = token_mask.bool()
