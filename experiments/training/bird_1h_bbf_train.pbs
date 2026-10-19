@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# Repaired-transformer study (gpuhopper, full FP32), one model per PBS subjob. Plan: `bird_1h_bbf_train.py --list`
+# (120 runs).
+#   0-29     BbF        C = 12 (folds 0-9 x seeds 0-2)
+#   30-59    BbF        C = 96
+#   60-89    BbFE       C = 12, the env study's 15 ERA5 channels
+#   90-119   LSTMBbR96  LSTM-Bb at C = 96 rerun on gpuhopper; submitted last
+#
+# Optional calibration (1,000 updates to results/birds_1h_bbf_calibration/, no run record, no freeze needed), BbF at
+# C = 96, fold 6:
+#   qsub -v CALIBRATE=1,INDEX=48 experiments/training/bird_1h_bbf_train.pbs
+# After the freeze is committed, in blocks of at most 10:
+#   qsub -J 0-9 -v STEPS=20000 experiments/training/bird_1h_bbf_train.pbs
+# Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=48GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=gdata/um09
+#PBS -l wd
+#PBS -N bird_1h_bbf_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+if [ "${CALIBRATE:-0}" = "1" ]; then
+  extra_args+=(--calibrate)
+  STEPS=0
+elif [ "${CALIBRATE:-0}" != "0" ]; then
+  echo "FAIL: CALIBRATE must be 1 when enabled; got '$CALIBRATE'" >&2
+  exit 1
+fi
+
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/bird_1h_bbf_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
