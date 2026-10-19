@@ -122,7 +122,22 @@ Written before any env training. Again, $\pm$ 0.05 is no difference. Note, I gav
 
 ## 7. As trained
 
-Will write from `bird_1h_env_sealed_eval.py --diagnostic` once all 150 runs are complete, before the sealed evaluation.
+From `bird_1h_env_sealed_eval.py --diagnostic` (job 181527454, 19-10-2026; exit 0), before the sealed evaluation. It read run records and env files only; no test partition was opened. GenAI drafted this table from my pasted output of `bird_1h_env_sealed_eval.o181527454; tail -n 80 bird_1h_env_sealed_eval.o181527454`; I reviewed its correctness. This is a GenAI reference for this table. 
+
+| | |
+|---|---|
+| env runs | 150 of 150 recorded, 150 clean (BbE 30 of 30; LSTMBbE 30 of 30; BbR 30 of 30; LSTMBbR 30 of 30; XGBBbE 30 of 30) |
+| neural (120) | 20,000 updates applied, none withheld, no non-finite steps on every clean run; TF32 off on 120; devices NVIDIA H200 120 |
+| XGBoost (30) | fit once, boosters present on every clean run |
+| PBS queues | gpuhopper-exec 120, normal-exec 30 |
+| env clip | 90 env runs at ±10 SD |
+| env files | 30 birds; sha256 as recorded |
+| main-study runs reloaded | 90 of 90 clean (Bb, LSTM-Bb, XGB-Bb at C = 12) |
+| training exclusions | PASS for the 150 env runs and the 90 main-study runs (5 species with exclusions in each, as recorded) |
+| test-partition reads | none: the diagnostic reads run records and env files only |
+| deferred or missing | none |
+| submission | 0–69 and 120–149 submitted 17-10; 70–119 on 18-10 (gpuhopper per-project limit). No run failed or was resubmitted |
+| known before the sealed evaluation | the transformer collapse diagnosis and repair probe (validation only; notes.md 17-10 to 19-10) found that Bb's default Post-LN encoder collapses to a near-constant output, and that a Pre-LN variant does not. BbE and BbR here use the default encoder, as planned in sec 3; nothing in this study changed. Any repaired transformer is evaluated separately under its own freeze |
 
 ## 8. Limitations
 
