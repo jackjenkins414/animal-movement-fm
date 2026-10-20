@@ -104,7 +104,23 @@ BbFE's covariates are the env study's (env freeze sec 5), unchanged: 15 channels
 
 ## 7. As trained
 
-To fill from `bird_1h_bbf_sealed_eval.py --diagnostic` before the sealed evaluation, with the PBS walltimes and SU from the job logs and the probe's.
+From `bird_1h_bbf_sealed_eval.py --diagnostic`, run on the Gadi login node on 20-10-2026 (it reads run records and env files only and needs no GPU; the queued PBS diagnostic 181705137 was cancelled before it started). No test partition was opened. GenAI pasted the diagnostic's table below and drafted the rows after it from our run logs; I reviewed them.
+
+| | |
+|---|---|
+| runs | 120 of 120 recorded, 120 clean (BbF 30 of 30; BbF_C96 30 of 30; BbFE 30 of 30; LSTMBbR_C96 30 of 30) |
+| training | 20,000 updates applied, none withheld, no non-finite steps on every clean run; TF32 off on 120; devices NVIDIA H200 120 |
+| switches | BbF and BbFE {'input_scale': 'none', 'norm_first': True, 'step_transform': 'signed_log1p'}; LSTMBbR96 none, as recorded on every clean run |
+| PBS queues | gpuhopper-exec 120 |
+| BbFE env inputs | 30 runs at ±10 SD; env_stats and env sha256 against the BbE twins: equal |
+| env files | 30 birds; sha256 as recorded |
+| training exclusions | PASS for all 120 runs (5 species with exclusions, as recorded) |
+| repeats of the probe (fold 6, seed 0, logged losses) | BbF_f6_s0 vs BbV4_f6_s0: identical; BbF_f6_s0_C96 vs BbV4_f6_s0_C96: identical; LSTMBbR_f6_s0_C96 vs LSTMBbV0_f6_s0_C96: identical |
+| C = 96 fallback | not used; LSTMBbR96 30 of 30 clean |
+| test-partition reads | none: the diagnostic reads run records, the env and probe records and env files only |
+| deferred or missing | none |
+| submission | 0–59 and 60–99 submitted 19-10; 100–119 on 20-10 (gpuhopper per-project limit). No run failed or was resubmitted |
+| known before the sealed evaluation | the env study's sealed results were read on 20-10, after secs 1–6 of this freeze were committed and before this section: ERA5 covariates left skill unchanged for Bb, LSTM-Bb and XGB-Bb at every horizon (median env effects −0.008 to +0.000; contrasts about 0), and its hardware check found H200 against V100 differences of at most 0.002 (median). Sec 6 is unchanged |
 
 ## 8. Limitations and hard stop
 
