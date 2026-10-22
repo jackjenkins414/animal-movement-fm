@@ -1,0 +1,75 @@
+#!/bin/bash
+#
+#
+# Repaired-encoder reruns of the Tier 2-4 pooled plain trunk (gpuhopper, full FP32), one model per PBS subjob.
+# Exploratory; no record is a tiered result. Plan: `tier4_repaired_train.py --list` (25 runs).
+#   0-4     B3F   Tier 2's B pool (3 sources)          gull, wolf, NES
+#   5-9     B9F   Tier 3's B9 pool (9 sources)         gull, wolf, NES
+#   10-14   B26F  Tier 4's B26 pool (26 sources)       gull, wolf, NES
+#   15-19   BdMF  Tier 4's BdM pool (7 marine)         NES
+#   20-24   BdTF  Tier 4's Zd-T pool (5 terrestrial)   wolf
+#
+# Data-side dry run (pools, counts, step magnitudes, configs, twins, comparator files; nothing trained):
+#   qsub -v DRY_RUN=1 -l walltime=01:00:00 experiments/training/tier4_repaired_train.pbs
+# Calibration (1,000 updates of the run and of its unrepaired twin, no record or checkpoint, no freeze needed):
+#   qsub -v CALIBRATE=1,INDEX=10 -l walltime=00:30:00 experiments/training/tier4_repaired_train.pbs
+# After the freeze is committed, in blocks of at most 10:
+#   qsub -J 0-9 -v STEPS=20000 experiments/training/tier4_repaired_train.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier4_repaired_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+# compute nodes have no internet; the environment is synced on a login node first
+export UV_OFFLINE=1
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+if [ "${CALIBRATE:-0}" = "1" ]; then
+  extra_args+=(--calibrate)
+  STEPS=0
+elif [ "${CALIBRATE:-0}" != "0" ]; then
+  echo "FAIL: CALIBRATE must be 1 when enabled; got '$CALIBRATE'" >&2
+  exit 1
+fi
+
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/tier4_repaired_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
