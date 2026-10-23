@@ -45,7 +45,18 @@ After training and before the sealed evaluation, a diagnostic runs on training a
 
 ## 7. As trained
 
-TO FILL from the diagnostic before the sealed evaluation.
+From `tier4_repaired_diagnostic.py --sec7` and `--report`, run on Gadi on 23-10-2026. No test partition was opened.
+
+- **Runs.** 25 of 25 recorded and clean, 5 per arm. Every run applied 20,000 updates with none withheld and no non-finite steps, with TF32 off, on an NVIDIA H200 on gpuhopper.
+- **Switches.** On in every run's record and config, and nothing else differs from the recipe.
+- **Twins.** The 20 twin runs (B, B9, B26, BdM) have their records, checkpoints and comparator files as registered.
+- **Deferred or missing.** None.
+- **Diagnostic** (`results/tier4_repaired_diagnostic/tier4_repaired_diagnostic.md`), read against sec 5 using the training sample loss / zero and the last-token swap on validation, medians over seeds:
+  - B and B26 are collapsed. Their loss / zero is 0.999 and 1.00, swapping the last token moves the output by 0.1% of its size or less, and |pred| / |actual| is about 0.005.
+  - B9 is nearly collapsed. Its loss / zero is 0.998, and the swap moves its output by 11% on the gull and wolf and by 0.7% on NES, where its output is large but barely depends on the input.
+  - BdM is not collapsed by the rule (loss / zero 0.949), but it responds only weakly to its input (the swap moves it by 2%).
+  - None of the five repaired arms is collapsed. Their loss / zero is 0.71 to 0.94, and the swap moves their output by 24% to 127% of its size.
+- **Known before the seal.** This diagnostic, including validation losses on the held-out species. On validation, the repaired arms' loss / zero is 0.99 to 1.00 on the gull, 1.00 to 1.06 on the wolf, and 0.58 to 0.76 on NES (their twins 0.63 to 1.00). Sec 6 is unchanged.
 
 ## 8. Limitations
 
