@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=8
+#PBS -l mem=32GB
+#PBS -l walltime=08:00:00
+#PBS -l storage=gdata/um09
+#PBS -l wd
+#PBS -N bird_rotation_baselines
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=1
+export UV_OFFLINE=1
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+phase_args=(--predict --report)
+
+if [ "${DIAGNOSTIC:-0}" = "1" ]; then
+  phase_args=(--diagnostic)
+elif [ "${DIAGNOSTIC:-0}" != "0" ]; then
+  echo "FAIL: DIAGNOSTIC must be 1 when enabled; got '$DIAGNOSTIC'" >&2
+  exit 1
+elif [ "${REPORT_ONLY:-0}" = "1" ]; then
+  phase_args=(--report)
+elif [ "${REPORT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
+  exit 1
+fi
+
+if [ "${OVERWRITE:-0}" = "1" ]; then
+  phase_args+=(--overwrite)
+elif [ "${OVERWRITE:-0}" != "0" ]; then
+  echo "FAIL: OVERWRITE must be 1 when enabled; got '$OVERWRITE'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/bird_rotation_baselines_sealed_eval.py "${phase_args[@]}" --workers "$PBS_NCPUS"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
