@@ -1,0 +1,65 @@
+#!/bin/bash
+#
+# Validation diagnostic for the repaired encoder reruns of the Tier 2-4 pooled plain trunk (exploratory; existing
+# checkpoints; training and validation windows only). One arm and its twin per subjob: array index 0-4 = B3F, B9F, B26F,
+# BdMF, BdTF. Output: results/tier4_repaired_diagnostic/{ARM}.json.
+#   qsub -J 0-4 experiments/diagnostics/tier4_repaired_diagnostic.pbs
+# One arm without an array:
+#   qsub -v ARM=B26F experiments/diagnostics/tier4_repaired_diagnostic.pbs
+# Model-free dry run (pool, samples, the test-partition check, zero-predictor losses; writes nothing):
+#   qsub -v ARM=B26F,DRY_RUN=1 -l walltime=00:30:00 experiments/diagnostics/tier4_repaired_diagnostic.pbs
+# After all five, the report and the draft sec 7 block (records only; light enough for the login node):
+#   uv run python experiments/diagnostics/tier4_repaired_diagnostic.py --report
+#   uv run python experiments/diagnostics/tier4_repaired_diagnostic.py --sec7
+# Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N tier4_repaired_diagnostic
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+# compute nodes have no internet; the environment is synced on a login node first
+export UV_OFFLINE=1
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+ARMS=(B3F B9F B26F BdMF BdTF)
+if [ -n "${PBS_ARRAY_INDEX:-}" ]; then
+  if [ -n "${ARM:-}" ]; then
+    echo "FAIL: pass ARM or an array, not both" >&2
+    exit 1
+  fi
+  ARM="${ARMS[$PBS_ARRAY_INDEX]}"
+fi
+if [ -z "${ARM:-}" ]; then
+  echo "FAIL: submit with -J 0-4 or -v ARM=NAME (one of ${ARMS[*]})" >&2
+  exit 1
+fi
+
+extra_args=()
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/diagnostics/tier4_repaired_diagnostic.py --arm "$ARM" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
