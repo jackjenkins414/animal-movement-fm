@@ -48,7 +48,16 @@ A diagnostic on training and validation windows only gives loss against the zero
 
 ## 7. As trained
 
-To fill after training, before the sealed evaluation.
+From `bird_rotation_repaired_diagnostic.py --sec7` and `--report`, run on Gadi on 26-10-2026. No test partition was opened.
+
+- **Runs.** 60 of 60 recorded and clean (30 per arm): 20,000 updates applied, none withheld, no non-finite steps, TF32 off, all on H200 on gpuhopper.
+- **Switches.** On in every run's record and config; each config equals its original's but for the switches, and the fold 1–9 exclusions are as registered.
+- **Originals.** All 60 (Bb and Zb; fold 0 from the bird study) have their records, pools, checkpoints and sealed prediction files as registered.
+- **Deferred or missing.** None.
+- **Diagnostic** (`results/birds_rotation_repaired_diagnostic/`), read against sec 5; medians over folds for training loss / zero and over the 30 birds for validation:
+  - Neither repaired arm is collapsed. BbF6 and ZbF6 have training loss / zero 0.918 and 0.911 (no fold at 0.99 or above), the last-token swap moves their output by 152% and 155% of its size, and |pred| / |actual| on travel windows is 0.56 and 0.52.
+  - The originals are near-collapsed but not collapsed by the rule. Bb's training loss / zero is 0.99 (5 of 10 folds at 0.99 or above) and Zb's 0.996 (9 of 10), and their forecasts are small (|pred| / |actual| 0.19 and 0.14), but they still respond to their input (swap 140% and 53% of their output).
+- **Known before the seal.** This diagnostic, including validation loss / zero on the held-out birds: 0.933 (BbF6) and 0.937 (ZbF6) against 0.988 (Bb) and 0.998 (Zb). Sec 6 is unchanged.
 
 ## 8. Limitations
 

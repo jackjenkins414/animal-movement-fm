@@ -1,0 +1,54 @@
+#!/bin/bash
+#
+# GenAI reference: GenAI adapted `tier4_repaired_sealed_eval.pbs` for the repaired transformer on the rotating held-out
+# birds (bird_rotation_repaired_sealed_eval.py; exploratory).
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=48GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bird_rotation_repaired_sealed_eval
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+# compute nodes have no internet; the environment is synced on a login node first
+export UV_OFFLINE=1
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+for flag in DIAGNOSTIC REPORT_ONLY OVERWRITE; do
+  value="${!flag:-0}"
+  if [ "$value" != "0" ] && [ "$value" != "1" ]; then
+    echo "FAIL: $flag must be 0 or 1; got '$value'" >&2
+    exit 1
+  fi
+done
+
+if [ "${DIAGNOSTIC:-0}" = "1" ]; then
+  mode_args=(--diagnostic)
+elif [ "${REPORT_ONLY:-0}" = "1" ]; then
+  mode_args=(--report)
+else
+  mode_args=(--predict)
+  if [ "${OVERWRITE:-0}" = "1" ]; then
+    mode_args+=(--overwrite)
+  fi
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/reporting/bird_rotation_repaired_sealed_eval.py "${mode_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true
