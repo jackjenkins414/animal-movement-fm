@@ -223,8 +223,8 @@ class TrainConfig:
             )
         if self.trunk != "transformer" and (self.input_scale != "sqrt_d" or self.norm_first):
             raise ValueError("input_scale and norm_first belong to the Transformer trunk only")
-        if self.step_transform != "none" and self.use_reconstruction_head:
-            raise ValueError("step_transform is for the forecast arms; the reconstruction head's targets are the raw steps")
+        # step_transform with the reconstruction head is allowed since the rotation's repaired full model; train takes the reconstruction 
+        # targets from the raw features before the model sees them, so they stay the raw steps
         if self.species_label_map and not self.species_embed_dim:
             raise ValueError("species_label_map routes species to lookup rows and needs a species embedding")
         if self.species_label_map and not all(0 <= row < self.n_species for row in self.species_label_map):

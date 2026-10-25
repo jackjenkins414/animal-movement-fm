@@ -898,9 +898,76 @@ def test_the_repair_switches_are_refused_where_they_do_not_belong():
             _plain(trunk="lstm", **bad)
         with pytest.raises(ValueError, match="Transformer trunk only"):
             _plain(trunk="moe", **bad)
-    with pytest.raises(ValueError, match="forecast arms"):
-        _config(use_reconstruction_head=True, step_transform="signed_log1p")
     assert _plain(trunk="lstm", step_transform="signed_log1p").build().step_transform == "signed_log1p"
+
+
+from animal_movement_fm.models import fm as fm_module  # noqa: E402
+from animal_movement_fm.train import loop as loop_module  # noqa: E402
+
+
+def _full(**kwargs):
+    """A Zb-style configuration: FM package (context conditioning) and the masked reconstruction head."""
+    return _config(use_fm_package=True, use_reconstruction_head=True, **kwargs)
+
+
+def test_the_full_model_takes_the_step_transform_and_its_defaults_are_unchanged():
+    assert {name: getattr(_full(), name) for name in REPAIR_FIELDS} == REPAIR_FIELDS
+    assert _full(step_transform="signed_log1p").build().step_transform == "signed_log1p"
+    torch.manual_seed(0)
+    original = _full().build()
+    torch.manual_seed(0)
+    repaired = _full(input_scale="none", norm_first=True, step_transform="signed_log1p").build()
+    assert set(repaired.state_dict()) - set(original.state_dict()) == {"encoder.norm.weight", "encoder.norm.bias"}
+    assert all(torch.equal(v, repaired.state_dict()[k]) for k, v in original.state_dict().items())
+
+
+def test_the_full_models_step_transform_acts_on_its_input_only():
+    torch.manual_seed(2)
+    original = _full().build().eval()
+    torch.manual_seed(2)
+    logged = _full(step_transform="signed_log1p").build().eval()
+    x = _inputs()
+    mask = torch.zeros(x.shape[:2], dtype=torch.bool)
+    mask[:, [1, 4]] = True
+    with torch.no_grad():
+        for got, want in zip(logged(x, token_mask=mask), original(signed_log1p(x), token_mask=mask)):
+            torch.testing.assert_close(got, want)
+
+
+def test_conditioning_reads_channels_the_step_transform_never_touches():
+    assert {fm_module._LOG_SCALE, fm_module._DT_BINS}.isdisjoint(fm_module.STEP_CHANNELS)
+    x = _inputs()
+    assert torch.equal(fm_module.context_conditioning(signed_log1p(x)), fm_module.context_conditioning(x))
+    model = _full(step_transform="signed_log1p").build().eval()
+    seen = {}
+    model.cond_proj.register_forward_hook(lambda m, args, out: seen.__setitem__("cond", args[0]))
+    with torch.no_grad():
+        model(x, token_mask=torch.zeros(x.shape[:2], dtype=torch.bool))
+    assert torch.equal(seen["cond"], fm_module.context_conditioning(x))
+
+
+def test_reconstruction_targets_stay_the_raw_steps_under_the_step_transform(tmp_path, monkeypatch):
+    prepared = PreparedPool.from_source_pool(_pool(tmp_path))
+    last, pairs = {}, []
+    forward = MovementFM.forward
+    loss = loop_module.masked_reconstruction_loss
+
+    def record_forward(self, features, *args, **kwargs):
+        last["features"] = features.detach().clone()
+        return forward(self, features, *args, **kwargs)
+
+    def record_loss(recon, target, mask, **kwargs):
+        # the window handed to the forward pass whose reconstruction this loss scores
+        pairs.append((last["features"], target.detach().clone()))
+        return loss(recon, target, mask, **kwargs)
+
+    monkeypatch.setattr(MovementFM, "forward", record_forward)
+    monkeypatch.setattr(loop_module, "masked_reconstruction_loss", record_loss)
+    train(_full(step_transform="signed_log1p", steps=3), prepared, log_every=1, checkpoint_every=0)
+    assert len(pairs) == 3
+    for features, target in pairs:
+        assert torch.equal(target, features[..., :2])
+        assert not torch.equal(target, signed_log1p(features)[..., :2])
 
 
 def test_resume_defaults_cover_every_field_added_after_checkpoints_existed():

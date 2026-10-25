@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# Repaired transformer on the rotating held-out birds (gpuhopper, full FP32), one model per PBS subjob.
+# Exploratory; no record is a tiered result. Plan: `bird_rotation_repaired_train.py --list` (60 runs).
+#   0-29    BbF6   Bb with the repaired encoder   folds 0-9, seeds 0-2
+#   30-59   ZbF6   Zb with the repaired encoder   folds 0-9, seeds 0-2
+# Fold 0 trains on the bird study's main pool; folds 1-9 on the registered rotation folds.
+#
+# Data-side dry run (pools, counts, step magnitudes, configs, initial weights, originals; nothing trained):
+#   qsub -v DRY_RUN=1 -l walltime=01:00:00 experiments/training/bird_rotation_repaired_train.pbs
+# Calibration (1,000 updates of the run and of its original, no record or checkpoint, no freeze needed):
+#   qsub -v CALIBRATE=1,INDEX=27 -l walltime=00:45:00 experiments/training/bird_rotation_repaired_train.pbs
+#   qsub -v CALIBRATE=1,INDEX=57 -l walltime=00:45:00 experiments/training/bird_rotation_repaired_train.pbs
+# After the freeze is committed, in blocks of at most 10:
+#   qsub -J 0-9 -v STEPS=20000 experiments/training/bird_rotation_repaired_train.pbs
+
+#PBS -P um09
+#PBS -q gpuhopper
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=01:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bird_rotation_repaired_train
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+# compute nodes have no internet; the environment is synced on a login node first
+export UV_OFFLINE=1
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+extra_args=()
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+  STEPS=0
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+if [ "${CALIBRATE:-0}" = "1" ]; then
+  extra_args+=(--calibrate)
+  STEPS=0
+elif [ "${CALIBRATE:-0}" != "0" ]; then
+  echo "FAIL: CALIBRATE must be 1 when enabled; got '$CALIBRATE'" >&2
+  exit 1
+fi
+
+if [ -n "${INDEX:-}" ]; then
+  extra_args+=(--index "$INDEX")
+fi
+
+if [ -z "${STEPS:-}" ]; then
+  echo "FAIL: pass the registered step budget, e.g. qsub -v STEPS=20000 ..." >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/training/bird_rotation_repaired_train.py \
+    --steps "$STEPS" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

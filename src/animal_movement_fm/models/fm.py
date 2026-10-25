@@ -139,8 +139,7 @@ class MovementFM(nn.Module):
             raise ValueError(f"step_transform {step_transform!r}; use one of {STEP_TRANSFORMS}")
         if trunk != "transformer" and (input_scale != "sqrt_d" or norm_first):
             raise ValueError("input_scale and norm_first belong to the Transformer trunk only")
-        if step_transform != "none" and use_reconstruction_head:
-            raise ValueError("the reconstruction head's targets are the raw steps; step_transform is for the forecast arms")
+        # step_transform reads the input only, so with the reconstruction head its targets stay the raw steps (25-10)
         self.input_scale = input_scale
         self.norm_first = bool(norm_first)
         self.step_transform = step_transform
