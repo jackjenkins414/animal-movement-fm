@@ -1,15 +1,20 @@
 #!/bin/bash
 #
-# Repaired-transformer study (gpuhopper, full FP32), one model per PBS subjob. Plan: `bird_1h_bbf_train.py --list`
-# (120 runs).
+# Repaired transformer study (gpuhopper, full FP32), one model per PBS subjob. Plan: `bird_1h_bbf_train.py --list`
+# (210 runs).
 #   0-29     BbF        C = 12 (folds 0-9 x seeds 0-2)
 #   30-59    BbF        C = 96
 #   60-89    BbFE       C = 12, the env study's 15 ERA5 channels
 #   90-119   LSTMBbR96  LSTM-Bb at C = 96 rerun on gpuhopper; submitted last
+#   120-149  BbF        C = 24 (extension, freeze sec 10)
+#   150-179  BbF        C = 48 (extension)
+#   180-209  BbF        C = 72 (extension)
 #
 # Optional calibration (1,000 updates to results/birds_1h_bbf_calibration/, no run record, no freeze needed), BbF at
 # C = 96, fold 6:
 #   qsub -v CALIBRATE=1,INDEX=48 experiments/training/bird_1h_bbf_train.pbs
+# The extension's calibration, BbF at C = 72, fold 6, seed 0:
+#   qsub -v CALIBRATE=1,INDEX=198 experiments/training/bird_1h_bbf_train.pbs
 # After the freeze is committed, in blocks of at most 10:
 #   qsub -J 0-9 -v STEPS=20000 experiments/training/bird_1h_bbf_train.pbs
 # Walltime and mem are the defaults below; override per submission with -l walltime=...,mem=...

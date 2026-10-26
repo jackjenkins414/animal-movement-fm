@@ -1,6 +1,7 @@
 # GenAI reference: will write my prompt in short
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 
@@ -23,20 +24,43 @@ def _names(run):
 
 
 # ---------------------------------------------------------------------------------------------------- the plan
-def test_the_plan_is_120_gpuhopper_runs_in_four_blocks_with_lstmbbr96_last():
+# sha256 of "run_id|compared_with|repeats" over indices 0-119, taken from the plan before the extension was appended
+ORIGINAL_SHA256 = "4874a24d6324f9a2b646449d481797e20fd9c98941f957c5a7a9e5c3f5d43f9b"
+
+
+def test_the_plan_is_210_gpuhopper_runs_with_lstmbbr96_closing_the_original_120():
     plan = F.PLAN
-    assert len(plan) == 120 and len({r.run_id for r in plan}) == 120
-    for (arm, context), first in ((("BbF", 12), 0), (("BbF", 96), 30), (("BbFE", 12), 60), (("LSTMBbR", 96), 90)):
+    assert len(plan) == 210 and len({r.run_id for r in plan}) == 210
+    for (arm, context), first in ((("BbF", 12), 0), (("BbF", 96), 30), (("BbFE", 12), 60), (("LSTMBbR", 96), 90),
+                                  (("BbF", 24), 120), (("BbF", 48), 150), (("BbF", 72), 180)):
         block = plan[first:first + 30]
         assert {(r.arm, r.context) for r in block} == {(arm, context)}
         assert [(r.fold, r.seed) for r in block] == [(k, s) for k in range(10) for s in (0, 1, 2)]
-    assert [(f, l) for f, l, *_ in F.BLOCKS] == [(0, 29), (30, 59), (60, 89), (90, 119)]
-    assert {F.queue_of(i) for i in range(120)} == {"gpuhopper"}
-    assert plan[90:] == F.LSTMBBR96
+    assert [(f, l) for f, l, *_ in F.BLOCKS] == [(0, 29), (30, 59), (60, 89), (90, 119), (120, 149), (150, 179),
+                                                 (180, 209)]
+    assert {F.queue_of(i) for i in range(210)} == {"gpuhopper"}
+    assert F.ORIGINAL == plan[:120] and F.EXTENSION == plan[120:]
+    assert plan[90:120] == F.LSTMBBR96 and len(F.LSTMBBR96) == 30
     ids = {r.run_id for r in plan}
     assert not ids & ({r.run_id for r in b1h.PLAN} | {r.run_id for r in env.PLAN} | {r.run_id for r in TR.PLAN})
-    assert [plan[i].run_id for i in (18, 48, 78, 108)] == [
-        "BbF_f6_s0", "BbF_f6_s0_C96", "BbFE_f6_s0", "LSTMBbR_f6_s0_C96"]
+    assert [plan[i].run_id for i in (18, 48, 78, 108, 138, 168, 198)] == [
+        "BbF_f6_s0", "BbF_f6_s0_C96", "BbFE_f6_s0", "LSTMBbR_f6_s0_C96", "BbF_f6_s0_C24", "BbF_f6_s0_C48",
+        "BbF_f6_s0_C72"]
+
+
+def test_indices_0_to_119_are_unchanged_by_the_extension():
+    text = "\n".join(f"{r.run_id}|{r.compared_with}|{r.repeats}" for r in F.PLAN[:120])
+    assert hashlib.sha256(text.encode()).hexdigest() == ORIGINAL_SHA256
+
+
+def test_the_extension_is_bbf_on_the_ablations_runs_at_c_24_48_72():
+    assert F.EXTENSION_CONTEXTS == (24, 48, 72) and set(F.EXTENSION_CONTEXTS) < set(b1h.ABLATION_CONTEXTS)
+    for run in F.EXTENSION:
+        assert run.switches == V4 and not run.env and run.env_reference is None
+        assert run.base == b1h.Run("Bb", run.fold, "", run.seed, 0, run.context) and run.base in b1h.PLAN
+        assert run.compared_with == run.base.run_id == f"Bb_f{run.fold}_s{run.seed}_C{run.context}"
+        assert run.repeats is None  # the probe ran C = 12 and 96 only
+        assert F.queue_of(F.PLAN.index(run)) == "gpuhopper"
 
 
 def test_comparators_twins_and_repeats():
@@ -79,12 +103,13 @@ def test_bbfe_is_its_bbe_twin_with_the_switches_and_bbf_with_env_channels(fold, 
     assert {k: v for k, v in got.items() if v != plain[k]} == {"env_channels": era5.N_ENV_CHANNELS}
 
 
-@pytest.mark.parametrize("index", [0, 48, 78, 108])
+@pytest.mark.parametrize("index", [0, 48, 78, 108, 120, 165, 198])
 def test_the_models_build_with_the_switches(index):
     run = F.PLAN[index]
     config = F.build_config(run, GRID, F.REGISTERED_STEPS, _names(run), PAYLOAD)
     assert config.steps == 20_000 and config.seed == run.seed and config.horizons == (1, 6, 24)
-    assert config.history == (96 if run.context == 96 else 0)
+    assert config.history == (run.context if run.context > 12 else 0)
+    assert config.observed_flag == (run.context > 12 and run.arm == "LSTMBbR")
     assert config.trunk == ("lstm" if run.arm == "LSTMBbR" else "transformer")
     model = config.build()
     assert (model.input_scale, model.norm_first, model.step_transform) == (
@@ -225,4 +250,4 @@ def test_the_dry_run_passes_with_every_twin_and_probe_record_and_fails_without(m
         if run.repeats:
             (TR.RESULTS / f"{run.repeats}.json").write_text("{}")
     F.dry_run(PAYLOAD)
-    assert "120 runs: configs as planned" in capsys.readouterr().out
+    assert "210 runs: configs as planned" in capsys.readouterr().out

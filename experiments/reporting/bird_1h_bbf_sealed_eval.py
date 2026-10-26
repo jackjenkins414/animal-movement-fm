@@ -1,6 +1,8 @@
 # GenAI reference: I outlined this evaluator for our repaired transformer study; that being score BbF (C = 12 and 96), BbFE and
 # LSTMBbR96 on test with the 1 h study's scoring, reuse every comparator from the 1 h and env studies' saved predictions the 
-# comparisons etc, and GenAI wrote it. I checked its behaviour to validate it. 
+# comparisons etc, and GenAI wrote it. I checked its behaviour to validate it.
+# 26-10-2026: when our extension (freeze sec 10) was appended to the drivers plan, which GenAI scoped for the original 120 runs 
+# (F.ORIGINAL), so the sealed BbF evaluation reads exactly the runs it was sealed on
 """
 Sealed evaluation of the repaired transformer study (`preregistration/birds_1h_bbf_exploratory_freeze.md`).
 """
@@ -116,7 +118,7 @@ def hardware_of(fallback: bool) -> dict[str, tuple[str, str]]:
 
 
 def planned_runs(fallback: bool) -> list:
-    return [run for run in F.PLAN if not (fallback and run in F.LSTMBBR96)]
+    return [run for run in F.ORIGINAL if not (fallback and run in F.LSTMBBR96)]
 
 
 def today() -> dt.date:
@@ -271,7 +273,7 @@ def training_exclusions(payload: dict, records: dict[str, dict], runs: list) -> 
 def env_twin_problems(records: dict[str, dict]) -> list[str]:
     """Every BbFE record's env_stats and env sha256 against its BbE twin's record in the env study."""
     problems = []
-    for run in F.PLAN:
+    for run in F.ORIGINAL:
         record = records.get(run.run_id)
         if run.env and record is not None:
             problems += [f"{run.run_id}: {p}" for p in
@@ -282,7 +284,7 @@ def env_twin_problems(records: dict[str, dict]) -> list[str]:
 def env_file_problems(records: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
     """Every bird's env parquet against the one sha256 the BbFE records hold for it, and the file on disk now."""
     seen: dict[str, set[str]] = {}
-    for run in F.PLAN:
+    for run in F.ORIGINAL:
         for stem, digest in ((records.get(run.run_id) or {}).get("env_files") or {}).items():
             seen.setdefault(stem, set()).add(digest)
     problems = [f"{bird}: no BbFE record holds its sha256" for bird in BIRDS if bird not in seen]
@@ -298,7 +300,7 @@ def env_file_problems(records: dict[str, dict]) -> tuple[dict[str, str], list[st
 def repeat_checks(records: dict[str, dict]) -> dict[str, dict]:
     """Fold 6, seed 0 runs against the repair probe run with the same config: logged losses, point by point. No verdict."""
     out = {}
-    for run in F.PLAN:
+    for run in F.ORIGINAL:
         record = records.get(run.run_id)
         if not run.repeats or record is None:
             continue
@@ -355,7 +357,7 @@ def tags_at(bird: str, label: str, horizon: int) -> list[tuple[str, int]]:
     study, arm, context = ARMS[label]
     fold = FOLD_OF[bird]
     if study == "bbf":
-        runs = [r for r in F.PLAN if r.arm == arm and r.context == context and r.fold == fold]
+        runs = [r for r in F.ORIGINAL if r.arm == arm and r.context == context and r.fold == fold]
     elif study == "env":
         runs = [r for r in env.PLAN if r.arm == arm and r.fold == fold]
     else:
@@ -811,7 +813,7 @@ def write_markdown(report: dict, path: Path) -> None:
 # Diagnostic: run records, the env and probe records and env files only; no test partition is opened
 def section7_markdown(records: dict, gap: dict, exclusions: str, twins: list[str], digests: dict,
                       file_problems: list[str], repeats: dict, fallback: dict) -> str:
-    present = [records[r.run_id] for r in F.PLAN if r.run_id in records]
+    present = [records[r.run_id] for r in F.ORIGINAL if r.run_id in records]
     devices = ", ".join(f"{d} {n}" for d, n in sorted(Counter(r.get("device") for r in present).items())) or "none"
     queues = ", ".join(f"{q} {n}" for q, n in sorted(Counter(r.get("pbs_queue") for r in present).items())) or "none"
     tf32_off = sum(not any((r.get("tf32") or {"missing": True}).values()) for r in present)

@@ -1,12 +1,15 @@
 # GenAI reference: repaired transformer study; BbF = Bb with the repaired encoder (the repair probe's V4 switches) at C = 12 and 96, BbFE = BbF + 
 # the env study's 15 ERA5 channels at C = 12, and LSTMBbR96 (LSTM-Bb at C = 96 rerun on gpuhopper), 10 folds x seeds 0-2, everything else the 1 h 
 # main study's.
+# Extension (26-10-2026, freeze sec 10): I specified BbF at C = 24, 48 and 72 appended as indices 120-209 with indices 0-119 unchanged; GenAI wrote 
+# the append, the repeats guard and the checks on it which I checked. 
 """
 Train the repaired-transformer study's runs on the 1 h rotation folds, one model per PBS subjob (exploratory).
 
 BbF is Bb with the repaired encoder (the repair probe's V4 switches: input_scale "none", norm_first, step_transform
 "signed_log1p"); BbFE adds the env study's 15 ERA5 channels at C = 12; LSTMBbR is LSTM-Bb at C = 96 rerun unchanged on
-gpuhopper. Plan: --list. Config and reference checks: --dry-run. Throughput: --calibrate.
+gpuhopper. The extension (freeze sec 10) appends BbF at C = 24, 48 and 72. Plan: --list. Config and reference checks:
+--dry-run. Throughput: --calibrate.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ CORE, HORIZONS, FOLDS, SEEDS = b1h.CORE, b1h.HORIZONS, b1h.FOLDS, b1h.SEEDS
 REGISTERED_STEPS, CALIBRATION_STEPS = b1h.REGISTERED_STEPS, b1h.CALIBRATION_STEPS
 NEURAL_QUEUE = env.NEURAL_QUEUE  # gpuhopper
 C96 = 96
+EXTENSION_CONTEXTS = (24, 48, 72)  # freeze sec 10: BbF at the 1 h ablation's other contexts
 ENV_CHANNELS = env.ENV_CHANNELS  # 15
 
 # The repaired encoder: repair probe's V4, pinned here so a change to the probe's table cannot move this study. 
@@ -105,7 +109,7 @@ class BbfRun:
     @property
     def repeats(self) -> str | None:
         """The repair probe run with exactly this config and seed (fold 6, seed 0), for the determinism check."""
-        if self.env or (self.fold, self.seed) != (TR.PROBE_FOLDS[0], TR.SEED):
+        if self.env or (self.fold, self.seed) != (TR.PROBE_FOLDS[0], TR.SEED) or self.context not in TR.CONTEXTS:
             return None
         if self.arm == "BbF":
             return TR.RepairRun("Bb", "V4", self.fold, self.seed, self.context).run_id
@@ -115,10 +119,15 @@ class BbfRun:
 
 
 def build_plan() -> list[BbfRun]:
-    """The plan. Position is the PBS array index: append, never insert or reorder. LSTMBbR96 is last."""
+    """
+    The plan. Position is the PBS array index: append, never insert or reorder. LSTMBbR96 closes the original 120;
+    the extension (BbF at C = 24, 48, 72, each C x fold x seed) follows.
+    """
     plan = []
     for arm, context in (("BbF", CORE), ("BbF", C96), ("BbFE", CORE), ("LSTMBbR", C96)):
         plan += [BbfRun(arm, k, s, context) for k in sorted(FOLDS) for s in SEEDS]
+    for context in EXTENSION_CONTEXTS:
+        plan += [BbfRun("BbF", k, s, context) for k in sorted(FOLDS) for s in SEEDS]
     return plan
 
 
@@ -128,15 +137,21 @@ BLOCKS: tuple[tuple[int, int, str, str], ...] = (
     (30, 59, NEURAL_QUEUE, "BbF, C = 96, 10 folds x 3 seeds"),
     (60, 89, NEURAL_QUEUE, "BbFE, C = 12, 10 folds x 3 seeds"),
     (90, 119, NEURAL_QUEUE, "LSTMBbR96 (LSTM-Bb, C = 96, gpuhopper rerun), 10 folds x 3 seeds"),
+    (120, 149, NEURAL_QUEUE, "extension: BbF, C = 24, 10 folds x 3 seeds"),
+    (150, 179, NEURAL_QUEUE, "extension: BbF, C = 48, 10 folds x 3 seeds"),
+    (180, 209, NEURAL_QUEUE, "extension: BbF, C = 72, 10 folds x 3 seeds"),
 )
-LSTMBBR96 = [run for run in PLAN if run.arm == "LSTMBbR"]
+ORIGINAL, EXTENSION = PLAN[:120], PLAN[120:]  # freeze secs 1-9; freeze sec 10
+LSTMBBR96 = [run for run in ORIGINAL if run.arm == "LSTMBbR"]
 if (
-    len(PLAN) != 120
+    len(PLAN) != 210
     or [b[0] for b in BLOCKS] != [0] + [b[1] + 1 for b in BLOCKS[:-1]]
     or BLOCKS[-1][1] != len(PLAN) - 1
-    or PLAN[90:] != LSTMBBR96
+    or ORIGINAL[90:] != LSTMBBR96
+    or [(r.arm, r.context) for r in EXTENSION] != [("BbF", c) for c in EXTENSION_CONTEXTS for _ in range(30)]
 ):
-    raise RuntimeError(f"the plan has {len(PLAN)} runs; 120 are planned in four contiguous blocks, LSTMBbR96 last")
+    raise RuntimeError(f"the plan has {len(PLAN)} runs; 120 are planned in four contiguous blocks, LSTMBbR96 last, "
+                       f"then the 90-run extension")
 _OTHER_IDS = {r.run_id for r in b1h.PLAN} | {r.run_id for r in env.PLAN} | {r.run_id for r in TR.PLAN}
 if len({run.run_id for run in PLAN}) != len(PLAN) or {run.run_id for run in PLAN} & _OTHER_IDS:
     raise RuntimeError("run ids must be distinct, and distinct from every 1 h, env and repair probe run id")

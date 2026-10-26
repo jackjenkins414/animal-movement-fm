@@ -246,7 +246,7 @@ def clean(tmp_path, monkeypatch):
         env.env_path(bird).write_bytes(f"era5 {bird}".encode())
     digests = {bird: _sha(env.env_path(bird)) for bird in W.BIRDS}
     history = [float(v) for v in np.linspace(20.0, 17.0, 40)]
-    for index, run in enumerate(F.PLAN):
+    for index, run in enumerate(F.ORIGINAL):
         names = sorted(b1h.fold_probabilities(run.fold, payload))
         stats = ({"channels": list(era5.ENV_CHANNELS[:14]), "mean": [float(run.fold)] * 14, "sd": [1.0] * 14}
                  if run.env else None)
@@ -425,7 +425,7 @@ def _write_saved(tmp_path, monkeypatch, bird):
     for owner, attr in ((W, "PREDICTIONS"), (E, "PREDICTIONS"), (V, "PREDICTIONS")):
         monkeypatch.setattr(owner, attr, tmp_path / f"{owner.__name__}_pred")
         getattr(owner, attr).mkdir()
-    for tag in ("P", "P_C96", *(r.run_id for r in W.own_runs(bird, F.PLAN))):
+    for tag in ("P", "P_C96", *(r.run_id for r in W.own_runs(bird, F.ORIGINAL))):
         _frame().to_parquet(W.prediction_path(bird, tag))
     for study, tag in W.reused_files(bird, False):
         _frame().to_parquet(W.prediction_path(bird, tag, study))
@@ -453,7 +453,7 @@ def test_a_reused_p_that_differs_from_this_studys_is_refused(tmp_path, monkeypat
 def test_saved_predictions_from_outside_the_fold_are_refused(tmp_path, monkeypatch):
     bird = W.BIRDS[0]
     _write_saved(tmp_path, monkeypatch, bird)
-    other = next(r for r in F.PLAN if r.fold != W.FOLD_OF[bird])
+    other = next(r for r in F.ORIGINAL if r.fold != W.FOLD_OF[bird])
     _frame().to_parquet(W.prediction_path(bird, other.run_id))
     with pytest.raises(SystemExit, match=f"outside its own fold.*{other.run_id}"):
         W.load_tables(bird, _manifest_for(bird), False)
@@ -518,11 +518,11 @@ def test_predict_bird_scores_each_arm_on_its_windows_and_checks_p_against_the_re
 
     pool = [b for b in W.BIRDS if b != bird]
     stats = {"channels": list(era5.ENV_CHANNELS[:14]), "mean": [50.0] * 14, "sd": [0.5] * 14}
-    own = W.own_runs(bird, F.PLAN)
+    own = W.own_runs(bird, F.ORIGINAL)
     records = {run.run_id: {"pool_species": pool, "env_stats": stats if run.env else None} for run in own}
     models = {run.run_id: _Net() for run in own}
     monkeypatch.setattr(W, "load_models", lambda runs, recs, device: [(r, models[r.run_id], np.ones(3)) for r in runs])
-    out = W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.PLAN)
+    out = W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.ORIGINAL)
 
     assert {Path(f).stem.split("__", 1)[1] for f in out["files"]} == {"P", "P_C96", *records}
     for run in own:
@@ -541,15 +541,15 @@ def test_predict_bird_scores_each_arm_on_its_windows_and_checks_p_against_the_re
     pd.read_parquet(W.prediction_path(bird, "P", "env")).assign(error_m=0.0).to_parquet(
         W.prediction_path(bird, "P", "env"), index=False)
     with pytest.raises(SystemExit, match="persistence"):
-        W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.PLAN)
+        W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.ORIGINAL)
 
 
 def test_predict_bird_refuses_a_model_whose_pool_held_the_bird():
     bird = W.BIRDS[0]
-    own = W.own_runs(bird, F.PLAN)
+    own = W.own_runs(bird, F.ORIGINAL)
     records = {r.run_id: {"pool_species": [bird] if r == own[4] else []} for r in own}
     with pytest.raises(SystemExit, match=f"{own[4].run_id}'s pool held {bird}"):
-        W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.PLAN)
+        W.predict_bird(bird, [], records, "cpu", overwrite=False, runs=F.ORIGINAL)
 
 
 # --------------------------------------------------------------------------- FP32 and the markdown
