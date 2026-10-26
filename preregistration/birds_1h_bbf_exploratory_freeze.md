@@ -133,3 +133,23 @@ From `bird_1h_bbf_sealed_eval.py --diagnostic`, run on the Gadi login node on 20
 ## 9. Note
 
 No run of this plan existed when this file was first written. Only `bird_1h_bbf_sealed_eval.py` scores test partitions for this study.
+
+## 10. Extension (26-10-2026)
+
+Written on 26-10-2026, after the BbF seal (22-10) and before any run of the extension. Exploratory, as the rest of this study.
+
+- **Why.** In the 1 h ablation the transformer line (Bb at C = 24-96) is the collapsed encoder, and BbF exists only at C = 12 and 96, so the history gain figure has no repaired line between them.
+- **Runs.** BbF at C = 24, 48 and 72, folds 0-9, seeds 0-2: 90 runs, plan indices 120-209. Indices 0-119 are unchanged.
+- **Everything else as above.** BbF's pinned switches (sec 5) and recipe (sec 3); the 1 h ablation's extended history construction (each run's base is the ablation's Bb run at its C); gpuhopper, full FP32, TF32 off; 20,000 updates, final checkpoint; scoring as sec 4.
+- **Comparisons.** BbF at each C against P at 1, 6 and 24 h; the paired gain over BbF at C = 12 on the same windows, all / gappy / full as in the ablation; BbF − LSTM-Bb and BbF − XGB-Bb at the same C. LSTM-Bb is the ablation's V100-trained run (predicted on H200 FP32), and the hardware difference is stated. BbF at C = 12 and 96 and every comparator are read from sealed files.
+- **Diagnostic.** Validation only: the collapse checks on the 90 runs and their Bb and LSTM-Bb twins.
+- **Dry run and calibration.** Dry run on the Gadi login node; one 1,000 update calibration at C = 72, fold 6, seed 0 (index 198).
+- **Seal.** Appending this section changes the freeze blob, so the original BbF evaluator's `--predict` is retired (BbF was sealed 22-10). The extension has its own seal and manifest (`results/birds_1h_bbf_extension_sealed/`).
+
+### Extension expectations
+
+At the 6 h horizon, the median of BbF − LSTM-Bb across the 27 common birds is within ±0.05 at each of C = 24, 48 and 72, and BbF's skill rises from C = 12 to C = 48.
+
+### Extension as trained
+
+To fill after training.
