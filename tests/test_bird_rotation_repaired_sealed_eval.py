@@ -42,12 +42,12 @@ def test_the_seal_refuses_an_unfilled_or_misheaded_section(monkeypatch, text, ma
         V.assert_sealed()
 
 
-def test_the_committed_freeze_today_is_refused_because_sec_7_is_a_placeholder(monkeypatch):
+def test_the_committed_freeze_today_passes_the_checks_on_secs_6_and_7(monkeypatch):
     text = V.FREEZE.read_text()
     monkeypatch.setattr(V, "freeze_committed", lambda: {"freeze_commit": "c", "freeze_blob": "b"})
     monkeypatch.setattr(E4, "git", _git(text))
-    with pytest.raises(SystemExit, match="sec 7 still says 'To fill'"):
-        V.assert_sealed()
+    monkeypatch.setattr(V, "MANIFEST", V.SEALED / "no_such_manifest.json")
+    assert V.assert_sealed()["sections_filled"] == [6, 7]
 
 
 def test_the_freeze_check_is_pointed_at_this_freeze_and_restored(monkeypatch):
