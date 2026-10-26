@@ -38,6 +38,7 @@ import tier4_repaired_sealed_eval as R4  # noqa: E402
 from animal_movement_fm.data.enu import SCALE_FLOOR_M  # noqa: E402
 from animal_movement_fm.data.resample import CONTEXT_LENGTH  # noqa: E402
 from animal_movement_fm.eval.fm_predictor import MovementFMPredictor, evaluate_batched  # noqa: E402
+from animal_movement_fm.models.fm import MovementFM  # noqa: E402
 
 S2, E3, E4, BE, BT, RT, T, env = RS.S2, RS.E3, RS.E4, RS.BE, RS.BT, RS.RT, D.T, D.env
 
@@ -262,6 +263,15 @@ def test_frame(bird: str) -> pd.DataFrame:
     return BE.test_frame(bird) if FOLD_OF[bird] == 0 else RS.test_frame(bird)
 
 
+def movement_fm(model) -> MovementFM:
+    """The MovementFM inside the diagnostic's forecast-only wrapper. MovementFMPredictor calls the model with `species`
+    and takes the forecast from a (forecast, reconstruction) tuple itself, as the rotation evaluator scored Zb."""
+    inner = getattr(model, "model", None)
+    if not isinstance(model, RD.Forecast) or not isinstance(inner, MovementFM):
+        raise SystemExit(f"FAIL: expected the diagnostic's Forecast around a MovementFM, got {type(model).__name__}")
+    return inner
+
+
 def predict_bird(bird: str, device, overwrite: bool, grid_index: int, payloads: dict) -> list[str]:
     """Score this bird's six new runs on its test partition, one cached file per run; the partition is read only if a
     file is missing."""
@@ -280,7 +290,7 @@ def predict_bird(bird: str, device, overwrite: bool, grid_index: int, payloads: 
         model, record = RD.load_model(entry, grid_index, payloads)
         if bird in record["pool_species"]:
             raise SystemExit(f"FAIL: {run.run_id}'s pool held {bird}")
-        predictor = MovementFMPredictor(model, device=device, sigma=SCALE_FLOOR_M)
+        predictor = MovementFMPredictor(movement_fm(model), device=device, sigma=SCALE_FLOOR_M)
         results = evaluate_batched(predictor, frame, context_length=CONTEXT_LENGTH)
         R4.write_atomic(results, out)
         print(f"  {out.name}  {len(results):,} windows  ({time.time() - started:.0f}s)", flush=True)

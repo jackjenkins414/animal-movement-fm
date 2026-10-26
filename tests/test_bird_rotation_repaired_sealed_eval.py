@@ -170,6 +170,61 @@ def test_a_run_whose_pool_held_the_bird_is_refused(tmp_path, monkeypatch):
         V.predict_bird(GULL, "cpu", False, 11, {})
 
 
+def _six_hourly_frame(n_individuals=2, n_fixes=20):
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(n_individuals):
+        lon = 4.0 + np.cumsum(rng.normal(0, 0.01, n_fixes))
+        lat = 52.0 + np.cumsum(rng.normal(0, 0.01, n_fixes))
+        stamps = pd.date_range("2020-06-01", periods=n_fixes, freq="6h")
+        rows.append(pd.DataFrame({"individual_id": f"bird{i}", "timestamp": stamps, "lon": lon, "lat": lat}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_the_predictor_scores_both_repaired_arms_through_the_diagnostics_loader(tmp_path, monkeypatch):
+    """The --predict path on real checkpoints: RD.load_model's checks, then MovementFMPredictor on the unwrapped model,
+    which passes `species` and reads ZbF6's forecast from its (forecast, reconstruction) tuple as the diagnostic did."""
+    import torch
+
+    from animal_movement_fm.eval.fm_predictor import MovementFMPredictor
+    from tests.test_bird_rotation_repaired_diagnostic import _checkpoint, _record
+
+    results, predictions = tmp_path / "results", tmp_path / "predictions"
+    results.mkdir()
+    predictions.mkdir()
+    monkeypatch.setattr(D, "RESULTS", results)
+    monkeypatch.setattr(V, "PREDICTIONS", predictions)
+    monkeypatch.setattr(V, "test_frame", lambda bird: _six_hourly_frame())
+    scored = {run.arm: run for run in V.new_runs(GULL) if run.seed == 0}
+    assert set(scored) == {"BbF6", "ZbF6"}
+    for run in V.new_runs(GULL):
+        if run not in scored.values():
+            V.prediction_path(GULL, run.run_id).write_bytes(b"x")  # cached: only the two seed 0 runs are scored
+    for run in scored.values():
+        record = _record(run, results)
+        (results / f"{run.run_id}.json").write_text(json.dumps(record))
+        torch.manual_seed(run.seed)
+        _checkpoint(results, run.run_id, record["config"], dict(D.SWITCHES))
+
+    assert len(V.predict_bird(GULL, "cpu", False, 11, RD.D.load_payloads())) == 6
+    for run in scored.values():
+        frame = pd.read_parquet(V.prediction_path(GULL, run.run_id))
+        assert len(frame) == 2 * (20 - V.CONTEXT_LENGTH)
+        assert np.isfinite(frame[["pred_lon", "pred_lat", "error_m"]].to_numpy()).all()
+
+    x = torch.randn(5, V.CONTEXT_LENGTH - 1, 12)
+    for arm, run in scored.items():
+        entry = next(e for e in RD.entries(run.fold) if e["run_id"] == run.run_id)
+        wrapped, _ = RD.load_model(entry, 11, RD.D.load_payloads())
+        model = V.movement_fm(wrapped)
+        with torch.no_grad():
+            assert isinstance(model(x), tuple) == (arm == "ZbF6")
+            forecast = wrapped(x).numpy().astype(float)
+        np.testing.assert_allclose(MovementFMPredictor(model, device="cpu")._forward(x.numpy(), None), forecast)
+    with pytest.raises(SystemExit, match="Forecast around a MovementFM"):
+        V.movement_fm(model)
+
+
 # ---------------------------------------------------------------------------------------------------- synthetic bird
 FACTORS = {"BbF6": 0.85, "ZbF6": 0.90, "Bb": 0.99, "Zb": 1.0, "LSTMBb": 0.82, "XGBBb": 0.83, "LSTMS": 0.75,
            "XGBS": 0.78}  # model error = factor x P error, so skill = 1 - factor; published seeds 3-4 are worse
