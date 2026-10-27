@@ -152,4 +152,13 @@ At the 6 h horizon, the median of BbF − LSTM-Bb across the 27 common birds is 
 
 ### Extension as trained
 
-To fill after training.
+From `bird_1h_bbf_sealed_eval.py --extension --diagnostic` and `bird_1h_bbf_extension_diagnostic.py --report`, run on Gadi on 27–28-10-2026. No test partition was opened.
+
+- **Runs.** 90 of 90 recorded and clean (30 at each C): 20,000 updates applied, none withheld, no non-finite steps, TF32 off, all on H200 on gpuhopper; switches on every run; training exclusions pass.
+- **Diagnostic** (`results/birds_1h_bbf_extension_diagnostic/`), training and validation windows only; medians over 10 folds × 3 seeds, at C = 24 / 48 / 72:
+  - BbF is not collapsed: training loss / zero 0.933 / 0.918 / 0.92 (no run at or above 0.99), last-token swap / |out| at 6 h 0.86 / 0.73 / 0.82, |pred| / |actual| on held-out birds 0.49 / 0.47 / 0.43.
+  - Its Bb twins are collapsed: loss / zero 1.00 at every C (all 30 runs at or above 0.99), swap / |out| at most 0.0006, |pred| / |actual| at most 0.04.
+  - LSTM-Bb twins: loss / zero 0.98, swap / |out| 1.12–1.22, |pred| / |actual| about 0.6.
+  - Bug checks pass (masked-token noise moves BbF and Bb by 0; eval against train mode differs by at most 0.0005).
+- **Fold 9's first diagnostic job stalled on an unresponsive node** and was rerun on its own (exit 0); no other change.
+- **Deferred or missing.** None. Extension expectations unchanged.
