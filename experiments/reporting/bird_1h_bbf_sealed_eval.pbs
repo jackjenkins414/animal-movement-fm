@@ -19,6 +19,12 @@
 #
 # Prediction mode requires preregistration/birds_1h_bbf_exploratory_freeze.md committed, clean, with sec 6 and 7 filled,
 # and the 1 h and env sealed reports and predictions on disk.
+#
+# The extension (freeze sec 10, BbF at C = 24, 48, 72; to results/birds_1h_bbf_extension_sealed/): add EXTENSION=1.
+# Its prediction also needs sec 10's two subsections filled and the 1 h and BbF sealed reports and predictions on disk.
+#   qsub -v EXTENSION=1,PREDICT_ONLY=1 -l walltime=03:00:00,mem=48GB experiments/reporting/bird_1h_bbf_sealed_eval.pbs
+#   qsub -q normal -l ngpus=0,ncpus=8,mem=48GB,walltime=08:00:00 -v EXTENSION=1,REPORT_ONLY=1 \
+#       experiments/reporting/bird_1h_bbf_sealed_eval.pbs   (report only, single-core bootstrap)
 
 #PBS -P um09
 #PBS -q gpuhopper
@@ -53,12 +59,24 @@ elif [ "${REPORT_ONLY:-0}" = "1" ]; then
 elif [ "${REPORT_ONLY:-0}" != "0" ]; then
   echo "FAIL: REPORT_ONLY must be 1 when enabled; got '$REPORT_ONLY'" >&2
   exit 1
+elif [ "${PREDICT_ONLY:-0}" = "1" ]; then
+  phase_args=(--predict)
+elif [ "${PREDICT_ONLY:-0}" != "0" ]; then
+  echo "FAIL: PREDICT_ONLY must be 1 when enabled; got '$PREDICT_ONLY'" >&2
+  exit 1
 fi
 
 if [ "${OVERWRITE:-0}" = "1" ]; then
   phase_args+=(--overwrite)
 elif [ "${OVERWRITE:-0}" != "0" ]; then
   echo "FAIL: OVERWRITE must be 1 when enabled; got '$OVERWRITE'" >&2
+  exit 1
+fi
+
+if [ "${EXTENSION:-0}" = "1" ]; then
+  phase_args+=(--extension)
+elif [ "${EXTENSION:-0}" != "0" ]; then
+  echo "FAIL: EXTENSION must be 1 when enabled; got '$EXTENSION'" >&2
   exit 1
 fi
 

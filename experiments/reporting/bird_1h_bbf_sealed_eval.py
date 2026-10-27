@@ -3,8 +3,11 @@
 # comparisons etc, and GenAI wrote it. I checked its behaviour to validate it.
 # 26-10-2026: when our extension (freeze sec 10) was appended to the drivers plan, which GenAI scoped for the original 120 runs 
 # (F.ORIGINAL), so the sealed BbF evaluation reads exactly the runs it was sealed on
+# Also did an extension mode; its own seal on sec 10s two subsections, manifest and folder, predict only the 90 extension runs; 
+# read BbF at C = 12 / 96 etc 
 """
-Sealed evaluation of the repaired transformer study (`preregistration/birds_1h_bbf_exploratory_freeze.md`).
+Sealed evaluation of the repaired transformer study (`preregistration/birds_1h_bbf_exploratory_freeze.md`); with
+--extension, of its sec 10 extension (BbF at C = 24, 48 and 72) into results/birds_1h_bbf_extension_sealed/.
 """
 
 from __future__ import annotations
@@ -153,10 +156,10 @@ def assert_sealed() -> dict:
         return RS.assert_sealed()
 
 
-def source_reports() -> dict[str, dict]:
-    """The 1 h and env sealed reports the reused predictions come from; refused if missing or unattested."""
+def source_reports(pairs: tuple[tuple[str, Path], ...] | None = None) -> dict[str, dict]:
+    """The 1 h and env sealed reports the reused predictions come from (or `pairs`); refused if missing or unattested."""
     out = {}
-    for study, path in (("birds_1h", E.REPORT_JSON), ("birds_1h_env", V.REPORT_JSON)):
+    for study, path in pairs or (("birds_1h", E.REPORT_JSON), ("birds_1h_env", V.REPORT_JSON)):
         if not path.exists():
             raise SystemExit(f"FAIL: {path} does not exist; the reused predictions need their sealed report")
         report = json.loads(path.read_text())
@@ -888,6 +891,605 @@ def diagnostic(fallback: bool = False) -> None:
         raise SystemExit("FAIL: the diagnostic found a problem; sec 7 must not be filled until it passes")
 
 
+# Extension; BbF at C = 24, 48 and 72, with its own seal, manifest and folder. Only the 90 extension runs are predicted; BbF at C = 12 and 96 and 
+# every comparator are read from sealed prediction files.
+EXT_SEALED = REPO / "results" / "birds_1h_bbf_extension_sealed"
+EXT_PREDICTIONS = EXT_SEALED / "predictions"
+EXT_REPORT_JSON = EXT_SEALED / "birds_1h_bbf_extension_results.json"
+EXT_REPORT_MD = EXT_SEALED / "birds_1h_bbf_extension_results.md"
+EXT_MANIFEST = EXT_SEALED / "birds_1h_bbf_extension_sealed_manifest.json"
+EXT_SECTION = 10
+EXT_SUBSECTIONS = ("Extension expectations", "Extension as trained")
+EXT_CONTEXTS = F.EXTENSION_CONTEXTS  # 24, 48, 72
+LADDER = (*EXT_CONTEXTS, C96)  # every C > 12 of the ablation-shaped block
+EXT_ABLATION_ARMS = ("BbF", *E.ABLATION_ARMS)  # BbF, then the 1 h ablation's Bb, LSTM-Bb and XGB-Bb
+LSTM_COMPARATOR = ("the 1 h ablation's LSTM-Bb, trained on gpuvolta (V100) and predicted on gpuhopper (H200, FP32); "
+                   "BbF is trained and predicted on gpuhopper (H200, FP32). Freeze sec 10: the hardware differs")
+
+
+def ablation_label(arm: str, context: int) -> str:
+    return arm if context == CORE else f"{arm}_C{context}"
+
+
+# label -> (study, arm, C). "ext" runs are predicted here; "bbf" (the sealed BbF study) and "1h" are read.
+EXT_ARMS: dict[str, tuple[str, str, int]] = {
+    "BbF": ("bbf", "BbF", CORE),
+    **{f"BbF_C{c}": ("ext", "BbF", c) for c in EXT_CONTEXTS},
+    "BbF_C96": ("bbf", "BbF", C96),
+    **{ablation_label(arm, c): ("1h", arm, c) for arm in E.ABLATION_ARMS for c in (CORE, *LADDER)},
+}
+# freeze sec 10, at each extension C: BbF against P, LSTM-Bb and XGB-Bb (skill difference, metre and skill intervals)
+EXT_COMPARISONS: tuple[tuple[str, str], ...] = tuple(
+    pair for c in EXT_CONTEXTS for pair in ((f"BbF_C{c}", "P"), (f"BbF_C{c}", f"LSTMBb_C{c}"),
+                                            (f"BbF_C{c}", f"XGBBb_C{c}")))
+EXT_TIED_BACK = tuple(label for label, (study, _, _) in EXT_ARMS.items() if study != "ext")
+
+if LADDER != tuple(E.ABLATION_CONTEXTS) or any(ARMS[k] != EXT_ARMS[k] for k in ("BbF", "BbF_C96")):
+    raise RuntimeError("the extension's ladder is not the 1 h ablation's, or its BbF labels are not the sealed study's")
+if any(ablation_label(arm, c) not in EXT_ARMS for arm in EXT_ABLATION_ARMS for c in (CORE, *LADDER)):
+    raise RuntimeError("every arm of the ablation-shaped block needs a label at C = 12 and at every C of the ladder")
+
+
+@contextlib.contextmanager
+def ext_bound():
+    """As bound(), with the extension's manifest, so the extension never reads or writes the sealed BbF manifest."""
+    saved = RS.FREEZE, RS.MANIFEST, RS.FLOOR, E3.FLOOR
+    RS.FREEZE, RS.MANIFEST, RS.FLOOR, E3.FLOOR = FREEZE, EXT_MANIFEST, FLOOR, FLOOR
+    try:
+        yield
+    finally:
+        RS.FREEZE, RS.MANIFEST, RS.FLOOR, E3.FLOOR = saved
+
+
+# Extension seal
+def subsection_body(section: str, heading: str) -> str:
+    """The body under `### heading` in a section's text, up to the next ### or ## heading."""
+    lines = section.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"### {heading}"), None)
+    if start is None:
+        raise SystemExit(f"FAIL: {FREEZE.name} sec {EXT_SECTION} has no '### {heading}'")
+    body = []
+    for line in lines[start + 1:]:
+        if line.startswith(("### ", "## ")):
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
+def ext_section_problems(text: str) -> list[str]:
+    """Sec 10 and both of its subsections in `text`, each filled and free of placeholder wording; empty if so."""
+    with ext_bound():
+        section = RS.section_body(text, EXT_SECTION)
+    problems = []
+    for heading in EXT_SUBSECTIONS:
+        try:
+            body = subsection_body(section, heading)
+        except SystemExit as reason:
+            problems.append(str(reason).removeprefix("FAIL: "))
+            continue
+        found = RS.PLACEHOLDER.search(body)
+        if not body:
+            problems.append(f"sec {EXT_SECTION} '{heading}' is empty in the committed version")
+        elif found:
+            problems.append(f"sec {EXT_SECTION} '{heading}' still says {found.group(0)!r} in the committed version")
+    return problems
+
+
+def ext_assert_sealed() -> dict:
+    """
+    The freeze committed and clean, secs 6 and 7 filled, both sec 10 subsections filled in the committed version, and the
+    blob any extension manifest was attested at. Run by --extension --predict only.
+    """
+    with ext_bound():
+        attestation = RS.assert_sealed()
+        text = RS.committed_freeze()
+    problems = ext_section_problems(text)
+    if problems:
+        raise SystemExit("FAIL: " + "; ".join(problems))
+    attestation["sections_filled"] = [6, 7, *(f"{EXT_SECTION}: {heading}" for heading in EXT_SUBSECTIONS)]
+    return attestation
+
+
+def ext_source_reports() -> dict[str, dict]:
+    """The 1 h and BbF sealed reports the read predictions come from; refused if missing or unattested."""
+    return source_reports((("birds_1h", E.REPORT_JSON), ("birds_1h_bbf", REPORT_JSON)))
+
+
+def ext_checked_state(records: dict[str, dict], payload: dict) -> tuple[dict, dict]:
+    """(completeness, exclusions) of the 90 extension runs, refusing on any problem."""
+    gap = completeness(records, F.EXTENSION)
+    if gap["problems"]:
+        raise SystemExit("FAIL: extension runs are missing or unclean\n  " + "\n  ".join(gap["problems"]))
+    return gap, training_exclusions(payload, records, F.EXTENSION)
+
+
+# Extension files
+def ext_path(bird: str, tag: str, study: str = "ext") -> Path:
+    return {"ext": EXT_PREDICTIONS, "bbf": PREDICTIONS, "1h": E.PREDICTIONS}[study] / f"{bird}__{tag}.parquet"
+
+
+def ext_own_runs(bird: str) -> list:
+    return [run for run in F.EXTENSION if run.fold == FOLD_OF[bird]]
+
+
+def ext_tags_at(bird: str, label: str, horizon: int) -> list[tuple[str, int]]:
+    """(run id, seed) of one bird's own-fold runs for an extension label at h (XGBoost: its run at h)."""
+    study, arm, context = EXT_ARMS[label]
+    fold = FOLD_OF[bird]
+    if study in ("ext", "bbf"):
+        runs = [r for r in (F.EXTENSION if study == "ext" else F.ORIGINAL)
+                if r.arm == arm and r.context == context and r.fold == fold]
+    else:
+        runs = [r for r in b1h.PLAN if r.arm == arm and r.context == context and not r.species and r.fold == fold
+                and (not r.xgb or r.horizon == horizon)]
+    return [(run.run_id, run.seed) for run in runs]
+
+
+def ext_read_files(bird: str) -> list[tuple[str, str]]:
+    """(study, tag) of every sealed prediction the extension reads for one bird: P at each C and every read label."""
+    out = [("1h", "P"), *(("1h", E.persistence_tag(c)) for c in LADDER), ("bbf", "P"), ("bbf", E.persistence_tag(C96))]
+    for label, (study, _, _) in EXT_ARMS.items():
+        if study != "ext":
+            out += sorted({(study, tag) for h in HORIZONS for tag, _ in ext_tags_at(bird, label, h)})
+    return out
+
+
+def ext_missing_reads() -> list[str]:
+    return [str(ext_path(bird, tag, study)) for bird in BIRDS for study, tag in ext_read_files(bird)
+            if not ext_path(bird, tag, study).exists()]
+
+
+def assert_same_share(reference: pd.DataFrame, other: pd.DataFrame, label: str) -> None:
+    """The strata come from history_share, so a P at C read from another study must carry the same shares."""
+    if not np.array_equal(reference["history_share"].to_numpy(float), other["history_share"].to_numpy(float),
+                          equal_nan=True):
+        raise SystemExit(f"FAIL: {label}: history_share differs from the sealed 1 h P at that C")
+
+
+# Extension prediction
+def ext_predict_bird(bird: str, dropped, records: dict, device, overwrite: bool) -> dict:
+    """P at each extension C (checked against the sealed 1 h P and P_C), then the bird's own-fold BbF runs at that C."""
+    own = ext_own_runs(bird)
+    for run in own:
+        if bird in records[run.run_id]["pool_species"]:
+            raise SystemExit(f"FAIL: {run.run_id}'s pool held {bird}")
+    ids = E.scored_ids(bird, dropped)
+    reference = pd.read_parquet(ext_path(bird, "P", "1h"))
+    written: list[str] = []
+    print(f"\n{bird}: {len(own)} extension runs", flush=True)
+    for context in EXT_CONTEXTS:
+        started = time.time()
+        tag = E.persistence_tag(context)
+        windows = E.test_windows(bird, ids, context)
+        share = E.history_share(windows, context)
+        persistence = E.frame_table(windows, None, context, share, persistence=True)
+        E.assert_same_persistence(reference, persistence, f"{bird} C = {context}")
+        sealed = pd.read_parquet(ext_path(bird, tag, "1h"))
+        E.assert_same_persistence(sealed, persistence, f"{bird}: 1h {tag}")
+        assert_same_share(sealed, persistence, f"{bird} {tag}")
+        out = ext_path(bird, tag)
+        if overwrite or not out.exists():
+            persistence.to_parquet(out, index=False)
+        written.append(out.name)
+        group = [run for run in own if run.context == context]
+        todo = [run for run in group if overwrite or not ext_path(bird, run.run_id).exists()]
+        written += [ext_path(bird, run.run_id).name for run in group if run not in todo]
+        if todo:
+            predicted = E.score_context(windows, load_models(todo, records, device), [], device)
+            for run in todo:
+                path = ext_path(bird, run.run_id)
+                E.frame_table(windows, predicted[run.run_id], context, share).to_parquet(path, index=False)
+                written.append(path.name)
+        print(f"  C = {context}: {len(todo)} runs scored, {len(group) - len(todo)} existed "
+              f"({time.time() - started:.0f}s)", flush=True)
+    return {"files": written}
+
+
+def ext_run_predictions(device, overwrite: bool = False, tf32: dict | None = None) -> dict:
+    attestation = ext_assert_sealed()  # nothing before this line touches a test partition
+    ext_source_reports()
+    payload = b1h.load_registered()
+    records = read_records()
+    gap, exclusions = ext_checked_state(records, payload)
+    missing = ext_missing_reads()
+    if missing:
+        raise SystemExit(f"FAIL: {len(missing)} sealed prediction files are missing\n  " + "\n  ".join(missing[:20]))
+    drops, _, eligible = E.scoring_state(raise_on_mismatch=True)
+    EXT_PREDICTIONS.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(EXT_MANIFEST.read_text()) if EXT_MANIFEST.exists() else {}
+    manifest |= {"attestation": attestation, "scoring_rules": drops, "eligibility": eligible, "completeness": gap,
+                 "training_exclusions": exclusions, "tf32": tf32 if tf32 is not None else env.tf32_flags(),
+                 "species": {}, "read": {}}
+    for bird in BIRDS:
+        manifest["species"][bird] = ext_predict_bird(bird, drops[bird]["dropped"], records, device, overwrite)
+        manifest["read"][bird] = {f"{study}:{tag}": sha256(ext_path(bird, tag, study))
+                                  for study, tag in ext_read_files(bird)}
+    EXT_MANIFEST.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+    return manifest
+
+
+# Extension frames and statistic
+def ext_load_tables(bird: str, manifest: dict) -> dict[str, pd.DataFrame]:
+    """
+    The extension's predictions for the bird (anything outside its own fold refused) and the sealed files it reads, each
+    against the sha256 recorded at --predict. Every P equals the 1 h P; each P at C equals the 1 h P at that C, shares
+    included. "P" and "P_C{C}" are the 1 h files.
+    """
+    tables = {path.stem.split("__", 1)[1]: pd.read_parquet(path)
+              for path in sorted(EXT_PREDICTIONS.glob(f"{bird}__*.parquet"))}
+    allowed = {run.run_id for run in ext_own_runs(bird)} | {E.persistence_tag(c) for c in EXT_CONTEXTS}
+    strays = sorted(set(tables) - allowed)
+    if strays:
+        raise SystemExit(f"FAIL: {bird} holds extension predictions from models outside its own fold: {strays}")
+    own_p = {}
+    for context in EXT_CONTEXTS:
+        tag = E.persistence_tag(context)
+        if tag not in tables:
+            raise SystemExit(f"FAIL: {bird} has no extension {tag}; run --extension --predict")
+        own_p[tag] = tables.pop(tag)
+    recorded = (manifest.get("read") or {}).get(bird) or {}
+    for study, tag in ext_read_files(bird):
+        path, key = ext_path(bird, tag, study), f"{study}:{tag}"
+        if not path.exists() or recorded.get(key) != sha256(path):
+            raise SystemExit(f"FAIL: {path} is missing or differs from the sha256 recorded at --extension --predict")
+        frame = pd.read_parquet(path)
+        if tag.startswith("P") and key != "1h:P":  # ext_read_files lists the 1 h P first
+            E.assert_same_persistence(tables["P"], frame, f"{bird}: {key}")
+        if study == "1h" or not tag.startswith("P"):
+            tables[tag] = frame
+    for tag, frame in own_p.items():
+        E.assert_same_persistence(tables[tag], frame, f"{bird}: extension {tag}")
+        assert_same_share(tables[tag], frame, f"{bird}: extension {tag}")
+    return tables
+
+
+def ext_ablation_cell(bird: str, horizon: int, tables: dict, frames: dict, persistence: pd.DataFrame,
+                      keep: np.ndarray, boundary: float) -> dict:
+    """
+    The 1 h ablation_cell for BbF beside the ablation's arms: per C > 12 and stratum, skill against P at C and at C = 12
+    on the same windows (median of the seeds' travel p90), and the difference. Strata from the share observed at C.
+    """
+    out: dict = {}
+    for context in LADDER:
+        at_c = E.at(tables[E.persistence_tag(context)], horizon)
+        E.assert_same_persistence(persistence, at_c, f"{bird} {horizon} h C = {context}")
+        share = at_c["history_share"].to_numpy(float)
+        masks = {"all": keep, "gappy": keep & (share < E.FULL_SHARE), "full": keep & (share >= E.FULL_SHARE)}
+        for stratum, mask in masks.items():
+            reference, n_individuals, n_travel = E.travel_p90(persistence, persistence, mask, boundary)
+            cell = {"n_individuals": n_individuals, "n_travel_windows": n_travel, "p_p90_m": reference}
+            for arm in EXT_ABLATION_ARMS:
+                skills = {}
+                for key, c in (("C", context), ("C12", CORE)):
+                    values = [E.travel_p90(frames[tag], persistence, mask, boundary)[0]
+                              for tag, _ in ext_tags_at(bird, ablation_label(arm, c), horizon)]
+                    skills[key] = E3.skill(float(np.median(values)) if values else float("nan"), reference)
+                cell[arm] = {"skill": skills["C"], "skill_C12": skills["C12"], "difference": skills["C"] - skills["C12"]}
+            out.setdefault(str(context), {})[stratum] = cell
+    return out
+
+
+def ext_cell(bird: str, horizon: int, tables: dict, eligible: dict) -> dict:
+    """One bird at one horizon: each label's skill, the sec 10 comparisons, and the ablation-shaped block."""
+    counts = eligible[str(horizon)]
+    boundary = b1h.BOUNDARY_M[(bird, horizon)]
+    entry = {"boundary_m": boundary, **counts}
+    if not counts["scored"]:
+        return entry
+    persistence = E.at(tables["P"], horizon)
+    keep = S2.eligible_mask(persistence, FLOOR)
+    entry["share_in_travel"] = float(S2.stratum_masks(persistence, boundary)["travel"][keep].mean())
+    frames, parsed, expected = {"P": persistence}, {}, {}
+    for label in EXT_ARMS:
+        pairs = ext_tags_at(bird, label, horizon)
+        expected[label] = {seed for _, seed in pairs}
+        for tag, seed in pairs:
+            if tag not in tables:
+                raise SystemExit(f"FAIL: {bird} has no predictions for {tag}")
+            frames[tag] = E.at(tables[tag], horizon)
+            E.assert_aligned(frames[tag], persistence, f"{bird} {horizon} h {tag}")
+            parsed[tag] = {"arm": label, "seed": seed}
+    with ext_bound():
+        E4.assert_no_collisions(frames, parsed, parse=E.parse_tag)
+        summaries = E3.summarise_all(frames, persistence, boundary, parsed, parse=E.parse_tag)
+        problems = [arm for arm in ("P", *EXT_ARMS) if arm not in summaries]
+        for label in EXT_ARMS:
+            seeds = {key for key in summaries.get(label, {}).get("by_seed", {}) if key >= 0}
+            if label in summaries and seeds != expected[label]:
+                problems.append(f"{label} has seeds {sorted(seeds)}, expected {sorted(expected[label])}")
+        if problems:
+            raise SystemExit(f"FAIL: {bird} {horizon} h: " + "; ".join(problems))
+        arms = RS.arm_blocks(summaries)
+        resampler = RS.Resampler(persistence, boundary)
+        entry["arms"] = arms
+        entry["readings"] = {
+            "against_p": {label: E3.travel_skill(arms, label) for label in EXT_ARMS},
+            "comparisons": {name(pair): RS.compare(*pair, arms, frames, persistence, boundary, resampler)
+                            for pair in EXT_COMPARISONS},
+        }
+    entry["ablation"] = ext_ablation_cell(bird, horizon, tables, frames, persistence, keep, boundary)
+    return entry
+
+
+def ext_across_birds(report: dict) -> dict:
+    """Per horizon: each label's median skill and each comparison's summary, over the four sets of the BbF report."""
+    common = [bird for bird, entry in report["species"].items()
+              if all(entry["horizons"][str(h)]["scored"] for h in HORIZONS)]
+    out = {"common_set": common, "selection_fold": SELECTION_FOLD, "horizons": {}}
+    for horizon in HORIZONS:
+        scored = [bird for bird, entry in report["species"].items() if entry["horizons"][str(horizon)]["scored"]]
+        sets = {"scored": scored, "common": common,
+                "scored_without_fold6": [b for b in scored if FOLD_OF[b] != SELECTION_FOLD],
+                "common_without_fold6": [b for b in common if FOLD_OF[b] != SELECTION_FOLD]}
+        block: dict = {"scored": scored, "skill": {}, "comparisons": {}}
+        for set_label, birds in sets.items():
+            cells = [report["species"][bird]["horizons"][str(horizon)] for bird in birds]
+            for label in EXT_ARMS:
+                block["skill"].setdefault(label, {})[set_label] = V._median(
+                    c["readings"]["against_p"][label] for c in cells)
+            for pair in EXT_COMPARISONS:
+                block["comparisons"].setdefault(name(pair), {})[set_label] = V._effect_summary(
+                    cells, "comparisons", name(pair), ("skill_bootstrap", "skill_difference"))
+        out["horizons"][str(horizon)] = block
+    return out
+
+
+def ext_ablation_summary(report: dict, common: list[str]) -> dict:
+    """The 1 h ablation_summary's shape: arm -> h -> C -> stratum -> scored / common -> median skill and difference."""
+    out: dict = {}
+    for horizon in HORIZONS:
+        scored = [bird for bird, entry in report["species"].items() if entry["horizons"][str(horizon)]["scored"]]
+        for set_label, birds in (("scored", scored), ("common", common)):
+            for context in LADDER:
+                for stratum in E.STRATA:
+                    cells = [report["species"][b]["horizons"][str(horizon)]["ablation"][str(context)][stratum]
+                             for b in birds]
+                    for arm in EXT_ABLATION_ARMS:
+                        node = out.setdefault(arm, {}).setdefault(str(horizon), {}).setdefault(str(context), {})
+                        node.setdefault(stratum, {})[set_label] = {
+                            "skill": E._median(c[arm]["skill"] for c in cells),
+                            "difference": E._median(c[arm]["difference"] for c in cells),
+                        }
+    return out
+
+
+def _spread(values) -> dict:
+    values = np.asarray([v for v in values if v is not None], dtype=float)
+    finite = values[np.isfinite(values)]
+    return {"n": int(finite.size), "max_abs_diff": float(np.abs(finite).max()) if finite.size else None,
+            "median_diff": float(np.median(finite)) if finite.size else None}
+
+
+def ext_tie_back(report: dict, sources: dict[str, dict]) -> dict:
+    """
+    Every read label's skill here minus its sealed report's: BbF at C = 12 and 96 against the BbF report, the 1 h arms
+    at C = 12 against its main study and at C > 12 against its ablation's "all" stratum. The ablation-shaped block's
+    1 h arms are compared cell by cell (every C, stratum and value) with the 1 h report's, and BbF's C = 12 and 96
+    values there with the BbF report. Descriptive: no pass/fail.
+    """
+    out: dict = {"sources": {"birds_1h": str(E.REPORT_JSON.relative_to(REPO)),
+                             "birds_1h_bbf": str(REPORT_JSON.relative_to(REPO))},
+                 "attestations": {study: r.get("attestation") for study, r in sources.items()},
+                 "cells": {}, "arms": {}, "ablation": {}, "scored_differs": []}
+    ablation_diffs: dict[str, list] = {}
+    for bird, entry in report["species"].items():
+        for horizon, cell in entry["horizons"].items():
+            theirs = {study: r["species"][bird]["horizons"][horizon] for study, r in sources.items()}
+            for study, other in theirs.items():
+                if bool(cell["scored"]) != bool(other["scored"]):
+                    out["scored_differs"].append(f"{bird} {horizon} h ({study})")
+            if not (cell["scored"] and all(other["scored"] for other in theirs.values())):
+                continue
+            one_h, bbf = theirs["birds_1h"], theirs["birds_1h_bbf"]["readings"]["against_p"]
+            diffs = {}
+            for label in EXT_TIED_BACK:
+                study, arm, context = EXT_ARMS[label]
+                if study == "bbf":
+                    reference = bbf[label]
+                elif context == CORE:
+                    reference = E3.travel_skill(one_h["arms"], arm)
+                else:
+                    reference = one_h["ablation"][str(context)]["all"][arm]["skill"]
+                diffs[label] = cell["readings"]["against_p"][label] - reference
+            out["cells"].setdefault(bird, {})[horizon] = diffs
+            for context in LADDER:
+                for stratum in E.STRATA:
+                    ours, other = cell["ablation"][str(context)][stratum], one_h["ablation"][str(context)][stratum]
+                    ablation_diffs.setdefault("P", []).append(ours["p_p90_m"] - other["p_p90_m"])
+                    for arm in E.ABLATION_ARMS:
+                        ablation_diffs.setdefault(arm, []).extend(ours[arm][k] - other[arm][k]
+                                                                  for k in ("skill", "skill_C12", "difference"))
+            ablation_diffs.setdefault("BbF", []).extend((
+                cell["ablation"][str(C96)]["all"]["BbF"]["skill"] - bbf["BbF_C96"],
+                cell["ablation"][str(EXT_CONTEXTS[0])]["all"]["BbF"]["skill_C12"] - bbf["BbF"]))
+    for label in EXT_TIED_BACK:
+        out["arms"][label] = _spread(c[label] for per_bird in out["cells"].values() for c in per_bird.values())
+    out["ablation"] = {arm: _spread(values) for arm, values in ablation_diffs.items()}
+    return out
+
+
+def ext_build_report(tf32: dict | None = None) -> dict:
+    sources = ext_source_reports()
+    if not EXT_MANIFEST.exists():
+        raise SystemExit(f"FAIL: {EXT_MANIFEST} does not exist; run --extension --predict first")
+    manifest = json.loads(EXT_MANIFEST.read_text())
+    b1h.check_boundaries()
+    gap = completeness(read_records(), F.EXTENSION)
+    if not gap["complete"]:
+        raise SystemExit("FAIL: extension runs are missing or unclean\n  " + "\n  ".join(gap["problems"]))
+    report: dict = {
+        "study": "birds_1h_bbf_extension",
+        "exploratory": True,
+        "registered_by": f"preregistration/{FREEZE.name} sec {EXT_SECTION}",
+        "attestation": manifest.get("attestation"),
+        "bbf": "Bb with the repaired encoder (the repair probe's V4 switches)",
+        "switches": F.SWITCHES,
+        "contexts": list(EXT_CONTEXTS),
+        "ladder": [CORE, *LADDER],
+        "evaluation_floor": FLOOR,
+        "min_scored_individuals": MIN_SCORED,
+        "seed_aggregation": "median_across_training_seeds",
+        "noise_scale": E3.NOISE_SCALE,
+        "lstm_comparator": LSTM_COMPARATOR,
+        "tf32": {"predict": manifest.get("tf32"), "report": tf32 if tf32 is not None else env.tf32_flags()},
+        "arms": {label: {"study": s, "arm": a, "context": c} for label, (s, a, c) in EXT_ARMS.items()},
+        "comparisons": [name(pair) for pair in EXT_COMPARISONS],
+        "completeness": gap,
+        "scoring_rules": manifest["scoring_rules"],
+        "species": {},
+    }
+    compared = 0
+    for bird in BIRDS:
+        tables = ext_load_tables(bird, manifest)
+        compared += len(ext_read_files(bird))
+        entry = {"fold": FOLD_OF[bird], "dropped": manifest["scoring_rules"][bird]["dropped"], "horizons": {}}
+        for horizon in HORIZONS:
+            entry["horizons"][str(horizon)] = ext_cell(bird, horizon, tables, manifest["eligibility"][bird])
+        report["species"][bird] = entry
+    report["persistence_identical_across_C"] = {"status": "PASS", "files_checked": compared}
+    report["across_birds"] = ext_across_birds(report)
+    report["ablation"] = ext_ablation_summary(report, report["across_birds"]["common_set"])
+    report["tie_back"] = ext_tie_back(report, sources)
+    return report
+
+
+# Extension report
+EXT_SHOWN = ("BbF", *(f"BbF_C{c}" for c in EXT_CONTEXTS), "BbF_C96", *(f"LSTMBb_C{c}" for c in EXT_CONTEXTS),
+             *(f"XGBBb_C{c}" for c in EXT_CONTEXTS))
+
+
+def ext_write_markdown(report: dict, path: Path) -> None:
+    lines = ["# Repaired transformer (BbF) at C = 24, 48 and 72: sealed evaluation of the extension (exploratory)", ""]
+    attestation = report.get("attestation") or {}
+    if attestation.get("freeze_commit"):
+        lines += [f"`{report['registered_by']}`, committed at `{attestation['freeze_commit'][:12]}` "
+                  f"(blob `{attestation['freeze_blob'][:12]}`).", ""]
+    gap = report["completeness"]
+    lines += [f"BbF is {report['bbf']}: {report['switches']}. Extension runs scored: {gap['n_clean']} of "
+              f"{gap['n_planned']} clean. BbF at C = 12 and 96 and every comparator are read from sealed prediction "
+              f"files (sha256 recorded at prediction). Travel p90 skill against P on the 1 h main eval's test_scored "
+              f"windows, at the {report['evaluation_floor']}-window floor, a bird scored at h with ≥ "
+              f"{report['min_scored_individuals']} test_scored individuals there; median of seeds; paired bootstrap "
+              f"2,000 at seed 42. Every C is scored on the same windows. TF32 at prediction: {report['tf32']['predict']}.",
+              "", f"LSTM comparator: {report['lstm_comparator']}.", ""]
+
+    lines += ["## Per bird and horizon: skill against P", "",
+              "| fold | bird | h | scored (at floor / with windows) | " + " | ".join(EXT_SHOWN) + " |",
+              "|---:|---|---:|---|" + "---:|" * len(EXT_SHOWN)]
+    for bird, entry in report["species"].items():
+        for horizon, cell in entry["horizons"].items():
+            n = f"{cell['at_floor']} / {cell['individuals']}"
+            if not cell["scored"]:
+                lines.append(f"| {entry['fold']} | {E.short(bird)} | {horizon} | unscored, {n} |" + " — |" * len(EXT_SHOWN))
+                continue
+            lines.append(f"| {entry['fold']} | {E.short(bird)} | {horizon} | {n} | "
+                         + " | ".join(_s(cell["readings"]["against_p"][label]) for label in EXT_SHOWN) + " |")
+
+    columns = report["comparisons"]
+    lines += ["", "## Per bird and horizon: comparisons (skill difference, 95% interval)", "",
+              "| fold | bird | h | " + " | ".join(columns) + " |", "|---:|---|---:|" + "---|" * len(columns)]
+    for bird, entry in report["species"].items():
+        for horizon, cell in entry["horizons"].items():
+            if cell["scored"]:
+                parts = [_with_interval(cell["readings"]["comparisons"][k], ("skill_bootstrap", "skill_difference"))
+                         for k in columns]
+                lines.append(f"| {entry['fold']} | {E.short(bird)} | {horizon} | " + " | ".join(parts) + " |")
+
+    across = report["across_birds"]
+    lines += ["", f"## Across birds: skill against P (median (n); common set = scored at all three horizons, "
+                  f"{len(across['common_set'])} birds; without fold {across['selection_fold']}, where the repaired "
+                  "encoder was chosen)", "",
+              "| h | arm | scored | common | scored without fold 6 | common without fold 6 |",
+              "|---:|---|---:|---:|---:|---:|"]
+    for horizon, block in across["horizons"].items():
+        for label in EXT_SHOWN:
+            lines.append(f"| {horizon} | {label} | "
+                         + " | ".join(E._median_cell(block["skill"][label][s]) for s in SETS) + " |")
+    lines += ["", "## Across birds: comparisons (median (n); above +0.05 / within / below −0.05 / not scored; "
+                  "intervals excluding zero)", "",
+              "| h | reading | scored | common | median without fold 6, scored / common |", "|---:|---|---|---|---|"]
+    for horizon, block in across["horizons"].items():
+        for key, entry in block["comparisons"].items():
+            cells = [f"{E._median_cell(entry[s]['difference'])}; "
+                     + " / ".join(str(entry[s]["bands"][b]) for b in BANDS)
+                     + f"; {entry[s]['intervals_excluding_zero']} excl. 0" for s in ("scored", "common")]
+            without = " / ".join(E._median_cell(entry[s]["difference"]) for s in SETS[2:])
+            lines.append(f"| {horizon} | {key} | {cells[0]} | {cells[1]} | {without} |")
+
+    lines += ["", "## History gain on the same windows (median over scored birds of skill at C, and of skill at C − "
+                  "skill at C = 12; n birds; as the 1 h ablation)", "",
+              "| arm | h | C | all | gappy (< 0.9) | full (≥ 0.9) |", "|---|---:|---:|---|---|---|"]
+    for arm, per_horizon in report["ablation"].items():
+        for horizon, per_context in per_horizon.items():
+            for context, per_stratum in per_context.items():
+                cells = [f"{_s(per_stratum[s]['scored']['skill']['median'])}, "
+                         f"Δ {_s(per_stratum[s]['scored']['difference']['median'])} "
+                         f"({per_stratum[s]['scored']['difference']['n']})" for s in E.STRATA]
+                lines.append(f"| {arm} | {horizon} | {context} | " + " | ".join(cells) + " |")
+
+    tie = report["tie_back"]
+    lines += ["", "## Tie-back of the read arms to their sealed reports (here − source report; no pass/fail)", "",
+              "| arm | cells | max \\|diff\\| | median diff |", "|---|---:|---:|---:|"]
+    for group in (tie["arms"], {f"ablation block: {k}": v for k, v in tie["ablation"].items()}):
+        for arm, entry in group.items():
+            top = f"{entry['max_abs_diff']:.2e}" if entry["max_abs_diff"] is not None else "—"
+            median = f"{entry['median_diff']:+.2e}" if entry["median_diff"] is not None else "—"
+            lines.append(f"| {arm} | {entry['n']} | {top} | {median} |")
+    if tie["scored_differs"]:
+        lines += ["", "Scored in one report only: " + ", ".join(tie["scored_differs"]) + "."]
+    path.write_text("\n".join(lines) + "\n")
+
+
+# Extension diagnostic: run records only; no test partition is opened
+def ext_as_trained_bullets(records: dict, gap: dict, exclusions: str) -> str:
+    present = [records[r.run_id] for r in F.EXTENSION if r.run_id in records]
+    devices = ", ".join(f"{d} {n}" for d, n in sorted(Counter(r.get("device") for r in present).items())) or "none"
+    queues = ", ".join(f"{q} {n}" for q, n in sorted(Counter(r.get("pbs_queue") for r in present).items())) or "none"
+    tf32_off = sum(not any((r.get("tf32") or {"missing": True}).values()) for r in present)
+    switched = sum(r.get("switches") == F.SWITCHES for r in present)
+    by_arm = "; ".join(f"{arm} {row['clean']} of {row['planned']}" for arm, row in gap["by_arm"].items())
+    return "\n".join([
+        f"- **Runs.** {gap['n_records']} of {gap['n_planned']} recorded, {gap['n_clean']} clean ({by_arm}).",
+        f"- **Training.** {F.REGISTERED_STEPS:,} updates applied, none withheld, no non-finite steps on every clean "
+        f"run; TF32 off on {tf32_off}; devices {devices}; PBS queues {queues}.",
+        f"- **Switches.** {F.SWITCHES} recorded on {switched} runs.",
+        f"- **Training exclusions.** {exclusions}.",
+        "- **Test-partition reads.** None for the extension before this section: its diagnostic reads run records only.",
+        f"- **Deferred or missing.** {'none' if gap['complete'] else '; '.join(gap['problems'])}.",
+    ])
+
+
+def ext_diagnostic() -> None:
+    """The 90 extension runs' completeness, switches and exclusions, and bullets for sec 10. Opens no test partition."""
+    freeze_committed()
+    with ext_bound():
+        text = RS.committed_freeze()
+    problems = ext_section_problems(text)
+    for heading in EXT_SUBSECTIONS:
+        mine = [p for p in problems if heading in p]
+        print(f"sec 10, {heading:<23}: " + (f"{mine[0]} (not enforced here)" if mine else "filled"))
+    payload = b1h.load_registered()
+    records = read_records()
+    gap = completeness(records, F.EXTENSION)
+    try:
+        result = training_exclusions(payload, records, F.EXTENSION)
+        exclusions = (f"{result['status']} for all {result['runs']} runs "
+                      f"({result['species_with_exclusions']} species with exclusions, as recorded)")
+        exclusions_ok = True
+    except SystemExit as reason:
+        exclusions, exclusions_ok = str(reason), False
+    print(f"completeness     : {gap['n_records']} of {gap['n_planned']} records, {gap['n_clean']} clean")
+    for key, row in gap["by_arm"].items():
+        print(f"  {key:<12} {row['records']:>3} of {row['planned']:>3}, {row['clean']:>3} clean")
+    for problem in gap["problems"][:20]:
+        print(f"  {problem}")
+    print(f"exclusions       : {exclusions}")
+    print("\n--- for the freeze's sec 10, \"Extension as trained\" ---\n")
+    print(ext_as_trained_bullets(records, gap, exclusions))
+    if not (gap["complete"] and exclusions_ok):
+        raise SystemExit("FAIL: the diagnostic found a problem; \"Extension as trained\" must not be filled until it passes")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--predict", action="store_true", help="check the seal, then score this study's runs on test")
@@ -897,19 +1499,32 @@ def main() -> None:
                         help="runs, switches, BbFE's env inputs, exclusions, probe repeats and the sec 7 block; no test")
     parser.add_argument("--c96-fallback", action="store_true",
                         help="from 25-10-2026, if LSTMBbR96 is not complete: score C = 96 against the V100 ablation runs")
+    parser.add_argument("--extension", action="store_true",
+                        help=f"freeze sec {EXT_SECTION}: BbF at C = 24, 48, 72, to {EXT_SEALED.relative_to(REPO)}/")
     args = parser.parse_args()
     if not (args.predict or args.report or args.diagnostic):
         raise SystemExit("pass --diagnostic, --predict, --report, or a combination")
+    if args.extension and args.c96_fallback:
+        raise SystemExit("FAIL: --c96-fallback belongs to the original 120 runs, not the extension")
     flags = fp32()  # before any model is built or loaded
     print(f"tf32             : {flags}", flush=True)
 
     if args.diagnostic:
-        diagnostic(fallback=args.c96_fallback)
+        ext_diagnostic() if args.extension else diagnostic(fallback=args.c96_fallback)
     if args.predict:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"device           : {device}", flush=True)
-        run_predictions(device, overwrite=args.overwrite, fallback=args.c96_fallback, tf32=flags)
-    if args.report:
+        if args.extension:
+            ext_run_predictions(device, overwrite=args.overwrite, tf32=flags)
+        else:
+            run_predictions(device, overwrite=args.overwrite, fallback=args.c96_fallback, tf32=flags)
+    if args.report and args.extension:
+        EXT_SEALED.mkdir(parents=True, exist_ok=True)
+        report = ext_build_report(tf32=flags)
+        EXT_REPORT_JSON.write_text(json.dumps(report, indent=2, default=str) + "\n")
+        ext_write_markdown(report, EXT_REPORT_MD)
+        print(f"\nwrote {EXT_REPORT_JSON}\nwrote {EXT_REPORT_MD}")
+    elif args.report:
         SEALED.mkdir(parents=True, exist_ok=True)
         report = build_report(fallback=args.c96_fallback, tf32=flags)
         REPORT_JSON.write_text(json.dumps(report, indent=2, default=str) + "\n")
