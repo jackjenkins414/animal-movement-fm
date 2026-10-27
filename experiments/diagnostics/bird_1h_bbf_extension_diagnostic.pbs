@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# BbF extension validation diagnostic (exploratory; reported checkpoints; training and validation windows only)
+
+#PBS -P um09
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=32GB
+#PBS -l jobfs=10GB
+#PBS -l walltime=03:00:00
+#PBS -l storage=scratch/um09+gdata/um09
+#PBS -l wd
+#PBS -N bbf_ext_diagnostic
+#PBS -j oe
+#PBS -r y
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export OMP_NUM_THREADS=$PBS_NCPUS
+export UV_CACHE_DIR=/g/data/um09/$USER/.cache/uv
+
+cd /g/data/um09/$USER/animal-movement-fm
+
+if [ -n "${PBS_ARRAY_INDEX:-}" ]; then
+  if [ -n "${FOLD:-}" ]; then
+    echo "FAIL: pass FOLD or an array, not both" >&2
+    exit 1
+  fi
+  FOLD="$PBS_ARRAY_INDEX"
+fi
+if [ -z "${FOLD:-}" ]; then
+  echo "FAIL: submit with -J 0-9 or -v FOLD=K (K in 0-9)" >&2
+  exit 1
+fi
+
+extra_args=()
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  extra_args+=(--dry-run)
+elif [ "${DRY_RUN:-0}" != "0" ]; then
+  echo "FAIL: DRY_RUN must be 1 when enabled; got '$DRY_RUN'" >&2
+  exit 1
+fi
+
+echo "=== nci_account before ==="
+nci_account -P um09 || true
+
+uv run python experiments/diagnostics/bird_1h_bbf_extension_diagnostic.py --fold "$FOLD" "${extra_args[@]}"
+
+echo "=== nci_account after ==="
+nci_account -P um09 || true

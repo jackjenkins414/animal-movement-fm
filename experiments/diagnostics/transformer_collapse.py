@@ -2,7 +2,8 @@
 # around loss, prediction behaviour, masking, context and validation skill, and got GenAI to write this diagnostic script. I later used 
 # GenAI to help with a repair mode that scores the transformer repair probe's runs with the same samples and diagnostics (loss / zero, 
 # input sensitivity, |pred| / |actual|, cos(pred, actual), validation skill, paired logged loss against V0) and GenAI generalised 
-# run_fold to a list of runs and wrote the repair report.
+# run_fold to a list of runs and wrote the repair report. 26-10-2026: for the BbF extension's diagnostic, GenAI let
+# run_fold take a caller's own entries and mode (bird_1h_bbf_extension_diagnostic.py); the default paths are unchanged.
 """
 Transformer collapse diagnosis for the 1 h pooled birds (exploratory; no training; training and validation only).
 
@@ -489,19 +490,26 @@ def _slice(batch: dict, rows) -> dict:
 
 # One fold.
 def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_check: int = N_CHECK,
-             dry_run: bool = False, repair: bool = False) -> dict:
-    """One fold's diagnostics for the diagnosis' runs, or with `repair` for the repair probe's (same samples)."""
-    if repair and fold not in TR.PROBE_FOLDS:
-        raise SystemExit(f"FAIL: the repair probe covers folds {TR.PROBE_FOLDS}, not {fold}")
-    if not repair and fold not in DIAGNOSIS_FOLDS:
-        raise SystemExit(f"FAIL: the diagnosis covers folds {DIAGNOSIS_FOLDS}, not {fold}")
+             dry_run: bool = False, repair: bool = False, entries: list[dict] | None = None,
+             mode: str | None = None) -> dict:
+    """
+    One fold's diagnostics for the diagnosis' runs, or with `repair` for the repair probe's (same samples). Another
+    study passes its own `entries` (as diagnosis_entries builds them, any fold) and names its `mode`.
+    """
+    if entries is None:
+        if repair and fold not in TR.PROBE_FOLDS:
+            raise SystemExit(f"FAIL: the repair probe covers folds {TR.PROBE_FOLDS}, not {fold}")
+        if not repair and fold not in DIAGNOSIS_FOLDS:
+            raise SystemExit(f"FAIL: the diagnosis covers folds {DIAGNOSIS_FOLDS}, not {fold}")
+        entries = repair_entries(fold) if repair else diagnosis_entries(fold)
+    elif not mode or repair:
+        raise SystemExit("FAIL: a caller's own entries need a mode, and are not the repair probe's")
     started = time.time()
     payload = b1h.load_registered()
     probabilities = b1h.fold_probabilities(fold, payload)
     b1h.assert_fold_sources(fold, probabilities)
     pool_names, held_out = sorted(probabilities), list(FOLDS[fold])
     group_of = {s: "pool" for s in pool_names} | {s: "held_out" for s in held_out}
-    entries = repair_entries(fold) if repair else diagnosis_entries(fold)
     contexts = sorted({e["context"] for e in entries})
     loaded = {} if dry_run else {e["label"]: e["load"]() for e in entries}  # fail before building anything
 
@@ -529,8 +537,8 @@ def run_fold(fold: int, *, n_train: int = N_TRAIN, max_val: int = MAX_VAL, n_che
           f"built in {time.time() - started:.0f}s", flush=True)
 
     out = {
-        "mode": "repair" if repair else "diagnosis", "labels": [e["label"] for e in entries],
-        "fold": fold, "seed": SEED, "contexts": contexts, "arms": list(ARMS), "held_out": held_out,
+        "mode": mode or ("repair" if repair else "diagnosis"), "labels": [e["label"] for e in entries],
+        "fold": fold, "seed": None if mode else SEED, "contexts": contexts, "arms": list(ARMS), "held_out": held_out,
         "pool": pool_names, "exploratory": True, "opened_test_partition": False, "dry_run": dry_run,
         "samples": {"n_train": int(len(train_species)), "max_val_per_bird": max_val, "n_val": int(offsets[-1]),
                     "n_check": int(len(check_rows)), "sample_seed": SAMPLE_SEED,
