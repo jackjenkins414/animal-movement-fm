@@ -1,61 +1,52 @@
 # animal-movement-fm
-Benchmarking deep learning architectures for animal movement prediction across species and ecological domains.
 
-ANU honours thesis in machine learning (2026), Jack Jenkins.
+Code for our ANU honours thesis in machine learning (2026), investigating animal movement forecasting within and across species.
 
-## What this is
+The project compares persistence, averaging, ARIMA, XGBoost, LSTM and Transformer models using a common forecasting and evaluation framework. Our central question is whether models trained across species can forecast a species excluded from training, using its recent observed trajectory. Separate adaptation experiments compare fine-tuning with training from scratch on the same target individuals.
 
-A benchmarking suite for animal movement prediction that scales models from trivial baselines (persistence, averaging) through classical statistics (ARIMA), gradient boosting (XGBoost), and recurrent networks (LSTM) up to transformer based foundation models. Models are trained on a large multi-species GPS tracking corpus and evaluated for **zero-shot transfer to species never seen in training**.
+## For readers and markers
 
-We currently run a two phase preregistration (Hofman et al., 2023). We first document the arms, metrics, success bands and predictions, and ensure those are committed before any model is trained; held-out test partitions are opened once, by a sealed evaluator that refuses to run until the matching freeze is committed to git. Exploratory work lives in a separate tier (Tier E) that is validation only and may never be reported as a registered result.
+Read this repository alongside the submitted thesis, which presents the findings and their limitations. The main entry points are:
 
-**Tiers.** Tier 1: the baseline ladder on synthetic and single species data. Tier 2: three source species, three held-out species, one per domain. Tier 3: source-pool scaling, the same three held-out species, nine sources. Tier 4: all remaining eligible species, exploratory.
+| Material | Location |
+| --- | --- |
+| Data preparation, movement representations and synthetic processes | [src/animal_movement_fm/data/](src/animal_movement_fm/data/) |
+| Model implementations and training loops | [src/animal_movement_fm/models/](src/animal_movement_fm/models/), [src/animal_movement_fm/train/](src/animal_movement_fm/train/) |
+| Evaluation metrics and supporting analyses | [src/animal_movement_fm/eval/](src/animal_movement_fm/eval/), [src/animal_movement_fm/analysis/](src/animal_movement_fm/analysis/) |
+| Synthetic and single species development experiments | [experiments/baselines/](experiments/baselines/) |
+| Multi-species training and evaluation drivers | [experiments/training/](experiments/training/), [experiments/reporting/](experiments/reporting/) |
+| Cadence, movement structure, environmental inputs and model diagnostics | [experiments/cadence/](experiments/cadence/), [experiments/eda/](experiments/eda/), [experiments/data/](experiments/data/), [experiments/diagnostics/](experiments/diagnostics/) |
+| Study protocols, amendments and evaluation freezes | [preregistration/](preregistration/) |
+| Recorded source pools, sampling weights and bird rotation folds | [registered/](registered/) |
+| Individual split manifests | [splits/](splits/) |
+| Implementation checks | [tests/](tests/) |
 
-## Repository layout
+Our [methods log](methods.md) records decisions during development. Earlier entries describe the study at that time and may be superseded by later entries or the final thesis.
 
-```
-animal-movement-fm/
-├── src/animal_movement_fm/    # library code (importable)
-│   ├── data/                  # loaders, splits, segment building, resampling, synthetic
-│   ├── features/              # feature engineering (time of day, ...)
-│   ├── models/                # one file per model family
-│   ├── eval/                  # metrics + evaluation harness
-│   ├── analysis/              # analysis helpers (randomness, ...)
-│   └── train/                 # training loops
-├── configs/                   # YAML experiment configs
-├── experiments/               # runnable scripts, grouped by purpose
-│   ├── eda/                   # exploratory + regime/randomness analysis
-│   ├── baselines/             # ladder runners, head to heads, ablations
-│   ├── cadence/               # cadence sweeps + inter-fix analysis
-│   ├── data/                  # ERA5 covariate extraction (NCI rt52) + PBS
-│   ├── diagnostics/           # transformer collapse diagnosis and repair probe (validation only)
-│   ├── training/              # Gadi training entry points + PBS
-│   ├── smoke/                 # GPU smoke tests
-│   └── reporting/             # prediction dumps + writeup figures
-├── notebooks/                 # exploratory analysis only — not for results
-├── tests/                     # pytest unit tests
-├── registered/                # write once artefacts: selection, sampling weights, boundaries
-├── splits/                    # frozen per species split manifests (seed 42)
-├── results/                   # output tables, plots (gitignored)
-├── preregistration/           # the study record
-│   ├── preregistration_tier2*.md  # Tier 2 registration, tuning amendments, pre test freeze
-│   ├── preregistration_tier3*.md  # Tier 3 registration and pre test freeze
-│   ├── preregistration_birds.md   # bird only study
-│   ├── tier4_exploratory_freeze.md, birds_rotation_exploratory_freeze.md  # exploratory freezes
-│   ├── pooling_exploratory_freeze.md     # balanced sampling x MoE on the 26 source pool
-│   ├── birds_1h_exploratory_freeze.md    # 1 h bird study + context ablation
-│   ├── birds_1h_env_exploratory_freeze.md  # ERA5 covariate study
-│   ├── birds_1h_bbf_exploratory_freeze.md  # repaired transformer (BbF)
-│   ├── tierE_exploratory_ablations.md  # exploratory arms, each registered before it runs
-│   └── tier2_species_roles.md
-├── methods.md                 # decisions log
-├── pyproject.toml             # dependencies + tool config
-└── README.md
-```
+### Names used in the code
 
-## Setup
+- **Tier 2** and **Tier 3** refer to the original three and nine source species comparisons.
+- **Tier 4** refers to the exploratory 26 source species study.
+- The **bird study** uses 22 source species; the **bird rotation** holds out each of 30 bird species in turn.
+- **BbF** and related names identify repaired Transformer arms. The matching protocols document their settings.
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Here, *registered* refers to methods and evaluation criteria documented in internal repository protocols. The hourly, expanded pool and repaired model studies are exploratory. Several extensions reuse previously evaluated populations, so these are not independent replications.
+
+## Status
+
+The experiments reported in the thesis are complete. They support useful forecasting for many excluded bird species with pooled LSTM, XGBoost and repaired Transformer models, while larger mixed source pools and the original fine-tuning procedure gave no consistent benefit. Longer histories helped six hour forecasts in the hourly studies; the tested ERA5 inputs gave small median changes. The project remains ongoing, and we have planned further development beyond the thesis.
+
+## Data and reproducibility
+
+This repository contains the code, protocols and recorded study artefacts. Tracking datasets, processed trajectories, trained weights, prediction files and generated result tables are not included. Data access remains subject to the original providers' conditions.
+
+Our real data experiments require those external inputs and the corresponding study settings. Many training drivers and batch scripts target NCI's Gadi computing system and contain environment specific paths. Installing the package alone does not reproduce the thesis results. Reporting scripts also require the generated evaluation outputs.
+
+However, our synthetic movement generators and their benchmark driver are available in [src/animal_movement_fm/data/](src/animal_movement_fm/data/) and [experiments/baselines/run_baselines_synthetic.py](experiments/baselines/run_baselines_synthetic.py); they do not require the original tracking datasets.
+
+## Local setup
+
+Requires Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/jackjenkins414/animal-movement-fm.git
@@ -63,89 +54,12 @@ cd animal-movement-fm
 uv sync --extra dev
 ```
 
-This creates a `.venv/` and installs all dependencies including dev tools (pytest, ruff, jupyter).
-
-## Common commands
+To run the implementation checks from the repository directory:
 
 ```bash
-# Run tests
-uv run pytest
-
-# Lint + format
-uv run ruff check .
-uv run ruff format .
-
-# Run an experiment
-uv run python experiments/baselines/run_baselines_real.py
-
-# Open jupyter
-uv run jupyter lab
+uv run pytest -q
 ```
 
-## Status
+## Permissions
 
-**Tier 1** complete: the full ladder (persistence, averaging, ARIMA, XGBoost, LSTM, transformer) on real 6 hour white stork
-data, with 6 hours resolved as the near-optimal cadence.
-
-**Tier 2** sealed and reported (26-08-2026): **WEAK/NULL**. The foundation model does not beat persistence zero-shot on
-any of the three held-out species, the same trunk with the FM package stripped matches or beats it, and a single species
-specialist reaches +0.20 skill on northern elephant seal. The failure is concentrated in near stationary windows.
-
-**Tier E** (exploratory, validation only) locates the failure inside the architecture: within a single species, with
-ample data, the full FM package never beats a plain transformer trunk, and the context conditioning path is negative on
-every species tested. The masked reconstruction objective is the one component that helps, and only when learned across
-species.
-
-**Tier 3** sealed and reported (23-09-2026): **WEAK/NULL**. Changing one variable — three source species to nine, with
-configuration, budget, representation, metrics, held-out species and protocol fixed — moves zero-shot travel p90 skill by
-at most +0.018 against Tier 2, inside the ±0.05 noise scale. A three source same domain pool beats the nine source pool
-on all three held-out species by point estimate, but the gap is resolved only on northern elephant seal (+0.11), where a
-single same domain source reaches +0.18 against the nine-source +0.004 — and that source is the congeneric southern
-elephant seal, so domain and genus are confounded. Fine-tuning the nine source model loses to a specialist trained from
-scratch on the identical 1% and 10% subsets on 17 of 18 draws. In the descriptive baseline ladder the single-species LSTM
-is the strongest rung on all three species, and single-species XGBoost (which carries no validation privilege) beats
-every pooled model on two of three.
-
-**26 source pool** sealed and reported (27-09-2026), exploratory and never a tiered result. Pooling every eligible
-source moves zero-shot travel p90 skill by at most +0.004 against the nine-source pool, and the FM package sits within
-0.007 of the plain trunk on all three held-out species, inside the $\pm$ 0.05 noise scale. On northern elephant seal, +0.16
-for a seven species marine pool against +0.009 for all 26 sources; removing southern elephant seal costs −0.047 with
-the package and −0.011 without, both inside noise, so the marine gain reads as domain rather than genus. White stork's
-share of the training loss fell from 64% to 18% with no change in skill, so the stork imbalance was not the cause.
-Fine-tuning still loses to a from-scratch specialist on 13 of 18 draws, and the single species LSTM is still the
-strongest rung on all three species.
-
-**Bird only study** sealed and reported (28-09-2026), preregistered: pretrained on 22 flying birds, tested on the
-lesser black-backed gull, the greater white-fronted goose and the European turtle dove. Zero-shot, +0.067 (FM) and
-+0.128 (plain trunk) on the dove are the only transformer results that clear persistence by more than 0.05 from that
-pool; adding five congener pool birds lifts the gull to +0.081. On the dove, the pooled LSTM and XGBoost are level with
-their own specialists (+0.011, +0.026); it has the fewest training birds (88). This is the first case in the project
-where models that never saw a species predict it as well as models trained on it. Earlier zero-shot transfer (NES)
-stayed below the specialists. It comes from pooled LSTM and XGBoost rather than the foundation model, and from one
-species, but it is first evidence that zero-shot prediction of an unseen species at specialist level is possible. On
-the goose every transformer arm is within $\pm$ 0.03 of persistence. The package costs on every bird by point estimate
-(−0.025, −0.024, −0.060), beyond noise only on the dove. Three of the five registered predictions held on at least
-one bird.
-
-**Rotation, pooling, randomness and cadence** Holding out each of the 30 birds once, pooled LSTM and XGBoost that never saw the bird are within $\pm$ 0.05 of its own specialist on 20 of 30 and beat persistence on 21 and 23 of 30; the transformers do not (Bb 11, the FM package 5). Domain balanced sampling lifts northern elephant seal by +0.07 (3 of 5 seeds); MoE routing does not help and collapses onto about two experts. Birds that keep a heading are easier to predict (rank correlation about +0.3 across 30 birds). Every bird fixes at least hourly, so the 6 h grid was discarding most of the data.
-
-**1 h bird study** sealed (exploratory; 30 birds, 10 leave out folds, 12 h of context, forecasts 1, 6 and 24 h ahead).
-Skill sits at 6 h: specialists +0.12 (LSTM) and +0.11 (XGBoost), pooled LSTM and XGBoost +0.08, the pooled transformer
-+0.03 (median over 27 birds). At 1 h and 24 h every arm is within $\pm$ 0.02 of persistence. **Context ablation** (12 h to 4
-days): longer history lifts pooled LSTM to +0.17 at 6 h (48 h of context) and XGBoost by about +0.04, while the
-transformer collapses to persistence (skill 0.000 at 48 h and beyond).
-
-**ERA5 covariate study** sealed (exploratory). Hourly ERA5 weather at every context fix (wind, tail and crosswind,
-temperature, boundary layer height, rain, pressure, land sea mask, elevation; coverage 1.0 over 25.9 M fixes) leaves
-skill unchanged for the transformer, LSTM and XGBoost at every horizon (median effects −0.008 to +0.000). An H200
-rerun of the no weather arms differs from the V100 originals by at most 0.002.
-
-**Transformer collapse and repair.** A validation only diagnosis found the pooled transformer had become
-input insensitive: every bug check passed, and the failure arose in training, with the default Post-LN encoder settling on a
-near constant output.
-A repair probe (fold 6, validation only) found Pre-LN layers revive it, with removing the $\times \sqrt{d} input scaling and
-log compressing step inputs adding more at long context. The repaired transformer (**BbF**) is preregistered and
-trained on all folds and seeds at 12 h and 4 days of context, with and without ERA5; its sealed evaluation is running atm. 
-
-**Next:** write up, including the BbF sealed results. A probabilistic head, a cadence invariant model and finer or
-forward looking weather (along the future path, at flight altitude) are future work.
+See [LICENSE](LICENSE) for the permissions and restrictions that apply to this repository.
